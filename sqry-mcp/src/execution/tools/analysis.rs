@@ -66,7 +66,7 @@ pub fn ambiguous_symbol_envelope_json(err: &AmbiguousSymbolError) -> String {
     })
 }
 
-use crate::engine::{Engine, canonicalize_in_workspace, engine_for_workspace};
+use crate::engine::{Engine, canonicalize_in_workspace_enforced, engine_for_workspace};
 use crate::tools::{CrossLanguageEdgesArgs, DependencyImpactArgs, SemanticDiffArgs};
 
 use crate::execution::git_worktree;
@@ -79,13 +79,11 @@ use crate::execution::types::{
 };
 use crate::execution::utils::{duration_to_ms, paginate};
 
-fn resolve_workspace_path(path: &str) -> Option<std::path::PathBuf> {
+fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<std::path::PathBuf>> {
     // Issue #394: resolve a subdirectory `path` to its owning workspace instead
     // of failing as if it were a workspace root. Subtree scoping for list/scan
     // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector(path)
-        .ok()
-        .flatten()
+    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
 }
 
 /// Resolve a symbol to a single `NodeId` using strict resolution.
@@ -361,10 +359,10 @@ pub fn execute_cross_language_edges(
     args: &CrossLanguageEdgesArgs,
 ) -> Result<ToolExecution<CrossLanguageEdgesData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _base = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _base = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph for cross-language edge detection
     let graph = engine.ensure_graph()?;
@@ -728,10 +726,10 @@ pub fn execute_dependency_impact(
 ) -> Result<ToolExecution<DependencyImpactData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     tracing::debug!(
         symbol = %args.symbol,
@@ -779,7 +777,7 @@ pub fn execute_dependency_impact(
 pub fn execute_semantic_diff(args: &SemanticDiffArgs) -> Result<ToolExecution<SemanticDiffData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
@@ -1068,10 +1066,10 @@ pub fn execute_find_duplicates(
     args: &FindDuplicatesArgs,
 ) -> Result<ToolExecution<FindDuplicatesData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph
     let graph = engine.ensure_graph()?;
@@ -1268,10 +1266,10 @@ fn convert_cycles_to_output(
 pub fn execute_find_cycles(args: &FindCyclesArgs) -> Result<ToolExecution<FindCyclesData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph
     let graph = engine.ensure_graph()?;
@@ -1379,10 +1377,10 @@ fn mcp_scope_to_core_superset(scope: UnusedScope) -> sqry_core::query::UnusedSco
 pub fn execute_find_unused(args: &FindUnusedArgs) -> Result<ToolExecution<FindUnusedData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph
     let graph = engine.ensure_graph()?;
@@ -1483,10 +1481,10 @@ pub fn execute_is_node_in_cycle(
 ) -> Result<ToolExecution<NodeInCycleData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph
     let graph = engine.ensure_graph()?;
@@ -1509,10 +1507,10 @@ pub fn execute_pattern_search(
     args: &PatternSearchArgs,
 ) -> Result<ToolExecution<PatternSearchData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph
     let graph = engine.ensure_graph()?;
@@ -1709,10 +1707,10 @@ pub fn execute_direct_callers(
 ) -> Result<ToolExecution<DirectCallersData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph
     let graph = engine.ensure_graph()?;
@@ -1741,10 +1739,10 @@ pub fn execute_direct_callees(
 ) -> Result<ToolExecution<DirectCalleesData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph
     let graph = engine.ensure_graph()?;
@@ -2180,7 +2178,8 @@ pub(crate) mod inner {
         // Issue #394: scope to the requested subtree relative to the resolved
         // workspace root so `find_unused(path="<subdir>")` reports only that
         // subtree. `None` => whole workspace (unchanged).
-        let subtree = crate::execution::workspace_scope::subtree_within(&args.path, workspace_root);
+        let subtree =
+            crate::execution::workspace_scope::subtree_within(&args.path, workspace_root)?;
 
         let mut unused_symbols: Vec<UnusedSymbolData> = Vec::new();
         for &node_id in &unused_ids {
@@ -2719,7 +2718,7 @@ mod tests {
 
     #[test]
     fn test_resolve_workspace_path_dot_returns_none() {
-        assert!(resolve_workspace_path(".").is_none());
+        assert!(resolve_workspace_path(".").unwrap().is_none());
     }
 
     #[test]
@@ -2727,7 +2726,11 @@ mod tests {
         // Issue #394: the shim delegates to the shared scope resolver, so a
         // nonexistent path falls back to ambient discovery (`None`) instead of
         // echoing `Some(path)` that would later fail engine resolution.
-        assert!(resolve_workspace_path("/some/path/that/does/not/exist").is_none());
+        assert!(
+            resolve_workspace_path("/some/path/that/does/not/exist")
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ========================================================================

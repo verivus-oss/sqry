@@ -354,7 +354,20 @@ fn run() -> Result<()> {
     let matches = cmd
         .try_get_matches_from(expanded_args)
         .unwrap_or_else(|e| e.exit());
-    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    let mut cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+
+    // `--exact` historically only bound at the top level (`sqry --exact PAT`),
+    // so `sqry search PAT --exact` was rejected even though `sqry search --help`
+    // advertises it (#511). The flag now also lives on the `search` subcommand;
+    // fold its value into `cli.exact` (the field the search path actually reads)
+    // so both spellings drive the identical exact-match path. The fold only ever
+    // sets the flag on, never clears it, so the top-level shorthand is untouched.
+    if matches!(
+        cli.command.as_deref(),
+        Some(Command::Search { exact: true, .. })
+    ) {
+        cli.exact = true;
+    }
 
     // Validate CLI argument constraints (e.g., --headers requires --csv or --tsv)
     if let Some(error) = cli.validate() {
@@ -391,6 +404,10 @@ fn run() -> Result<()> {
         Some(Command::Search {
             pattern,
             path,
+            // `exact` is folded into `cli.exact` right after parsing (see the
+            // #511 note above), which is what the search path reads, so the
+            // per-arm binding is intentionally ignored here.
+            exact: _,
             save_as,
             global,
             description,
@@ -796,19 +813,27 @@ fn run() -> Result<()> {
             show_details,
             show_labels,
             output,
+            symbol,
+            file,
+            max_depth,
+            max_results,
         }) => {
-            commands::run_export(
-                &cli,
-                path.as_deref(),
+            commands::run_export(commands::ExportArgs {
+                cli: &cli,
+                path: path.as_deref(),
                 format,
                 direction,
-                filter_lang.as_deref(),
-                filter_edge.as_deref(),
-                *highlight_cross,
-                *show_details,
-                *show_labels,
-                output.as_deref(),
-            )
+                filter_lang: filter_lang.as_deref(),
+                filter_edge: filter_edge.as_deref(),
+                highlight_cross: *highlight_cross,
+                show_details: *show_details,
+                show_labels: *show_labels,
+                output_file: output.as_deref(),
+                symbol: symbol.as_deref(),
+                file: file.as_deref(),
+                max_depth: *max_depth,
+                max_results: *max_results,
+            })
             .context("Export command failed")?;
         }
 
@@ -817,6 +842,8 @@ fn run() -> Result<()> {
             file,
             symbol,
             path,
+            in_file,
+            line,
             no_context,
             no_relations,
         }) => {
@@ -825,6 +852,8 @@ fn run() -> Result<()> {
                 file,
                 symbol,
                 path.as_deref(),
+                in_file.as_deref(),
+                *line,
                 !no_context,
                 !no_relations,
             )
@@ -890,6 +919,7 @@ fn run() -> Result<()> {
             symbol,
             path,
             in_file,
+            line,
             depth,
             limit,
             direct_only,
@@ -900,6 +930,7 @@ fn run() -> Result<()> {
                 symbol,
                 path.as_deref(),
                 in_file.as_deref(),
+                *line,
                 *depth,
                 *limit,
                 !direct_only,
@@ -978,6 +1009,11 @@ fn run() -> Result<()> {
         // Daemon lifecycle management
         Some(Command::Daemon { action }) => {
             commands::daemon::run(&cli, action).context("Daemon command failed")?;
+        }
+
+        // Installation diagnostics (issue #308)
+        Some(Command::Doctor { what }) => {
+            commands::doctor::run(what).context("Doctor command failed")?;
         }
 
         // No subcommand - use pattern shorthand
@@ -1440,14 +1476,22 @@ fn handle_no_command(cli: &Cli, history_argv: &[String]) -> Result<()> {
 ///   `sqry @my-funcs` -> `sqry query "kind:function" .`
 ///   `sqry @my-funcs src/` -> `sqry query "kind:function" src/`
 ///   `sqry --json @my-funcs` -> `sqry --json query "kind:function" .`
-/// Global flags that ALWAYS take a value (the next argument).
-/// This MUST include ALL global flags defined in args/mod.rs that require a value,
-/// otherwise @alias expansion will fail when those flags precede the alias.
+/// Flag tokens that ALWAYS consume the next argument as their value, for every
+/// flag that can precede an `@alias` run: the top-level `Cli` flags plus the
+/// `query` / `search` subcommand flags (including the flattened
+/// `RevisionQueryArgs` / `PluginSelectionArgs`). If any is omitted, `@alias`
+/// expansion misreads the flag's value as a positional and bypasses the alias
+/// (verivus-oss/sqry#514). The unit test
+/// `flags_with_values_covers_query_and_search_scopes` derives the required set
+/// from clap's own metadata and fails if this list drifts.
 const FLAGS_WITH_VALUES: &[&str] = &[
     // Output control
     "--columns",
     "--limit",
     "--format",
+    "--sort",
+    "--theme",
+    "--pager-cmd",
     // Match behaviour / filtering
     "--kind",
     "-k",
@@ -1458,6 +1502,7 @@ const FLAGS_WITH_VALUES: &[&str] = &[
     "--fuzzy-algorithm",
     "--fuzzy-threshold",
     "--fuzzy-max-candidates",
+    "--fuzzy-field-distance",
     // Index validation (P1-14)
     "--validate",
     "--threshold-dangling-refs",
@@ -1467,7 +1512,25 @@ const FLAGS_WITH_VALUES: &[&str] = &[
     "--context",
     "-C",
     "--max-text-results",
-    // Configuration
+    // Query / search input
+    "--var",
+    "--cfg-filter",
+    "--timeout",
+    // Alias persistence
+    "--save-as",
+    "--description",
+    // Plugin selection (query/search flatten `PluginSelectionArgs`)
+    "--enable-plugin",
+    "--enable-language",
+    "--disable-plugin",
+    "--disable-language",
+    // Revision selector (query/search flatten `RevisionQueryArgs`)
+    "--revision-id",
+    "--revision-ref",
+    "--revision-commit",
+    "--revision-tree",
+    // Workspace / configuration
+    "--workspace",
     "--config-dir",
     "--path",
     "--type",
@@ -1478,17 +1541,65 @@ const FLAGS_WITH_VALUES: &[&str] = &[
 /// the next arg looks like a value (numeric) or something else (@alias, -flag).
 const FLAGS_WITH_OPTIONAL_VALUES: &[&str] = &["--preview", "-p"];
 
+#[derive(Debug)]
 struct AliasScan {
     alias_index: Option<usize>,
+    /// The single optional positional (search path) drawn from the tokens that
+    /// follow the `@alias`, wherever it sat relative to the trailing flags. See
+    /// [`partition_alias_tail`] for the order-independent partition that
+    /// produces this and [`post_alias_flags`](AliasScan::post_alias_flags).
     remaining_path: Option<String>,
+    /// Every flag token that follows the `@alias` (each already carrying any
+    /// value it consumes), with the one positional path lifted out into
+    /// [`remaining_path`](AliasScan::remaining_path). Kept as a partitioned set
+    /// rather than a raw tail slice so the path and the trailing flags can
+    /// never diverge from one peek-based index again (verivus-oss/sqry#528
+    /// rounds 1-5: every prior fix patched one placement and left the model
+    /// intact, so a new flag/path arrangement kept slipping through).
+    post_alias_flags: Vec<String>,
+    /// Index of a leading `query` / `search` subcommand word that precedes an
+    /// `@alias` (i.e. `sqry query @name`, verivus-oss/sqry#514). The word
+    /// is dropped during expansion so it is not mistaken for a global flag;
+    /// the alias's own stored command drives the run.
+    subcommand_prefix: Option<usize>,
 }
+
+impl AliasScan {
+    /// The "not an alias run" result: the caller falls back to the original,
+    /// unexpanded argv.
+    fn none() -> Self {
+        AliasScan {
+            alias_index: None,
+            remaining_path: None,
+            post_alias_flags: Vec::new(),
+            subcommand_prefix: None,
+        }
+    }
+}
+
+/// The flag / path partition of the argv tokens that follow an `@alias`.
+struct AliasTail {
+    /// Flag tokens (each with any value they consume) in original order.
+    flags: Vec<String>,
+    /// The single optional positional (search path), wherever it appeared.
+    path: Option<String>,
+}
+
+/// Subcommand tokens after which a bare `@alias` is still recognized as an
+/// alias run rather than a subcommand argument.
+///
+/// `sqry query @name` / `sqry search @name` used to slip through as a literal
+/// query/pattern (the planner then choked on `@`, verivus-oss/sqry#514).
+/// Only the two alias-carrying commands are eligible; every other subcommand
+/// treats a following `@token` as its own positional.
+const ALIAS_PREFIX_SUBCOMMANDS: &[&str] = &["query", "search"];
 
 fn expand_alias_args() -> Result<Vec<String>> {
     use persistence::{AliasManager, PersistenceConfig, open_shared_index};
     use std::path::Path;
 
     let args: Vec<String> = std::env::args().collect();
-    let scan = scan_alias_args(&args);
+    let scan = scan_alias_args(&args)?;
 
     let Some(idx) = scan.alias_index else {
         // No alias found, return original args
@@ -1513,17 +1624,298 @@ fn expand_alias_args() -> Result<Vec<String>> {
         &args,
         idx,
         scan.remaining_path.as_deref(),
+        &scan.post_alias_flags,
+        scan.subcommand_prefix,
         &alias_with_scope,
     ))
 }
 
-fn scan_alias_args(args: &[String]) -> AliasScan {
+/// Whether `token` collides with a top-level subcommand name or alias.
+///
+/// A `search` alias expands to the top-level shorthand (no `search` word) so
+/// trailing flags route to the shorthand parse. If the stored pattern happens
+/// to equal a subcommand token, clap would misparse it as that subcommand, so
+/// the caller keeps the explicit `search` form instead. Computed from clap's
+/// own command metadata to stay in sync with the real subcommand set.
+fn collides_with_subcommand(token: &str) -> bool {
+    use clap::CommandFactory as _;
+
+    args::Cli::command()
+        .get_subcommands()
+        .any(|sub| sub.get_name() == token || sub.get_all_aliases().any(|alias| alias == token))
+}
+
+/// Whether `flag` (a bare flag token such as `--cfg-filter`, `--save-as=x`, or
+/// `-k`) is defined directly on the top-level `Cli` parser, i.e. the shorthand
+/// search surface a bare `sqry <pattern>` invocation uses.
+///
+/// Computed from clap's own metadata (long name, visible aliases, short name)
+/// so newly added flags never silently drift out of sync, mirroring
+/// `collides_with_subcommand` above.
+fn flag_defined_on_top_level_cli(flag: &str) -> bool {
+    use clap::CommandFactory as _;
+
+    let name = flag.split('=').next().unwrap_or(flag);
+    let bare = name.trim_start_matches('-');
+
+    args::Cli::command().get_arguments().any(|arg| {
+        arg.get_long().is_some_and(|long| long == bare)
+            || arg
+                .get_visible_aliases()
+                .is_some_and(|aliases| aliases.contains(&bare))
+            || arg
+                .get_short()
+                .is_some_and(|short| short.to_string() == bare)
+    })
+}
+
+/// Whether the next argv token is consumed as the value of the last short in a
+/// bare short-flag cluster.
+enum ClusterTail {
+    /// No value-taking short, or the value is glued inside the same token
+    /// (`-kfoo` == `-k foo`): the following token is a fresh flag or the path.
+    None,
+    /// The last short takes a mandatory value from the next token (`-jk foo`).
+    ConsumesNext,
+    /// The last short takes an optional value from the next token (`-p`): the
+    /// caller decides via a numeric peek.
+    OptionalNext,
+}
+
+/// Split a bare short-flag token into the individual short flags it bundles.
+///
+/// clap lets short flags cluster (`-jc` == `-j -c`) and lets a value attach to
+/// the first value-taking short either glued (`-kfoo` == `-k foo`) or as the
+/// next token (`-k foo`). Returns `None` for anything that is not a bare short
+/// cluster (a `--long` flag, a `-x=value` form, or a non-flag token), so the
+/// caller treats those tokens whole. On a match, the returned `Vec` holds each
+/// clustered short as its own `-x` token for classification, and `ClusterTail`
+/// says whether the following argv token is this cluster's value.
+///
+/// We stop expanding at the first value-taking short: everything after it in
+/// the same token is that flag's glued value, not another flag. This keeps a
+/// bundled cluster from being misjudged (verivus-oss/sqry#528 round 6:
+/// `flag_defined_on_top_level_cli` only ever matched single-char shorts, so a
+/// whole `-jc` cluster looked like an unknown, subcommand-scoped flag and
+/// wrongly forced the explicit `search` word onto an otherwise-shorthand run).
+fn split_short_cluster(token: &str) -> Option<(Vec<String>, ClusterTail)> {
+    if !token.starts_with('-') || token.starts_with("--") || token.contains('=') || token.len() < 2
+    {
+        return None;
+    }
+
+    let body: Vec<char> = token[1..].chars().collect();
+    if body.is_empty() {
+        return None;
+    }
+
+    let mut shorts = Vec::new();
+    let mut tail = ClusterTail::None;
+    for (idx, ch) in body.iter().enumerate() {
+        let short = format!("-{ch}");
+        let mandatory_value = FLAGS_WITH_VALUES.contains(&short.as_str());
+        let optional_value = FLAGS_WITH_OPTIONAL_VALUES.contains(&short.as_str());
+        shorts.push(short);
+        if mandatory_value || optional_value {
+            let has_glued_value = idx + 1 < body.len();
+            tail = if has_glued_value {
+                ClusterTail::None
+            } else if mandatory_value {
+                ClusterTail::ConsumesNext
+            } else {
+                ClusterTail::OptionalNext
+            };
+            break;
+        }
+    }
+
+    Some((shorts, tail))
+}
+
+/// Expand a flag token into the individual flags to classify: a `--long` flag
+/// is itself, a bare short cluster splits into its members (`-jc` -> `-j`,
+/// `-c`), so each is judged on its own scope.
+fn flags_to_classify(arg: &str) -> Vec<String> {
+    match split_short_cluster(arg) {
+        Some((shorts, _)) => shorts,
+        None => vec![arg.to_string()],
+    }
+}
+
+/// Whether any flag token in `tokens` is scoped to the `search` subcommand
+/// only, i.e. absent from the top-level `Cli` shorthand surface (e.g.
+/// `--cfg-filter`, `--save-as`, `--global`, `--description`,
+/// `--include-generated`, `--macro-boundaries`, `--revision-*`).
+///
+/// `tokens` may be flags that precede the alias (`sqry search --cfg-filter
+/// test @qfuncs`) or flags that trail it, after the alias/path
+/// (`sqry search @qfuncs --cfg-filter test`, verivus-oss/sqry#528 round 5):
+/// the same "is this flag even legal on the shorthand surface" question
+/// applies at either position, so both call sites route through this one
+/// predicate rather than each growing its own copy that can drift out of
+/// sync with the other.
+///
+/// A bundled short cluster is subcommand-scoped iff ANY of its members is
+/// (verivus-oss/sqry#528 round 6): the cluster is split into its individual
+/// shorts and each is judged separately, so `-ic` (both `-i` / `-c` top-level)
+/// stays on the shorthand surface while a cluster carrying any `search`-only
+/// short would not.
+///
+/// When true, an alias must keep its explicit subcommand word
+/// (verivus-oss/sqry#528 round 4: `sqry search --cfg-filter test @qfuncs`
+/// used to drop the `search` word and expand to the top-level shorthand form,
+/// which has no `--cfg-filter` flag, so clap rejected it; round 5: the same
+/// failure reappeared for `sqry search @qfuncs --cfg-filter test`, a trailing
+/// flag the round-4 fix did not inspect) so every flag parses under the
+/// scope that actually defines it, regardless of which side of the alias it
+/// sits on.
+fn any_flag_requires_subcommand_scope(tokens: &[String]) -> bool {
+    tokens
+        .iter()
+        .filter(|arg| arg.starts_with('-'))
+        .flat_map(|arg| flags_to_classify(arg))
+        .any(|flag| !flag_defined_on_top_level_cli(&flag))
+}
+
+/// Scan forward from `start` past any global flags (and the values they
+/// consume) after a `query` / `search` prefix word to find an `@alias` token.
+///
+/// Returns the index of the first `@alias` reached, or `None` when the first
+/// non-flag token is a real positional (a genuine query / pattern, not an
+/// alias). A flag value is never mistaken for the alias: value-taking flags
+/// consume their next argument via [`should_skip_next_arg`], so
+/// `sqry query --lang @weird` treats `@weird` as the value of `--lang`, not an
+/// alias (verivus-oss/sqry#514).
+fn find_alias_after_prefix(args: &[String], start: usize) -> Option<usize> {
+    let mut j = start;
+    while let Some(token) = args.get(j) {
+        // clap end-of-options boundary: a bare `--` after the prefix word ends
+        // alias detection. `sqry search -- @gpicks` / `sqry query -- @gpicks`
+        // must treat the following `@token` as a literal query/pattern, never an
+        // alias (verivus-oss/sqry#528 round 8: this used to skip the `--` and
+        // resolve `@gpicks` as an alias, which then failed "Unknown alias" for a
+        // literal string that the direct form searches for verbatim).
+        if token == "--" {
+            return None;
+        }
+        if token.starts_with('@') {
+            return Some(j);
+        }
+        if token.starts_with('-') {
+            j += if should_skip_next_arg(args, j, token) {
+                2
+            } else {
+                1
+            };
+            continue;
+        }
+        // A non-flag, non-`@` token is a real positional, not an alias run.
+        return None;
+    }
+    None
+}
+
+/// Partition the argv tokens that follow an `@alias` into flag tokens (each
+/// with any value it consumes) and at most one positional, the search path.
+///
+/// This replaces the pre-round-6 "the path is the single token right after the
+/// alias" peek that only ever inspected `args[alias + 1]`. That peek could not
+/// see a path that sat AFTER a trailing flag (`@qfuncs --cfg-filter test .`),
+/// so it resolved `path = None`, synthesized a default `"."`, AND swept the
+/// real `.` into the trailing flags, handing clap two positionals
+/// (verivus-oss/sqry#528 rounds 1-5). The partition is order-independent:
+/// the path may appear before, after, or among the trailing flags, and a
+/// value-taking flag consumes its value (space- or `=`-joined, glued short, or
+/// bundled short) so that value is never mistaken for the path.
+///
+/// The alias contract admits a single optional path (the stored pattern
+/// already supplies the query), so a second positional is a clear user error
+/// rather than a silently dropped argument.
+///
+/// A bare `--` token ends flag classification, mirroring clap's own
+/// end-of-options escape: every token after it is positional, even one that
+/// looks like a flag (`-5`, `--foo`). Before this, `sqry @picks -- -5`
+/// swept the escaped `-5` into `flags` and clap rejected it at the top-level
+/// parse ("unexpected argument '-5' found"), while the direct
+/// `sqry search "<pattern>" -- -5` form parsed fine (clap's own `--` handling
+/// took over) and only failed later at the path-existence check. The `--`
+/// marker itself is consumed here, not carried through as a flag token; see
+/// `build_expanded_args` for the matching re-emit half that puts a fresh `--`
+/// back in front of a path that needs it (verivus-oss/sqry#528 round 7).
+///
+/// A value-taking flag immediately followed by `--` does NOT swallow the `--`
+/// as its value: `should_skip_next_arg` refuses to consume a bare `--`, so the
+/// flag is emitted value-less and the `--` is then handled as the
+/// end-of-options marker. `sqry @picks --cfg-filter -- -5` thus partitions to
+/// `flags = ["--cfg-filter"]`, `path = "-5"`, so the expanded argv matches the
+/// direct `sqry search "<pattern>" --cfg-filter -- -5` form (both then error
+/// "a value is required for '--cfg-filter'", verivus-oss/sqry#528 round 8).
+fn partition_alias_tail(tokens: &[String]) -> Result<AliasTail> {
+    let mut flags = Vec::new();
+    let mut path: Option<String> = None;
+
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = &tokens[i];
+
+        if tok == "--" {
+            for rest in &tokens[i + 1..] {
+                if let Some(existing) = &path {
+                    anyhow::bail!(
+                        "Ambiguous alias invocation: two paths given ('{existing}' and \
+                         '{rest}'). An @alias run takes at most one search path."
+                    );
+                }
+                path = Some(rest.clone());
+            }
+            break;
+        }
+
+        if tok.starts_with('-') {
+            flags.push(tok.clone());
+            if should_skip_next_arg(tokens, i, tok)
+                && let Some(value) = tokens.get(i + 1)
+            {
+                flags.push(value.clone());
+                i += 2;
+                continue;
+            }
+            i += 1;
+        } else {
+            if let Some(existing) = &path {
+                anyhow::bail!(
+                    "Ambiguous alias invocation: two paths given ('{existing}' and '{tok}'). \
+                     An @alias run takes at most one search path."
+                );
+            }
+            path = Some(tok.clone());
+            i += 1;
+        }
+    }
+
+    Ok(AliasTail { flags, path })
+}
+
+fn scan_alias_args(args: &[String]) -> Result<AliasScan> {
     let mut skip_next = false;
 
     for (i, arg) in args.iter().enumerate().skip(1) {
         if skip_next {
             skip_next = false;
             continue;
+        }
+
+        // clap end-of-options boundary: the first bare `--` ends alias
+        // detection. Any `@token` at or after it is a literal positional (a
+        // search pattern / path), not an alias, exactly as the direct clap
+        // parse would treat it. `sqry -- @gpicks` therefore searches for the
+        // literal `@gpicks` instead of expanding the alias
+        // (verivus-oss/sqry#528 round 8). A flag can never carry us past a
+        // `--` because `should_skip_next_arg` refuses to consume one as a
+        // value, so this token is always seen before it could be mistaken for a
+        // flag value.
+        if arg == "--" {
+            return Ok(AliasScan::none());
         }
 
         if arg.starts_with('-') {
@@ -1535,30 +1927,57 @@ fn scan_alias_args(args: &[String]) -> AliasScan {
 
         // Check if this looks like a subcommand (not starting with @)
         if !arg.starts_with('@') {
+            // `sqry query @name` / `sqry search @name` (optionally with global
+            // flags in between, e.g. `sqry query --json @name`): the `@alias`
+            // after an alias-carrying subcommand is still an alias run
+            // (verivus-oss/sqry#514), not a literal query/pattern. Scan past
+            // any intervening flags (and the values they consume) to find it,
+            // and mark the subcommand word for removal during expansion.
+            if ALIAS_PREFIX_SUBCOMMANDS.contains(&arg.as_str())
+                && let Some(alias_at) = find_alias_after_prefix(args, i + 1)
+            {
+                let tail = partition_alias_tail(&args[alias_at + 1..])?;
+                return Ok(AliasScan {
+                    alias_index: Some(alias_at),
+                    remaining_path: tail.path,
+                    post_alias_flags: tail.flags,
+                    subcommand_prefix: Some(i),
+                });
+            }
+
             // Not an alias, return original args
-            return AliasScan {
-                alias_index: None,
-                remaining_path: None,
-            };
+            return Ok(AliasScan::none());
         }
 
-        // Found an @alias pattern
-        let remaining_path =
-            (i + 1 < args.len() && !args[i + 1].starts_with('-')).then(|| args[i + 1].clone());
-
-        return AliasScan {
+        // Found an @alias pattern: partition everything after it into the
+        // trailing flags and the single optional path.
+        let tail = partition_alias_tail(&args[i + 1..])?;
+        return Ok(AliasScan {
             alias_index: Some(i),
-            remaining_path,
-        };
+            remaining_path: tail.path,
+            post_alias_flags: tail.flags,
+            subcommand_prefix: None,
+        });
     }
 
-    AliasScan {
-        alias_index: None,
-        remaining_path: None,
-    }
+    Ok(AliasScan::none())
 }
 
 fn should_skip_next_arg(args: &[String], index: usize, arg: &str) -> bool {
+    // A bare `--` is clap's end-of-options marker, never a flag's value. When
+    // the next token is `--`, the flag consumes nothing: under the direct parse
+    // the flag then errors "a value is required for '<flag>'" (the `--` walls
+    // off the value slot), so the alias form must not swallow the `--` either.
+    // This is the single value-consumption choke point shared by
+    // `scan_alias_args`, `find_alias_after_prefix`, and `partition_alias_tail`,
+    // so honoring the boundary here keeps every argv-scanning site in lockstep
+    // (verivus-oss/sqry#528 round 8: `@picks --cfg-filter -- -5` used to eat
+    // the `--` as `--cfg-filter`'s value, diverging from the direct
+    // `search pick_ --cfg-filter -- -5` "a value is required" error).
+    if args.get(index + 1).is_some_and(|next| next == "--") {
+        return false;
+    }
+
     // Handle both --flag=value and --flag value forms
     if arg.contains('=') {
         return false;
@@ -1574,6 +1993,20 @@ fn should_skip_next_arg(args: &[String], index: usize, arg: &str) -> bool {
         return args
             .get(index + 1)
             .is_some_and(|next_arg| is_optional_flag_value(next_arg));
+    }
+
+    // Bundled short cluster whose final short takes a value from the next
+    // token (`-jk foo` == `-j -k foo`, verivus-oss/sqry#528 round 6). A
+    // glued value (`-kfoo`) reports `ClusterTail::None`, so the following token
+    // stays available as a flag or the path.
+    match split_short_cluster(arg) {
+        Some((_, ClusterTail::ConsumesNext)) => return true,
+        Some((_, ClusterTail::OptionalNext)) => {
+            return args
+                .get(index + 1)
+                .is_some_and(|next_arg| is_optional_flag_value(next_arg));
+        }
+        _ => {}
     }
 
     false
@@ -1612,30 +2045,100 @@ fn build_expanded_args(
     args: &[String],
     alias_index: usize,
     remaining_path: Option<&str>,
+    post_alias_flags: &[String],
+    subcommand_prefix: Option<usize>,
     alias_with_scope: &persistence::AliasWithScope,
 ) -> Vec<String> {
     let mut expanded = vec![args[0].clone()]; // Program name
 
-    // Add global flags that appeared before the alias
-    expanded.extend(args.iter().take(alias_index).skip(1).cloned());
+    // Flags that appeared before the alias, dropping any leading `query` /
+    // `search` subcommand word from a `sqry query @name` invocation
+    // (verivus-oss/sqry#514): the alias's own stored command drives the run,
+    // so the typed word must not be copied through as a positional/flag.
+    let pre_alias_flags: Vec<String> = args
+        .iter()
+        .enumerate()
+        .take(alias_index)
+        .skip(1)
+        .filter(|(i, _)| Some(*i) != subcommand_prefix)
+        .map(|(_, arg)| arg.clone())
+        .collect();
 
-    // Add the command (search or query)
-    expanded.push(alias_with_scope.alias.command.clone());
+    // Flags that trail the alias, i.e. `sqry search @qfuncs --cfg-filter test`,
+    // `sqry search @qfuncs . --cfg-filter test`, or `sqry search @qfuncs
+    // --cfg-filter test .`. These come pre-partitioned from
+    // [`partition_alias_tail`] with the single path already lifted out into
+    // `remaining_path`, so a real path can never leak into this set and force a
+    // second positional (verivus-oss/sqry#528 rounds 1-5). Both `pre`- and
+    // `trailing_flags` feed the same `use_shorthand` decision below so a
+    // subcommand-scoped flag on either side keeps the explicit command word.
+    let trailing_flags = post_alias_flags;
+
+    // A `search` alias expands to the top-level shorthand form (no `search`
+    // token) so trailing user flags such as `-c` route to the top-level `Cli`
+    // parse, which owns the shorthand match/output flags. The explicit `search`
+    // subcommand does not accept those flags, which is exactly why
+    // `sqry @name . -c` used to fail with "Usage: sqry search ..."
+    // (verivus-oss/sqry#514). A `query` alias keeps its subcommand because
+    // the structured planner has no shorthand form. The shorthand is skipped
+    // when the stored pattern would collide with a real subcommand name, so
+    // clap cannot misparse the pattern as a subcommand, AND when any flag on
+    // either side of the alias is scoped to `search` only (e.g.
+    // `--cfg-filter`, `--save-as`, `--global`, `--description`,
+    // `--include-generated`, `--macro-boundaries`, `--revision-*`): the
+    // top-level shorthand has no such flag, so clap would reject it.
+    // `sqry search --cfg-filter test @qfuncs` used to drop the `search` word
+    // for exactly this reason (verivus-oss/sqry#528 round 4); `sqry search
+    // @qfuncs --cfg-filter test` failed the same way for a trailing flag
+    // (round 5), independent of the round-3 fix that made `query` always keep
+    // its word.
+    let command = alias_with_scope.alias.command.as_str();
+    let stored_args = &alias_with_scope.alias.args;
+    let use_shorthand = command == "search"
+        && stored_args
+            .first()
+            .is_some_and(|pattern| !collides_with_subcommand(pattern))
+        && !any_flag_requires_subcommand_scope(&pre_alias_flags)
+        && !any_flag_requires_subcommand_scope(trailing_flags);
+
+    // The command word (when kept) must precede the pre-alias flags: those
+    // flags can be subcommand-scoped (e.g. `--var` / `--enable-plugin` on
+    // `query`), and clap rejects a subcommand-only flag that appears before
+    // its subcommand token (verivus-oss/sqry#514). For a shorthand `search`
+    // alias there is no command word, so the flags stay at the front where the
+    // top-level `Cli` parse owns them. Global flags (`--json`) parse correctly
+    // in either position.
+    if !use_shorthand {
+        expanded.push(command.to_string());
+    }
+    expanded.extend(pre_alias_flags);
 
     // Add the stored arguments
-    expanded.extend(alias_with_scope.alias.args.iter().cloned());
+    expanded.extend(stored_args.iter().cloned());
 
     // Add the path if provided, otherwise use "."
-    let has_path = remaining_path.is_some();
-    if let Some(path) = remaining_path {
-        expanded.push(path.to_string());
-    } else {
-        expanded.push(".".to_string());
-    }
+    let path_token = remaining_path.map_or_else(|| ".".to_string(), ToString::to_string);
 
-    // Add any remaining arguments after the path
-    let path_offset = if has_path { 2 } else { 1 };
-    expanded.extend(args.iter().skip(alias_index + path_offset).cloned());
+    // A path that starts with `-` (e.g. a negative-number directory name
+    // reached through `sqry @picks -- -5`, verivus-oss/sqry#528 round 7)
+    // parses fine coming out of `partition_alias_tail` (the `--` there already
+    // walled it off from flag classification), but the expanded argv handed
+    // to clap has no such wall unless we re-emit one: without a fresh `--`
+    // immediately before the path, clap sees a bare `-5` and rejects it as an
+    // unrecognized flag. Re-emitting `--` here puts the alias run through the
+    // same parse state as the direct `sqry search "<pattern>" -- -5` form. The
+    // trailing flags move ahead of the `--` so they still parse as flags
+    // instead of being swept into positionals by the same end-of-options
+    // marker; a path that needs no escaping keeps the original
+    // path-then-flags order byte-for-byte.
+    if path_token.starts_with('-') {
+        expanded.extend(trailing_flags.iter().cloned());
+        expanded.push("--".to_string());
+        expanded.push(path_token);
+    } else {
+        expanded.push(path_token);
+        expanded.extend(trailing_flags.iter().cloned());
+    }
 
     expanded
 }
@@ -1688,6 +2191,813 @@ fn record_history(search_path: &str, command: &str, argv: &[String], success: bo
 // U4 wiring smoke tests — verify `Command::Daemon` is dispatched from main.rs
 // and `commands::daemon::run` is reachable from the dispatch table.
 // ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod alias_scan_tests {
+    use super::*;
+
+    fn sv(args: &[&str]) -> Vec<String> {
+        args.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    large_stack_test! {
+    /// Drift guard: every value-taking flag reachable before an `@alias` (the
+    /// top-level `Cli` flags plus the `query` / `search` subcommand flags,
+    /// including their flattened `RevisionQueryArgs` / `PluginSelectionArgs`)
+    /// must be listed in `FLAGS_WITH_VALUES` (or `FLAGS_WITH_OPTIONAL_VALUES`
+    /// for `num_args = 0..=1`). Derived from clap's own metadata so a newly
+    /// added value flag that is not registered here fails CI rather than
+    /// silently regressing `@alias` expansion (verivus-oss/sqry#514).
+    /// Building the clap command tree is stack-heavy, hence `large_stack_test!`.
+    #[test]
+    fn flags_with_values_covers_query_and_search_scopes() {
+        use clap::CommandFactory as _;
+        use clap::builder::ArgAction;
+        use std::collections::BTreeSet;
+
+        let required: BTreeSet<&str> = FLAGS_WITH_VALUES.iter().copied().collect();
+        let optional: BTreeSet<&str> = FLAGS_WITH_OPTIONAL_VALUES.iter().copied().collect();
+
+        let cmd = args::Cli::command();
+        let mut missing: Vec<String> = Vec::new();
+
+        let mut audit = |command: &clap::Command| {
+            for arg in command.get_arguments() {
+                if !matches!(arg.get_action(), ArgAction::Set | ArgAction::Append) {
+                    continue;
+                }
+                let is_optional = arg
+                    .get_num_args()
+                    .is_some_and(|range| range.min_values() == 0);
+
+                let mut tokens: Vec<String> = Vec::new();
+                if let Some(long) = arg.get_long() {
+                    tokens.push(format!("--{long}"));
+                    if let Some(aliases) = arg.get_visible_aliases() {
+                        for alias in aliases {
+                            tokens.push(format!("--{alias}"));
+                        }
+                    }
+                }
+                if let Some(short) = arg.get_short() {
+                    tokens.push(format!("-{short}"));
+                }
+
+                for token in tokens {
+                    let covered = if is_optional {
+                        optional.contains(token.as_str()) || required.contains(token.as_str())
+                    } else {
+                        required.contains(token.as_str())
+                    };
+                    if !covered {
+                        missing.push(format!("{token} (optional={is_optional})"));
+                    }
+                }
+            }
+        };
+
+        audit(&cmd);
+        for name in ["query", "search"] {
+            if let Some(sub) = cmd.find_subcommand(name) {
+                audit(sub);
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "value-taking flags reachable before an @alias on top-level / query / \
+             search are missing from FLAGS_WITH_VALUES / FLAGS_WITH_OPTIONAL_VALUES: {missing:?}"
+        );
+    }
+    }
+
+    #[test]
+    fn plain_alias_with_trailing_flag_is_recognized() {
+        // `sqry @picks . -c`: the alias is at index 1, the path is ".", and the
+        // trailing `-c` is partitioned into the post-alias flags for the
+        // expanded parse (verivus-oss/sqry#514).
+        let scan = scan_alias_args(&sv(&["sqry", "@picks", ".", "-c"])).unwrap();
+        assert_eq!(scan.alias_index, Some(1));
+        assert_eq!(scan.remaining_path.as_deref(), Some("."));
+        assert_eq!(scan.post_alias_flags, sv(&["-c"]));
+        assert_eq!(scan.subcommand_prefix, None);
+    }
+
+    #[test]
+    fn plain_alias_flag_before_path_is_partitioned() {
+        // `sqry @picks --cfg-filter test .`: the path `.` sits AFTER a
+        // value-taking flag. The pre-round-6 peek looked only at the token
+        // right after the alias (`--cfg-filter`), resolved `path = None`, and
+        // swept the real `.` into the trailing flags, so the expansion carried
+        // two positionals. The order-independent partition lifts the single
+        // path out no matter where it sits (verivus-oss/sqry#528 round 6).
+        let scan = scan_alias_args(&sv(&["sqry", "@picks", "--cfg-filter", "test", "."])).unwrap();
+        assert_eq!(scan.alias_index, Some(1));
+        assert_eq!(scan.remaining_path.as_deref(), Some("."));
+        assert_eq!(scan.post_alias_flags, sv(&["--cfg-filter", "test"]));
+    }
+
+    #[test]
+    fn plain_alias_equals_joined_flag_value_is_partitioned() {
+        // `=`-joined flag values consume nothing from the next token, so the
+        // path `.` is still cleanly the single positional
+        // (verivus-oss/sqry#528 round 6).
+        let scan = scan_alias_args(&sv(&["sqry", "@picks", "--cfg-filter=test", "."])).unwrap();
+        assert_eq!(scan.remaining_path.as_deref(), Some("."));
+        assert_eq!(scan.post_alias_flags, sv(&["--cfg-filter=test"]));
+    }
+
+    #[test]
+    fn plain_alias_two_paths_is_ambiguous_error() {
+        // The alias contract admits a single optional path (the stored pattern
+        // supplies the query), so a second positional is a clear error rather
+        // than a silently dropped argument (verivus-oss/sqry#528 round 6).
+        let err = scan_alias_args(&sv(&["sqry", "@picks", "src", "lib"])).unwrap_err();
+        assert!(
+            err.to_string().contains("Ambiguous alias invocation"),
+            "two paths after an alias must error, got {err}"
+        );
+    }
+
+    #[test]
+    fn query_prefixed_alias_is_recognized_and_marks_prefix() {
+        // `sqry query @picks`: the leading `query` word is marked for removal so
+        // it is not copied through as a positional (verivus-oss/sqry#514).
+        let scan = scan_alias_args(&sv(&["sqry", "query", "@picks"])).unwrap();
+        assert_eq!(scan.alias_index, Some(2));
+        assert_eq!(scan.subcommand_prefix, Some(1));
+    }
+
+    #[test]
+    fn search_prefixed_alias_is_recognized() {
+        let scan = scan_alias_args(&sv(&["sqry", "search", "@picks", "src"])).unwrap();
+        assert_eq!(scan.alias_index, Some(2));
+        assert_eq!(scan.remaining_path.as_deref(), Some("src"));
+        assert_eq!(scan.subcommand_prefix, Some(1));
+    }
+
+    #[test]
+    fn query_prefixed_alias_with_intervening_flag_is_recognized() {
+        // `sqry query --json @picks`: the scan skips the global flag to reach
+        // the `@alias` (verivus-oss/sqry#514).
+        let scan = scan_alias_args(&sv(&["sqry", "query", "--json", "@picks"])).unwrap();
+        assert_eq!(scan.alias_index, Some(3));
+        assert_eq!(scan.subcommand_prefix, Some(1));
+    }
+
+    #[test]
+    fn query_prefixed_value_flag_does_not_capture_alias_lookalike() {
+        // `--lang` consumes its next argument, so `@weird` is its value, not an
+        // alias: this is a genuine query, not an alias run.
+        let scan = scan_alias_args(&sv(&["sqry", "query", "--lang", "@weird"])).unwrap();
+        assert_eq!(scan.alias_index, None);
+        assert_eq!(scan.subcommand_prefix, None);
+    }
+
+    #[test]
+    fn non_alias_subcommand_is_not_an_alias() {
+        // `sqry query kind:function` is a genuine query, not an alias run.
+        let scan = scan_alias_args(&sv(&["sqry", "query", "kind:function"])).unwrap();
+        assert_eq!(scan.alias_index, None);
+        assert_eq!(scan.subcommand_prefix, None);
+    }
+
+    #[test]
+    fn graph_prefixed_alias_is_not_recognized() {
+        // Only `query` / `search` carry aliases; other subcommands treat a
+        // following `@token` as their own positional.
+        let scan = scan_alias_args(&sv(&["sqry", "graph", "@picks"])).unwrap();
+        assert_eq!(scan.alias_index, None);
+    }
+
+    large_stack_test! {
+    #[test]
+    fn subcommand_names_collide() {
+        // clap-derived subcommand set must be recognized so a stored pattern
+        // that equals one keeps the explicit `search` form. Building the full
+        // clap command tree is stack-heavy, hence `large_stack_test!`.
+        assert!(collides_with_subcommand("index"));
+        assert!(collides_with_subcommand("query"));
+        assert!(!collides_with_subcommand("pick_"));
+        assert!(!collides_with_subcommand("TODO"));
+    }
+    }
+
+    fn saved_alias(command: &str, args: &[&str]) -> persistence::AliasWithScope {
+        persistence::AliasWithScope {
+            name: "picks".to_string(),
+            alias: persistence::SavedAlias {
+                command: command.to_string(),
+                args: args.iter().map(|s| (*s).to_string()).collect(),
+                created: chrono::Utc::now(),
+                description: None,
+            },
+            scope: persistence::StorageScope::Local,
+        }
+    }
+
+    /// Run the real scan + expansion pipeline end to end: partition `argv` via
+    /// [`scan_alias_args`] then feed the exact fields into
+    /// [`build_expanded_args`], so the partition and the expansion can never be
+    /// tested against divergent inputs (verivus-oss/sqry#528 round 6).
+    fn expand_via_scan(argv: &[String], alias: &persistence::AliasWithScope) -> Vec<String> {
+        let scan = scan_alias_args(argv).unwrap();
+        build_expanded_args(
+            argv,
+            scan.alias_index.unwrap(),
+            scan.remaining_path.as_deref(),
+            &scan.post_alias_flags,
+            scan.subcommand_prefix,
+            alias,
+        )
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_alias_expands_to_shorthand() {
+        // A search alias drops the `search` word so trailing flags route to the
+        // top-level shorthand parse (verivus-oss/sqry#514).
+        let alias = saved_alias("search", &["pick_"]);
+        let expanded = expand_via_scan(&sv(&["sqry", "@picks", ".", "-c"]), &alias);
+        assert_eq!(expanded, sv(&["sqry", "pick_", ".", "-c"]));
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_alias_pattern_colliding_with_subcommand_keeps_explicit_form() {
+        // A stored pattern equal to a subcommand name keeps the explicit
+        // `search` word so clap cannot misparse it as that subcommand.
+        let alias = saved_alias("search", &["index"]);
+        let expanded = expand_via_scan(&sv(&["sqry", "@picks"]), &alias);
+        assert_eq!(expanded, sv(&["sqry", "search", "index", "."]));
+    }
+    }
+
+    #[test]
+    fn query_alias_keeps_subcommand_and_drops_prefix_word() {
+        // A query alias keeps its `query` subcommand, and the typed `query`
+        // prefix word (index 1) is dropped from the expansion.
+        let alias = saved_alias("query", &["kind:function"]);
+        let expanded = expand_via_scan(&sv(&["sqry", "query", "@funcs"]), &alias);
+        assert_eq!(expanded, sv(&["sqry", "query", "kind:function", "."]));
+    }
+
+    #[test]
+    fn query_alias_value_flag_expands_after_command_word() {
+        // `sqry query --var k=v @qfuncs`: the scan skips `--var`'s value to
+        // reach the alias, and the expansion emits the `query` word BEFORE the
+        // subcommand-scoped `--var k=v` so clap accepts it (a query flag before
+        // its subcommand token would be rejected, verivus-oss/sqry#514).
+        let argv = sv(&["sqry", "query", "--var", "k=v", "@qfuncs"]);
+
+        let scan = scan_alias_args(&argv).unwrap();
+        assert_eq!(scan.alias_index, Some(4));
+        assert_eq!(scan.subcommand_prefix, Some(1));
+
+        let alias = saved_alias("query", &["kind:$k"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "query", "--var", "k=v", "kind:$k", "."])
+        );
+    }
+
+    #[test]
+    fn query_alias_value_flag_before_path_expands_after_command_word() {
+        // `sqry query --var k=v @qfuncs .`: mirrors the flag-before-path search
+        // class member for `query`. The path `.` must be the single positional,
+        // never merged with a synthesized default (verivus-oss/sqry#528
+        // round 6).
+        let argv = sv(&["sqry", "query", "--var", "k=v", "@qfuncs", "."]);
+        let alias = saved_alias("query", &["kind:$k"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "query", "--var", "k=v", "kind:$k", "."])
+        );
+    }
+
+    #[test]
+    fn query_alias_trailing_flag_before_path_expands_after_command_word() {
+        // `sqry query @qfuncs --var k=v .`: the subcommand-scoped `--var k=v`
+        // trails the alias and the path `.` sits after the flag value. The
+        // partition consumes `k=v` as `--var`'s value and keeps `.` as the sole
+        // positional (verivus-oss/sqry#528 round 6).
+        let argv = sv(&["sqry", "query", "@qfuncs", "--var", "k=v", "."]);
+        let scan = scan_alias_args(&argv).unwrap();
+        assert_eq!(scan.remaining_path.as_deref(), Some("."));
+        assert_eq!(scan.post_alias_flags, sv(&["--var", "k=v"]));
+
+        let alias = saved_alias("query", &["kind:$k"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "query", "kind:$k", ".", "--var", "k=v"])
+        );
+    }
+
+    #[test]
+    fn query_alias_equals_joined_value_flag_before_path() {
+        // `sqry query @qfuncs --var=k=v .`: an `=`-joined value must be handled
+        // identically to the space-separated form, leaving `.` as the single
+        // path (verivus-oss/sqry#528 round 6).
+        let argv = sv(&["sqry", "query", "@qfuncs", "--var=k=v", "."]);
+        let alias = saved_alias("query", &["kind:$k"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "query", "kind:$k", ".", "--var=k=v"])
+        );
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_alias_flag_before_path_keeps_command_word() {
+        // `sqry search @qfuncs --cfg-filter test .`: the round-5 tip resolved
+        // `path = None` (the token after the alias was `--cfg-filter`),
+        // synthesized a default `"."`, AND swept the real `.` into the trailing
+        // flags, so clap saw `search <pattern> . --cfg-filter test .` with two
+        // path positionals and exited 2. The partition lifts the single `.`
+        // out and keeps the `search` word for the subcommand-scoped
+        // `--cfg-filter` (verivus-oss/sqry#528 round 6).
+        let argv = sv(&["sqry", "search", "@qfuncs", "--cfg-filter", "test", "."]);
+        let scan = scan_alias_args(&argv).unwrap();
+        assert_eq!(scan.remaining_path.as_deref(), Some("."));
+        assert_eq!(scan.post_alias_flags, sv(&["--cfg-filter", "test"]));
+
+        let alias = saved_alias("search", &["kind:function"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "search", "kind:function", ".", "--cfg-filter", "test"])
+        );
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_shorthand_flag_before_path_keeps_command_word() {
+        // Same flag-before-path bug via the top-level shorthand form
+        // (`sqry @qfuncs --cfg-filter test .`, no `search` word typed): the
+        // subcommand-scoped `--cfg-filter` still forces the `search` word back
+        // on so clap parses it under the scope that owns it
+        // (verivus-oss/sqry#528 round 6).
+        let argv = sv(&["sqry", "@qfuncs", "--cfg-filter", "test", "."]);
+        let alias = saved_alias("search", &["kind:function"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "search", "kind:function", ".", "--cfg-filter", "test"])
+        );
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_shorthand_equals_joined_flag_before_path_keeps_command_word() {
+        // `=`-joined subcommand-scoped value before the path
+        // (`sqry @qfuncs --cfg-filter=test .`): same expansion as the
+        // space-separated form (verivus-oss/sqry#528 round 6).
+        let argv = sv(&["sqry", "@qfuncs", "--cfg-filter=test", "."]);
+        let alias = saved_alias("search", &["kind:function"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "search", "kind:function", ".", "--cfg-filter=test"])
+        );
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_shorthand_top_level_flag_before_path_uses_shorthand() {
+        // `sqry @qfuncs -c .`: a genuinely top-level flag before the path keeps
+        // the shorthand form (no `search` word) with `.` as the path
+        // (verivus-oss/sqry#528 round 6).
+        let argv = sv(&["sqry", "@qfuncs", "-c", "."]);
+        let alias = saved_alias("search", &["kind:function"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(expanded, sv(&["sqry", "kind:function", ".", "-c"]));
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_shorthand_bundled_short_cluster_uses_shorthand() {
+        // `sqry @picks -ic .`: `-ic` bundles two top-level shorts (`-i`
+        // ignore_case, `-c` count). The round-5 tip classified the whole `-ic`
+        // token as an unknown, subcommand-scoped flag (its
+        // `flag_defined_on_top_level_cli` matched only single-char shorts), so
+        // it forced the `search` word back on and expanded to `search pick_ .
+        // -ic`, which the `search` subcommand (no `-i`/`-c`) rejected with exit
+        // 2. Splitting the cluster into `-i` + `-c` classifies both as
+        // top-level, keeping the shorthand form (verivus-oss/sqry#528
+        // round 6).
+        let argv = sv(&["sqry", "@picks", "-ic", "."]);
+        let alias = saved_alias("search", &["pick_"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(expanded, sv(&["sqry", "pick_", ".", "-ic"]));
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_alias_value_flag_expands_with_command_word() {
+        // `sqry search --cfg-filter test @qfuncs`: `--cfg-filter` is scoped to
+        // the `Search` subcommand only (absent from the top-level `Cli`
+        // shorthand), so the shorthand-drop optimization used for a plain
+        // `search` alias (see `search_alias_expands_to_shorthand`) must NOT
+        // apply here. The expansion must emit the `search` word BEFORE
+        // `--cfg-filter test` so clap parses the flag under the scope that
+        // defines it (verivus-oss/sqry#528 round 4: this used to drop the
+        // `search` word and expand to the top-level shorthand form, which has
+        // no `--cfg-filter` flag, so clap rejected the run with "unexpected
+        // argument '--cfg-filter' found").
+        let argv = sv(&["sqry", "search", "--cfg-filter", "test", "@qfuncs"]);
+
+        let scan = scan_alias_args(&argv).unwrap();
+        assert_eq!(scan.alias_index, Some(4));
+        assert_eq!(scan.subcommand_prefix, Some(1));
+
+        let alias = saved_alias("search", &["kind:function"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&[
+                "sqry",
+                "search",
+                "--cfg-filter",
+                "test",
+                "kind:function",
+                "."
+            ])
+        );
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_alias_trailing_value_flag_expands_with_command_word() {
+        // `sqry search @qfuncs --cfg-filter test`: the subcommand-scoped
+        // `--cfg-filter test` now trails the alias instead of leading it. The
+        // round-4 fix only inspected `pre_alias_flags`, so this trailing
+        // placement still dropped the `search` word and expanded to the
+        // top-level shorthand form, which clap rejected with "unexpected
+        // argument '--cfg-filter' found" (verivus-oss/sqry#528 round 5).
+        let argv = sv(&["sqry", "search", "@qfuncs", "--cfg-filter", "test"]);
+
+        let scan = scan_alias_args(&argv).unwrap();
+        assert_eq!(scan.alias_index, Some(2));
+        assert_eq!(scan.subcommand_prefix, Some(1));
+        assert_eq!(scan.remaining_path, None);
+
+        let alias = saved_alias("search", &["kind:function"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&[
+                "sqry",
+                "search",
+                "kind:function",
+                ".",
+                "--cfg-filter",
+                "test"
+            ])
+        );
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_alias_trailing_value_flag_expands_with_command_word_and_path() {
+        // Same trailing-flag bug as above, but with an explicit path between
+        // the alias and the flag: `sqry search @qfuncs . --cfg-filter test`
+        // (verivus-oss/sqry#528 round 5).
+        let argv = sv(&["sqry", "search", "@qfuncs", ".", "--cfg-filter", "test"]);
+
+        let scan = scan_alias_args(&argv).unwrap();
+        assert_eq!(scan.alias_index, Some(2));
+        assert_eq!(scan.subcommand_prefix, Some(1));
+        assert_eq!(scan.remaining_path.as_deref(), Some("."));
+
+        let alias = saved_alias("search", &["kind:function"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&[
+                "sqry",
+                "search",
+                "kind:function",
+                ".",
+                "--cfg-filter",
+                "test"
+            ])
+        );
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn search_alias_trailing_top_level_flag_still_uses_shorthand() {
+        // Boundary check: a genuinely top-level flag (`-c`, defined on `Cli`
+        // itself) trailing the alias must still take the shorthand path (no
+        // `search` word), the same as `search_alias_expands_to_shorthand`.
+        // The round-5 fix must not regress this by treating every trailing
+        // flag as subcommand-scoped.
+        let argv = sv(&["sqry", "@qfuncs", ".", "-c"]);
+        let alias = saved_alias("search", &["kind:function"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "kind:function", ".", "-c"])
+        );
+    }
+    }
+
+    #[test]
+    fn query_alias_trailing_value_flag_expands_after_command_word() {
+        // `sqry query @qfuncs --var k=v`: mirrors
+        // `query_alias_value_flag_expands_after_command_word` but with the
+        // subcommand-scoped `--var k=v` trailing the alias instead of
+        // leading it. A `query` alias always keeps its `query` word
+        // (`use_shorthand` requires `command == "search"`), so this
+        // placement never had the round-5 shorthand-drop bug; this test
+        // locks that in so a future change to the shorthand condition cannot
+        // silently reintroduce it for `query` (verivus-oss/sqry#528
+        // round 5 completeness audit).
+        let argv = sv(&["sqry", "query", "@qfuncs", "--var", "k=v"]);
+
+        let scan = scan_alias_args(&argv).unwrap();
+        assert_eq!(scan.alias_index, Some(2));
+        assert_eq!(scan.subcommand_prefix, Some(1));
+        assert_eq!(scan.remaining_path, None);
+
+        let alias = saved_alias("query", &["kind:$k"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "query", "kind:$k", ".", "--var", "k=v"])
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // verivus-oss/sqry#528 round 7: `--` end-of-options in the alias tail.
+    //
+    // `partition_alias_tail` had no `--` handling at all: a bare `--` was
+    // itself classified as an unknown flag token, so a hyphen-leading path
+    // escaped past it (`sqry @picks -- -5`) got swept into the trailing flags
+    // instead of becoming the single path. The direct `sqry search "<pattern>"
+    // -- -5` form parses fine (clap's own `--` escape takes over), so the
+    // alias form diverged from it at the parse level, not just at runtime.
+    // Every case below exits 2 with "unexpected argument" on the round-6 tip
+    // (67fcc3e28) and reaches the runtime path check on this branch.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn alias_double_dash_then_path_partitions() {
+        // `sqry @picks -- -5`: the `--` marker ends flag classification, so
+        // `-5` becomes the sole path instead of a trailing flag token, and the
+        // `--` itself is consumed rather than carried through as a flag. On
+        // the round-6 tip, `--` was pushed to `post_alias_flags` as an unknown
+        // flag and `-5` followed it as a second unknown flag, leaving
+        // `remaining_path` unset (verivus-oss/sqry#528 round 7).
+        let scan = scan_alias_args(&sv(&["sqry", "@picks", "--", "-5"])).unwrap();
+        assert_eq!(scan.alias_index, Some(1));
+        assert_eq!(scan.remaining_path.as_deref(), Some("-5"));
+        assert!(
+            scan.post_alias_flags.is_empty(),
+            "the `--` marker must not be carried through as a flag token, got {:?}",
+            scan.post_alias_flags
+        );
+    }
+
+    large_stack_test! {
+    #[test]
+    fn alias_double_dash_hyphen_path_reemits_escape() {
+        // The expanded argv must put a fresh `--` directly in front of the
+        // escaped path so the downstream clap parse also treats `-5` as the
+        // path, not a flag. On the round-6 tip this expanded to
+        // `sqry search pick_ . -- -5` (the default `.` path plus `--`/`-5`
+        // both misread as subcommand-scoped-looking flags, which also forced
+        // the explicit `search` word back on); here it must be the clean
+        // shorthand form with `-5` itself as the path
+        // (verivus-oss/sqry#528 round 7).
+        let argv = sv(&["sqry", "@picks", "--", "-5"]);
+        let alias = saved_alias("search", &["pick_"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(expanded, sv(&["sqry", "pick_", "--", "-5"]));
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn alias_double_dash_flag_before_escape_reorders_before_dash_dash() {
+        // `sqry query @qfuncs --var k=v -- -5`: a subcommand-scoped flag
+        // precedes the `--` escape. The re-emit must place `--var k=v` BEFORE
+        // the re-emitted `--` / `-5` pair, not after: clap's `--` covers every
+        // token that follows it, so a flag placed after it would be swept
+        // into positionals instead of parsing as a flag
+        // (verivus-oss/sqry#528 round 7).
+        let argv = sv(&["sqry", "query", "@qfuncs", "--var", "k=v", "--", "-5"]);
+
+        let scan = scan_alias_args(&argv).unwrap();
+        assert_eq!(scan.remaining_path.as_deref(), Some("-5"));
+        assert_eq!(scan.post_alias_flags, sv(&["--var", "k=v"]));
+
+        let alias = saved_alias("query", &["kind:$k"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "query", "kind:$k", "--var", "k=v", "--", "-5"])
+        );
+    }
+    }
+
+    #[test]
+    fn alias_double_dash_two_paths_is_ambiguous_error() {
+        // `sqry @picks -- a b`: two positionals after the `--` escape is the
+        // same ambiguous-alias-invocation error as two positionals without
+        // one (`plain_alias_two_paths_is_ambiguous_error`); the alias contract
+        // still admits at most one search path.
+        let err = scan_alias_args(&sv(&["sqry", "@picks", "--", "a", "b"])).unwrap_err();
+        assert!(
+            err.to_string().contains("Ambiguous alias invocation"),
+            "two paths after -- must error, got {err}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // verivus-oss/sqry#528 round 8: `--` end-of-options honored at the
+    // alias-DETECTION and flag-VALUE layers, not just the tail partition.
+    //
+    // Round 7 taught `partition_alias_tail` about `--`, but two layers still
+    // ignored the boundary: `scan_alias_args` / `find_alias_after_prefix` kept
+    // scanning past a bare `--` to resolve an `@token` that clap would treat as
+    // a literal positional, and `should_skip_next_arg` swallowed a `--` sitting
+    // in a value-flag's value slot. Both diverge from the direct clap parse.
+    // Every detection-stop case below resolves an alias on the round-7 tip
+    // (34bd71927) and resolves NONE (literal positional) here; the flag-value
+    // case swallows the `--` there and walls it off here.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn double_dash_before_bare_alias_is_not_detected() {
+        // `sqry -- @gpicks`: the first bare `--` ends alias detection, so
+        // `@gpicks` is a literal search pattern, not an alias. On the round-7
+        // tip the scan skipped the `--` and resolved the alias at index 2.
+        let scan = scan_alias_args(&sv(&["sqry", "--", "@gpicks"])).unwrap();
+        assert_eq!(scan.alias_index, None);
+        assert_eq!(scan.subcommand_prefix, None);
+    }
+
+    #[test]
+    fn double_dash_after_search_prefix_is_not_detected() {
+        // `sqry search -- @gpicks`: the `--` after the `search` prefix word ends
+        // alias detection, so `@gpicks` is the literal pattern the `search`
+        // subcommand receives, not an alias lookup.
+        let scan = scan_alias_args(&sv(&["sqry", "search", "--", "@gpicks"])).unwrap();
+        assert_eq!(scan.alias_index, None);
+        assert_eq!(scan.subcommand_prefix, None);
+    }
+
+    #[test]
+    fn double_dash_after_query_prefix_is_not_detected() {
+        // `sqry query -- @gpicks`: same as the search-prefix case but for the
+        // structured `query` command.
+        let scan = scan_alias_args(&sv(&["sqry", "query", "--", "@gpicks"])).unwrap();
+        assert_eq!(scan.alias_index, None);
+        assert_eq!(scan.subcommand_prefix, None);
+    }
+
+    #[test]
+    fn double_dash_then_literal_at_string_is_not_unknown_alias() {
+        // `sqry search -- @somestring`: on the round-7 tip this resolved an
+        // alias named `somestring`, which then failed "Unknown alias". After
+        // the boundary fix it is a literal positional (no alias resolution), so
+        // the direct clap parse searches for `@somestring` verbatim.
+        let scan = scan_alias_args(&sv(&["sqry", "search", "--", "@somestring"])).unwrap();
+        assert_eq!(scan.alias_index, None);
+    }
+
+    #[test]
+    fn double_dash_before_bare_alias_after_global_flag_is_not_detected() {
+        // `sqry --json -- @picks`: a global flag then the `--` boundary. The
+        // flag does not carry the scan past the `--`, and the `--` stops
+        // detection before `@picks`.
+        let scan = scan_alias_args(&sv(&["sqry", "--json", "--", "@picks"])).unwrap();
+        assert_eq!(scan.alias_index, None);
+    }
+
+    #[test]
+    fn double_dash_before_prefix_subcommand_is_not_detected() {
+        // `sqry -- search @picks`: the leading `--` makes `search` and `@picks`
+        // literal positionals (the shorthand pattern/path), never a prefix
+        // subcommand + alias.
+        let scan = scan_alias_args(&sv(&["sqry", "--", "search", "@picks"])).unwrap();
+        assert_eq!(scan.alias_index, None);
+        assert_eq!(scan.subcommand_prefix, None);
+    }
+
+    #[test]
+    fn value_flag_does_not_swallow_double_dash_as_value() {
+        // `sqry @picks --cfg-filter -- -5`: `--cfg-filter` takes a value, but a
+        // bare `--` is never that value. The flag is emitted value-less and the
+        // `--` walls `-5` off as the sole path. On the round-7 tip
+        // `should_skip_next_arg` consumed the `--`, so `-5` was swept into the
+        // trailing flags and no path was resolved.
+        let scan = scan_alias_args(&sv(&["sqry", "@picks", "--cfg-filter", "--", "-5"])).unwrap();
+        assert_eq!(scan.alias_index, Some(1));
+        assert_eq!(scan.remaining_path.as_deref(), Some("-5"));
+        assert_eq!(scan.post_alias_flags, sv(&["--cfg-filter"]));
+    }
+
+    #[test]
+    fn should_skip_next_arg_refuses_bare_double_dash() {
+        // Unit-level guard for the value-consumption choke point: a value flag
+        // consumes a normal next token but never a bare `--`.
+        assert!(should_skip_next_arg(
+            &sv(&["--cfg-filter", "x"]),
+            0,
+            "--cfg-filter"
+        ));
+        assert!(!should_skip_next_arg(
+            &sv(&["--cfg-filter", "--"]),
+            0,
+            "--cfg-filter"
+        ));
+    }
+
+    large_stack_test! {
+    #[test]
+    fn value_flag_double_dash_expands_to_direct_form() {
+        // The expanded argv must be byte-for-byte the direct
+        // `sqry search pick_ --cfg-filter -- -5` shape so clap produces the
+        // identical "a value is required for '--cfg-filter'" error. The
+        // subcommand-scoped `--cfg-filter` keeps the explicit `search` word, and
+        // the re-emitted `--` precedes the hyphen path `-5`.
+        let argv = sv(&["sqry", "@picks", "--cfg-filter", "--", "-5"]);
+        let alias = saved_alias("search", &["pick_"]);
+        let expanded = expand_via_scan(&argv, &alias);
+        assert_eq!(
+            expanded,
+            sv(&["sqry", "search", "pick_", "--cfg-filter", "--", "-5"])
+        );
+    }
+    }
+
+    #[test]
+    fn trailing_double_dash_with_nothing_after_leaves_no_path() {
+        // `sqry @picks --`: the `--` marks end-of-options with no positional
+        // after it, so no path is resolved (the default `.` is synthesized
+        // later) and the marker is not carried through as a flag.
+        let scan = scan_alias_args(&sv(&["sqry", "@picks", "--"])).unwrap();
+        assert_eq!(scan.alias_index, Some(1));
+        assert_eq!(scan.remaining_path, None);
+        assert!(scan.post_alias_flags.is_empty());
+    }
+
+    #[test]
+    fn double_dash_then_literal_double_dash_is_path() {
+        // `sqry @picks -- --`: the first `--` is the boundary, the second is a
+        // literal positional (a path named `--`), matching clap's own handling
+        // of `sqry search "<pattern>" -- --`.
+        let scan = scan_alias_args(&sv(&["sqry", "@picks", "--", "--"])).unwrap();
+        assert_eq!(scan.remaining_path.as_deref(), Some("--"));
+        assert!(scan.post_alias_flags.is_empty());
+    }
+
+    #[test]
+    fn double_dash_repeated_two_paths_is_ambiguous_error() {
+        // `sqry @picks -- -5 --`: the boundary yields two positionals (`-5` and
+        // `--`), the same at-most-one-path ambiguity error, matching clap
+        // rejecting a second positional in the direct form.
+        let err = scan_alias_args(&sv(&["sqry", "@picks", "--", "-5", "--"])).unwrap_err();
+        assert!(
+            err.to_string().contains("Ambiguous alias invocation"),
+            "two paths after -- must error, got {err}"
+        );
+    }
+
+    #[test]
+    fn equals_joined_flag_then_trailing_double_dash_partitions() {
+        // `sqry @picks --cfg-filter=test --`: the glued-value flag consumes
+        // nothing from the next token, and the trailing `--` (nothing after)
+        // leaves the flag intact with no path.
+        let scan = scan_alias_args(&sv(&["sqry", "@picks", "--cfg-filter=test", "--"])).unwrap();
+        assert_eq!(scan.remaining_path, None);
+        assert_eq!(scan.post_alias_flags, sv(&["--cfg-filter=test"]));
+    }
+
+    #[test]
+    fn bundled_short_then_trailing_double_dash_partitions() {
+        // `sqry @picks -ic --`: a bundled short cluster with no value, then the
+        // boundary. The cluster stays whole in the flags and no path resolves.
+        let scan = scan_alias_args(&sv(&["sqry", "@picks", "-ic", "--"])).unwrap();
+        assert_eq!(scan.remaining_path, None);
+        assert_eq!(scan.post_alias_flags, sv(&["-ic"]));
+    }
+}
 
 #[cfg(test)]
 mod wiring_tests {
@@ -1763,6 +3073,74 @@ mod wiring_tests {
             );
         } else {
             panic!("Expected Command::Daemon");
+        }
+    }
+    }
+
+    large_stack_test! {
+    /// #511: `sqry search <PAT> --exact` must parse (the flag is advertised in
+    /// `sqry search --help`). Before the fix `--exact` only bound at the top
+    /// level, so this invocation was rejected as an unknown argument.
+    #[test]
+    fn search_exact_flag_parses_on_subcommand() {
+        let cli = args::Cli::parse_from(["sqry", "search", "GrokClient", "--exact"]);
+        assert!(
+            matches!(
+                cli.command.as_deref(),
+                Some(args::Command::Search { exact: true, .. })
+            ),
+            "`search --exact` must set the Search variant's exact flag"
+        );
+        // The short form `-x` must parse identically.
+        let cli_short = args::Cli::parse_from(["sqry", "search", "GrokClient", "-x"]);
+        assert!(matches!(
+            cli_short.command.as_deref(),
+            Some(args::Command::Search { exact: true, .. })
+        ));
+    }
+    }
+
+    large_stack_test! {
+    /// #511: the top-level shorthand `sqry --exact <PAT>` still parses onto the
+    /// `Cli::exact` field with no subcommand. Regression guard so folding the
+    /// subcommand flag never breaks the shorthand.
+    #[test]
+    fn top_level_exact_shorthand_still_parses() {
+        let cli = args::Cli::parse_from(["sqry", "--exact", "GrokClient"]);
+        assert!(cli.command.is_none(), "shorthand must not select a subcommand");
+        assert!(cli.exact, "top-level --exact must set Cli::exact");
+    }
+    }
+
+    large_stack_test! {
+    /// #517: `sqry graph stats --format json` (format AFTER the operation) must
+    /// parse now that `Graph::format` is `global = true`. Before the fix the
+    /// arg only bound before the operation and this was rejected.
+    #[test]
+    fn graph_format_after_operation_parses() {
+        let cli = args::Cli::parse_from(["sqry", "graph", "stats", "--format", "json"]);
+        match cli.command.as_deref() {
+            Some(args::Command::Graph { format, operation, .. }) => {
+                assert_eq!(format.as_deref(), Some("json"));
+                assert!(matches!(operation, args::GraphOperation::Stats { .. }));
+            }
+            other => panic!("expected Command::Graph, got {other:?}"),
+        }
+    }
+    }
+
+    large_stack_test! {
+    /// #517: `sqry graph --format json stats` (format BEFORE the operation)
+    /// must keep parsing. Regression guard for the pre-existing placement.
+    #[test]
+    fn graph_format_before_operation_still_parses() {
+        let cli = args::Cli::parse_from(["sqry", "graph", "--format", "json", "stats"]);
+        match cli.command.as_deref() {
+            Some(args::Command::Graph { format, operation, .. }) => {
+                assert_eq!(format.as_deref(), Some("json"));
+                assert!(matches!(operation, args::GraphOperation::Stats { .. }));
+            }
+            other => panic!("expected Command::Graph, got {other:?}"),
         }
     }
     }

@@ -41,6 +41,7 @@ pub(crate) struct ClasspathCliOptions<'a> {
 pub(crate) fn run_classpath_pipeline_only(
     root_path: &Path,
     classpath_opts: &ClasspathCliOptions<'_>,
+    json_output: bool,
 ) -> Result<Option<sqry_classpath::pipeline::ClasspathPipelineResult>> {
     use sqry_classpath::pipeline::{ClasspathConfig, ClasspathDepth};
 
@@ -57,13 +58,26 @@ pub(crate) fn run_classpath_pipeline_only(
         timeout_secs: 60,
     };
 
-    println!("Running JVM classpath analysis...");
+    // Under `--json` this progress chatter must not pollute stdout (the caller
+    // guarantees stdout is a single JSON document); route it to stderr.
+    if json_output {
+        eprintln!("Running JVM classpath analysis...");
+    } else {
+        println!("Running JVM classpath analysis...");
+    }
     match sqry_classpath::pipeline::run_classpath_pipeline(root_path, &config) {
         Ok(result) => {
-            println!(
-                "  Classpath: {} JARs scanned, {} classes parsed",
-                result.jars_scanned, result.classes_parsed
-            );
+            if json_output {
+                eprintln!(
+                    "  Classpath: {} JARs scanned, {} classes parsed",
+                    result.jars_scanned, result.classes_parsed
+                );
+            } else {
+                println!(
+                    "  Classpath: {} JARs scanned, {} classes parsed",
+                    result.jars_scanned, result.classes_parsed
+                );
+            }
             Ok(Some(result))
         }
         Err(sqry_classpath::ClasspathError::DetectionFailed(message))
@@ -291,6 +305,7 @@ fn build_classpath_package_index<'a>(
 pub(crate) fn inject_classpath_into_graph(
     graph: &mut sqry_core::graph::unified::concurrent::CodeGraph,
     classpath_result: &sqry_classpath::pipeline::ClasspathPipelineResult,
+    json_output: bool,
 ) -> Result<()> {
     let emission_result = sqry_classpath::graph::emitter::emit_into_code_graph(
         &classpath_result.index,
@@ -311,14 +326,27 @@ pub(crate) fn inject_classpath_into_graph(
     );
 
     graph.rebuild_indices();
-    println!(
-        "  Graph enriched with {} classpath types, {} import edges ({} member/static, {} unscoped, {} ambiguous imports skipped)",
-        classpath_result.index.classes.len(),
-        import_edges_created,
-        skipped_member_imports,
-        skipped_unscoped_imports,
-        skipped_ambiguous_imports,
-    );
+    // Under `--json` this enrichment summary goes to stderr so stdout stays a
+    // single JSON document.
+    if json_output {
+        eprintln!(
+            "  Graph enriched with {} classpath types, {} import edges ({} member/static, {} unscoped, {} ambiguous imports skipped)",
+            classpath_result.index.classes.len(),
+            import_edges_created,
+            skipped_member_imports,
+            skipped_unscoped_imports,
+            skipped_ambiguous_imports,
+        );
+    } else {
+        println!(
+            "  Graph enriched with {} classpath types, {} import edges ({} member/static, {} unscoped, {} ambiguous imports skipped)",
+            classpath_result.index.classes.len(),
+            import_edges_created,
+            skipped_member_imports,
+            skipped_unscoped_imports,
+            skipped_ambiguous_imports,
+        );
+    }
     Ok(())
 }
 
@@ -459,7 +487,7 @@ fn canonicalish_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-#[allow(unused_variables, unused_mut)]
+#[allow(unused_variables, unused_mut, clippy::too_many_arguments)]
 pub(crate) fn build_and_persist_with_optional_classpath(
     root_path: &Path,
     resolved_plugins: &plugin_defaults::ResolvedPluginManager,
@@ -468,21 +496,27 @@ pub(crate) fn build_and_persist_with_optional_classpath(
     progress: SharedReporter,
     classpath_opts: Option<&ClasspathCliOptions<'_>>,
     cache_dir: Option<&Path>,
+    json_output: bool,
 ) -> Result<BuildResult> {
     #[cfg(feature = "jvm-classpath")]
     let classpath_result = if let Some(classpath_opts) = classpath_opts.filter(|opts| opts.enabled)
     {
-        run_classpath_pipeline_only(root_path, classpath_opts)?
+        run_classpath_pipeline_only(root_path, classpath_opts, json_output)?
     } else {
         None
     };
 
     #[cfg(not(feature = "jvm-classpath"))]
-    if classpath_opts.is_some_and(|opts| opts.enabled) {
-        eprintln!(
-            "WARNING: --classpath flag requires the 'jvm-classpath' feature. \
-             Rebuild sqry-cli with: cargo build --features jvm-classpath"
-        );
+    {
+        // `json_output` only gates the classpath progress lines, which are
+        // compiled out without the `jvm-classpath` feature.
+        let _ = json_output;
+        if classpath_opts.is_some_and(|opts| opts.enabled) {
+            eprintln!(
+                "WARNING: --classpath flag requires the 'jvm-classpath' feature. \
+                 Rebuild sqry-cli with: cargo build --features jvm-classpath"
+            );
+        }
     }
 
     let (mut graph, effective_threads) =
@@ -495,7 +529,7 @@ pub(crate) fn build_and_persist_with_optional_classpath(
 
     #[cfg(feature = "jvm-classpath")]
     if let Some(classpath_result) = &classpath_result {
-        inject_classpath_into_graph(&mut graph, classpath_result)?;
+        inject_classpath_into_graph(&mut graph, classpath_result, json_output)?;
     }
 
     // C001b-core: when `--cache-dir <DIR>` is supplied, persist a hash-index
@@ -746,6 +780,7 @@ pub fn run_index(
             progress.clone(),
             Some(&classpath_opts),
             cache_dir_path,
+            cli.json,
         )
     })?;
 
@@ -1125,7 +1160,24 @@ pub fn run_update(
         );
     }
 
-    println!("Updating index for {}...", root_path.display());
+    // Capture the pre-update graph counts so `--stats` can report real deltas
+    // (nodes / edges / files added or removed by this update). Read straight
+    // from the existing snapshot header; a soft failure just means the delta
+    // columns are omitted, never that the update fails.
+    let pre_update_header = if show_stats {
+        load_header_from_path(storage.snapshot_path()).ok()
+    } else {
+        None
+    };
+
+    // Under `--json`, stdout must carry ONLY the machine-readable document, so
+    // route the human-readable progress line to stderr (the `--stats --json`
+    // output has to deserialize as a single JSON document with no preamble).
+    if cli.json {
+        eprintln!("Updating index for {}...", root_path.display());
+    } else {
+        println!("Updating index for {}...", root_path.display());
+    }
     let start = Instant::now();
 
     // Determine update mode based on git availability
@@ -1168,6 +1220,7 @@ pub fn run_update(
             progress.clone(),
             Some(&classpath_opts),
             cache_dir_path,
+            cli.json,
         )
     })?;
 
@@ -1199,10 +1252,235 @@ pub fn run_update(
     }
 
     if show_stats {
-        println!("(Detailed stats are not available for unified graph update)");
+        // Load the freshly-written snapshot header so the file delta compares
+        // like against like. `GraphHeader.file_count` counts REGISTERED files
+        // (including external / dependency files) on BOTH sides, whereas
+        // `BuildResult.total_files` counts only workspace (non-external) files;
+        // mixing the two produced a wrong file delta on classpath / external
+        // workspaces (#520 review). Header-to-header keeps the delta honest.
+        let post_update_header = load_header_from_path(storage.snapshot_path()).ok();
+        emit_update_stats(
+            cli,
+            &build_result,
+            pre_update_header.as_ref(),
+            post_update_header.as_ref(),
+            elapsed,
+            using_git_mode,
+        );
     }
 
     Ok(())
+}
+
+/// Signed delta between a post-update count and its pre-update counterpart.
+///
+/// `None` means one side of the comparison was unavailable (no readable
+/// pre-update snapshot header, or the post-update header could not be re-read),
+/// so we cannot attribute a delta to this update. Rendered as `"n/a"`.
+fn count_delta(new: Option<usize>, old: Option<usize>) -> Option<i64> {
+    match (new, old) {
+        (Some(new), Some(old)) => Some(new as i64 - old as i64),
+        _ => None,
+    }
+}
+
+/// Render a signed delta for text output: `+5`, `-3`, `0`, or `n/a`.
+fn fmt_delta(delta: Option<i64>) -> String {
+    match delta {
+        Some(d) => format!("{d:+}"),
+        None => "n/a".to_string(),
+    }
+}
+
+/// Computed `sqry update --stats` figures.
+///
+/// Kept separate from rendering so the delta semantics (in particular the
+/// apples-to-apples file delta) are unit-testable without spawning a process.
+///
+/// The critical distinction the #520 review flagged:
+///
+/// - `registered_files` / `registered_files_delta` come from the graph header
+///   on BOTH sides (`GraphHeader.file_count`), which counts every registered
+///   file INCLUDING external / dependency files. Because both sides use the
+///   same definition, the delta is honest on classpath / external workspaces.
+/// - `workspace_files_indexed` (and the per-language breakdown) come from
+///   `BuildResult.total_files`, which counts only workspace (non-external)
+///   files. It is reported as an absolute; it deliberately carries NO delta,
+///   because a correct workspace-only pre-update count is not available from
+///   the header (the header only stores the registered total).
+struct UpdateStatsReport {
+    using_git_mode: bool,
+    nodes: usize,
+    nodes_delta: Option<i64>,
+    canonical_edges: usize,
+    canonical_edges_delta: Option<i64>,
+    raw_edges: usize,
+    workspace_files_indexed: usize,
+    registered_files: Option<usize>,
+    registered_files_delta: Option<i64>,
+    /// Workspace (non-external) files per language, sorted count-desc then name.
+    files_by_language: Vec<(String, usize)>,
+    threads_used: usize,
+    active_plugins: Vec<String>,
+    built_at: String,
+    elapsed_seconds: f64,
+}
+
+/// Derive the `--stats` figures from the build result and the pre/post snapshot
+/// headers. See [`UpdateStatsReport`] for the file-count semantics.
+fn compute_update_stats(
+    build_result: &BuildResult,
+    pre_update_header: Option<&sqry_core::graph::unified::persistence::GraphHeader>,
+    post_update_header: Option<&sqry_core::graph::unified::persistence::GraphHeader>,
+    elapsed: std::time::Duration,
+    using_git_mode: bool,
+) -> UpdateStatsReport {
+    let mut files_by_language: Vec<(String, usize)> = build_result
+        .file_count
+        .iter()
+        .map(|(lang, count)| (lang.clone(), *count))
+        .collect();
+    files_by_language.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+
+    let registered_files = post_update_header.map(|h| h.file_count);
+
+    UpdateStatsReport {
+        using_git_mode,
+        nodes: build_result.node_count,
+        nodes_delta: count_delta(
+            Some(build_result.node_count),
+            pre_update_header.map(|h| h.node_count),
+        ),
+        canonical_edges: build_result.edge_count,
+        canonical_edges_delta: count_delta(
+            Some(build_result.edge_count),
+            pre_update_header.map(|h| h.edge_count),
+        ),
+        raw_edges: build_result.raw_edge_count,
+        workspace_files_indexed: build_result.total_files,
+        registered_files,
+        // Header-to-header: registered files on both sides, so the delta is
+        // apples-to-apples even when external files are present.
+        registered_files_delta: count_delta(
+            registered_files,
+            pre_update_header.map(|h| h.file_count),
+        ),
+        files_by_language,
+        threads_used: build_result.thread_count,
+        active_plugins: build_result.active_plugin_ids.clone(),
+        built_at: build_result.built_at.clone(),
+        elapsed_seconds: elapsed.as_secs_f64(),
+    }
+}
+
+/// Emit real `sqry update --stats` statistics.
+///
+/// The update path rebuilds the whole unified graph and persists it, so the
+/// [`BuildResult`] carries accurate absolute counts (nodes, canonical + raw
+/// edges, workspace per-language file breakdown, thread count, active plugins),
+/// and the freshly-written header carries the registered-file total. Node,
+/// canonical-edge, and registered-file deltas are reported against the
+/// pre-update header. Honours `--json`: emits a single structured object for
+/// programmatic consumers (stdout stays a single JSON document), otherwise a
+/// human-readable block.
+fn emit_update_stats(
+    cli: &Cli,
+    build_result: &BuildResult,
+    pre_update_header: Option<&sqry_core::graph::unified::persistence::GraphHeader>,
+    post_update_header: Option<&sqry_core::graph::unified::persistence::GraphHeader>,
+    elapsed: std::time::Duration,
+    using_git_mode: bool,
+) {
+    let report = compute_update_stats(
+        build_result,
+        pre_update_header,
+        post_update_header,
+        elapsed,
+        using_git_mode,
+    );
+
+    if cli.json {
+        let files_by_language: serde_json::Map<String, serde_json::Value> = report
+            .files_by_language
+            .iter()
+            .map(|(lang, count)| (lang.clone(), serde_json::json!(*count)))
+            .collect();
+
+        let payload = serde_json::json!({
+            "update_stats": {
+                "mode": if report.using_git_mode { "git" } else { "hash" },
+                "nodes": report.nodes,
+                "nodes_delta": report.nodes_delta,
+                "canonical_edges": report.canonical_edges,
+                "canonical_edges_delta": report.canonical_edges_delta,
+                "raw_edges": report.raw_edges,
+                "workspace_files_indexed": report.workspace_files_indexed,
+                "registered_files": report.registered_files,
+                "registered_files_delta": report.registered_files_delta,
+                "languages": report.files_by_language.len(),
+                "files_by_language": files_by_language,
+                "threads_used": report.threads_used,
+                "active_plugins": report.active_plugins,
+                "built_at": report.built_at,
+                "elapsed_seconds": report.elapsed_seconds,
+            }
+        });
+        match serde_json::to_string_pretty(&payload) {
+            Ok(rendered) => println!("{rendered}"),
+            Err(err) => eprintln!("failed to render update stats as JSON: {err}"),
+        }
+        return;
+    }
+
+    println!("\nUpdate statistics:");
+    println!(
+        "  Mode:              {}",
+        if report.using_git_mode {
+            "git-aware"
+        } else {
+            "hash-based"
+        }
+    );
+    println!(
+        "  Nodes:             {} ({} since last index)",
+        report.nodes,
+        fmt_delta(report.nodes_delta)
+    );
+    println!(
+        "  Canonical edges:   {} ({} since last index)",
+        report.canonical_edges,
+        fmt_delta(report.canonical_edges_delta)
+    );
+    println!("  Raw edges:         {}", report.raw_edges);
+    match report.registered_files {
+        Some(registered) => println!(
+            "  Registered files:  {} ({} since last index) (includes external/dependency files)",
+            registered,
+            fmt_delta(report.registered_files_delta)
+        ),
+        None => println!("  Registered files:  n/a (header unavailable)"),
+    }
+    println!(
+        "  Workspace files:   {} (non-external, indexed this build)",
+        report.workspace_files_indexed
+    );
+    println!("  Languages:         {}", report.files_by_language.len());
+
+    // Full per-language workspace file breakdown (the summary line only shows
+    // the top few).
+    if !report.files_by_language.is_empty() {
+        println!("  Files by language (workspace):");
+        for (lang, count) in &report.files_by_language {
+            println!("    {lang}: {count}");
+        }
+    }
+
+    println!("  Threads used:      {}", report.threads_used);
+    if !report.active_plugins.is_empty() {
+        println!("  Active plugins:    {}", report.active_plugins.join(", "));
+    }
+    println!("  Built at:          {}", report.built_at);
+    println!("  Elapsed:           {:.2}s", report.elapsed_seconds);
 }
 
 #[allow(deprecated)]
@@ -1336,8 +1614,108 @@ fn print_gitignore_warning() {
 mod tests {
     use super::*;
     use crate::large_stack_test;
+    use sqry_core::graph::unified::persistence::GraphHeader;
+    use std::collections::HashMap;
     use std::fs;
+    use std::time::Duration;
     use tempfile::TempDir;
+
+    /// Build a synthetic `BuildResult` with the given workspace (non-external)
+    /// file total so the delta semantics can be unit-tested in isolation.
+    fn build_result_with(
+        node_count: usize,
+        edge_count: usize,
+        workspace_files: usize,
+    ) -> BuildResult {
+        let mut file_count = HashMap::new();
+        file_count.insert("rust".to_string(), workspace_files);
+        BuildResult {
+            node_count,
+            edge_count,
+            raw_edge_count: edge_count,
+            file_count,
+            total_files: workspace_files,
+            built_at: "2026-07-06T00:00:00+00:00".to_string(),
+            root_path: "/tmp/ws".to_string(),
+            thread_count: 8,
+            active_plugin_ids: vec!["rust".to_string()],
+            analysis_strategies: Vec::new(),
+        }
+    }
+
+    /// #520 review BLOCKER 1: the file delta must compare like against like.
+    /// A pre-update header registers 10 files (3 workspace + 7 external) and the
+    /// post-update header registers 13 (6 workspace + 7 external). The build
+    /// only parsed 6 workspace files. The reported delta must be the
+    /// header-to-header registered delta (+3), NOT the old bug that subtracted
+    /// the workspace-only build total from the registered pre-count (6 - 10 =
+    /// -4), and the workspace absolute must be reported separately with no
+    /// delta contamination.
+    #[test]
+    fn update_stats_file_delta_is_registered_apples_to_apples() {
+        let build = build_result_with(24, 17, 6);
+        // strings arg is irrelevant to the delta; file_count is the last arg.
+        let pre = GraphHeader::new(20, 15, 100, 10);
+        let post = GraphHeader::new(24, 17, 110, 13);
+
+        let report = compute_update_stats(
+            &build,
+            Some(&pre),
+            Some(&post),
+            Duration::from_millis(10),
+            false,
+        );
+
+        assert_eq!(report.registered_files, Some(13));
+        assert_eq!(
+            report.registered_files_delta,
+            Some(3),
+            "registered delta must be header-to-header (13 - 10)"
+        );
+        // The old apples-to-oranges bug would have produced 6 - 10 = -4.
+        assert_ne!(report.registered_files_delta, Some(-4));
+        assert_eq!(
+            report.workspace_files_indexed, 6,
+            "workspace absolute is the non-external build total"
+        );
+        assert_eq!(report.nodes_delta, Some(4));
+        assert_eq!(report.canonical_edges_delta, Some(2));
+    }
+
+    /// When the post-update header cannot be re-read, registered files and their
+    /// delta are honestly omitted (`None`) rather than reporting a wrong number.
+    /// The workspace absolute is still available from the build result.
+    #[test]
+    fn update_stats_omits_registered_delta_when_header_missing() {
+        let build = build_result_with(24, 17, 6);
+        let pre = GraphHeader::new(20, 15, 100, 10);
+
+        let report =
+            compute_update_stats(&build, Some(&pre), None, Duration::from_millis(10), false);
+
+        assert_eq!(report.registered_files, None);
+        assert_eq!(report.registered_files_delta, None);
+        assert_eq!(report.workspace_files_indexed, 6);
+        // Node / edge deltas still resolve against the pre-update header.
+        assert_eq!(report.nodes_delta, Some(4));
+    }
+
+    /// With no pre-update header (first stats-tracked run), every delta is
+    /// omitted but absolutes still report.
+    #[test]
+    fn update_stats_omits_all_deltas_without_pre_header() {
+        let build = build_result_with(24, 17, 6);
+        let post = GraphHeader::new(24, 17, 110, 6);
+
+        let report =
+            compute_update_stats(&build, None, Some(&post), Duration::from_millis(10), false);
+
+        assert_eq!(report.nodes_delta, None);
+        assert_eq!(report.canonical_edges_delta, None);
+        assert_eq!(report.registered_files_delta, None);
+        assert_eq!(report.registered_files, Some(6));
+        assert_eq!(report.workspace_files_indexed, 6);
+    }
 
     #[cfg(feature = "jvm-classpath")]
     #[test]
@@ -1351,7 +1729,7 @@ mod tests {
             force_classpath: true,
         };
 
-        let result = run_classpath_pipeline_only(tmp_cli_workspace.path(), &classpath_opts)
+        let result = run_classpath_pipeline_only(tmp_cli_workspace.path(), &classpath_opts, false)
             .expect("missing JVM build system should be a non-fatal skip");
         assert!(result.is_none());
     }

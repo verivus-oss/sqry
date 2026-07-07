@@ -16,7 +16,7 @@ use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::node::{NodeId, NodeKind};
 use sqry_core::query::results::QueryResults;
 
-use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
+use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace};
 use crate::execution::types::{CodeContext, PositionData, RangeData, ToolExecution};
 use crate::execution::utils::duration_to_ms;
 use crate::tools::{HierarchicalSearchArgs, Visibility};
@@ -302,7 +302,7 @@ pub fn execute_hierarchical_search(
 
     let engine = engine_for_workspace(explicit_path.as_ref())?;
     let workspace_root = engine.workspace_root();
-    let search_root = canonicalize_in_workspace(&args.path, workspace_root)?;
+    let search_root = canonicalize_in_workspace_enforced(&args.path, workspace_root)?;
 
     tracing::debug!(
         query = %args.query,

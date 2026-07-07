@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [28.0.0](https://github.com/verivus-oss/sqry/compare/v27.0.8...v28.0.0) - 2026-07-07
+
+### Added
+
+- *(export)* Archify architecture-JSON export (--format archify) ([#532](https://github.com/verivus-oss/sqry/pull/532))
+- *(tooling)* stable/dev sqry channel separation ([#308](https://github.com/verivus-oss/sqry/pull/308)) ([#534](https://github.com/verivus-oss/sqry/pull/534))
+
+### Documentation
+
+- *(release)* batched-release model + vet-drift/concurrency/runner recovery
+
+### Fixed
+
+- *(workspace)* workspace stats reports 0 symbols for indexed members ([#515](https://github.com/verivus-oss/sqry/pull/515)) ([#535](https://github.com/verivus-oss/sqry/pull/535))
+- *(cli)* unify ambiguous-symbol disambiguation across explain/visualize/alias ([#528](https://github.com/verivus-oss/sqry/pull/528))
+- *(daemon)* isolate private daemon socket (length guard + co-located lock/pid) ([#525](https://github.com/verivus-oss/sqry/pull/525))
+- *(cli)* make CLI flags order-independent and give update --stats real output ([#524](https://github.com/verivus-oss/sqry/pull/524))
+- *(query)* make file: a true alias of path: in sqry query ([#522](https://github.com/verivus-oss/sqry/pull/522))
 ## [27.0.8](https://github.com/verivus-oss/sqry/compare/v27.0.7...v27.0.8) - 2026-07-05
 
 ### Other

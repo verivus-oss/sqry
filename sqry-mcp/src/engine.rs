@@ -634,8 +634,7 @@ pub fn resolve_workspace_root() -> Result<PathBuf> {
 /// Typed errors emitted by the workspace-bound canonicalization paths.
 ///
 /// Used by [`canonicalize_in_workspace`] /
-/// [`canonicalize_in_workspace_with_logical`] /
-/// [`crate::path_resolver::resolve_path_in_logical_workspace`] so callers
+/// [`canonicalize_in_workspace_with_logical`] so callers
 /// (MCP tool handlers, the redaction crate, future LSP integrations) can
 /// distinguish "outside workspace" (invalid input) from "explicitly
 /// excluded" (criterion 9: exclusions take precedence over containment)
@@ -670,10 +669,17 @@ pub enum WorkspacePathError {
     },
 }
 
-/// Returns an error if the operation fails.
+/// Exclusion-unaware workspace-bound canonicalization primitive.
+///
+/// Retained as the library's public API and exercised by tests; production
+/// tool executors in the binary route through
+/// [`canonicalize_in_workspace_enforced`] instead, so the binary module tree
+/// has no direct caller (hence `#[allow(dead_code)]`).
 ///
 /// # Errors
 ///
+/// Returns an error if the operation fails.
+#[allow(dead_code)]
 pub fn canonicalize_in_workspace(path_str: &str, workspace_root: &Path) -> Result<PathBuf> {
     canonicalize_in_workspace_inner(path_str, workspace_root, None).map_err(Into::into)
 }
@@ -689,21 +695,100 @@ pub fn canonicalize_in_workspace(path_str: &str, workspace_root: &Path) -> Resul
 /// When `workspace` is `None` the behavior is identical to
 /// [`canonicalize_in_workspace`].
 ///
-/// Tagged `#[allow(dead_code)]` because tool wiring to honour
-/// exclusions is staged behind the redactor today; the tool-side caller
-/// is added in a follow-on workspace-aware-cross-repo step.
+/// This is the single explicit-workspace public seam: production routes
+/// through it via [`canonicalize_in_workspace_enforced`] (which supplies
+/// the per-request [`sqry_core::workspace::LogicalWorkspace`]), and the
+/// exclusion-precedence tests call it by name with an explicit workspace.
 ///
 /// # Errors
 ///
 /// Returns [`WorkspacePathError`] for excluded, out-of-workspace, or
 /// uncanonicalizable inputs.
-#[allow(dead_code)]
 pub fn canonicalize_in_workspace_with_logical(
     path_str: &str,
     workspace_root: &Path,
     workspace: Option<&sqry_core::workspace::LogicalWorkspace>,
 ) -> Result<PathBuf, WorkspacePathError> {
     canonicalize_in_workspace_inner(path_str, workspace_root, workspace)
+}
+
+/// Production canonicalization entry that enforces the per-request
+/// [`sqry_core::workspace::LogicalWorkspace`] exclusions bound on the
+/// blocking-thread thread-local (see
+/// [`crate::workspace_session::with_workspace_override`]).
+///
+/// When a `LogicalWorkspace` is bound, exclusions are checked before the
+/// workspace-bound containment check (acceptance criterion 9); when none is
+/// bound (daemon-hosted paths, tests without a session), behaviour is
+/// identical to [`canonicalize_in_workspace`].
+///
+/// # Errors
+///
+/// Returns an [`crate::error::RpcError::validation`] error (code `-32602`,
+/// downcast to `invalid_params` at the tool dispatch layer) when the path
+/// matches an exclusion, and forwards every other [`WorkspacePathError`]
+/// variant unchanged so out-of-workspace and traversal rejections keep their
+/// current surface.
+///
+/// Every production tool executor path/file_path resolution routes through
+/// this entry (Surface 1 migration); the base
+/// [`canonicalize_in_workspace`] survives only for tests and as the
+/// exclusion-unaware primitive.
+pub fn canonicalize_in_workspace_enforced(
+    path_str: &str,
+    workspace_root: &Path,
+) -> Result<PathBuf> {
+    let logical = crate::workspace_session::current_logical_workspace();
+    canonicalize_in_workspace_with_logical(path_str, workspace_root, logical.as_deref())
+        .map_err(excluded_to_rpc)
+}
+
+/// Map a [`WorkspacePathError`] into an `anyhow::Error` for the enforced
+/// canonicalization entry.
+///
+/// The [`WorkspacePathError::Excluded`] variant becomes an
+/// [`crate::error::RpcError::validation`] (code `-32602`), so the tool
+/// dispatch layer downcasts it and surfaces `invalid_params` carrying the
+/// distinct "excluded by the logical workspace policy" message. Every other
+/// variant forwards via [`Into::into`] so its existing error surface is
+/// unchanged.
+/// Enforce only the `LogicalWorkspace` exclusion policy for a tool `file_path`
+/// argument, tolerating inputs that do not canonicalize.
+///
+/// Unlike [`canonicalize_in_workspace_enforced`], a path that fails to resolve
+/// on disk (missing file, or a partial suffix used purely as a graph filter)
+/// yields `Ok(None)` rather than an error, so the caller can keep its own
+/// graph-lookup / suffix-match fallbacks. An *excluded* path still fails closed
+/// with the same [`crate::error::RpcError::validation`] (`-32602`,
+/// `invalid_params`) as Surface 1, because the exclusion check runs on the
+/// normalized path before canonicalization. This is the enforcement seam for
+/// `file_path` surfaces (`get_document_symbols`, `call_hierarchy`) that look a
+/// path up in the graph directly instead of through
+/// [`canonicalize_in_workspace_enforced`] (issue #469 Surface 1).
+///
+/// # Errors
+///
+/// Returns the exclusion `RpcError::validation` when `path_str` matches a
+/// `LogicalWorkspace` exclusion bound on the per-request thread-local.
+pub(crate) fn enforce_exclusion_for_file_path(
+    path_str: &str,
+    workspace_root: &Path,
+) -> Result<Option<PathBuf>> {
+    let logical = crate::workspace_session::current_logical_workspace();
+    match canonicalize_in_workspace_with_logical(path_str, workspace_root, logical.as_deref()) {
+        Ok(canon) => Ok(Some(canon)),
+        Err(err @ WorkspacePathError::Excluded { .. }) => Err(excluded_to_rpc(err)),
+        Err(_) => Ok(None),
+    }
+}
+
+pub(crate) fn excluded_to_rpc(err: WorkspacePathError) -> anyhow::Error {
+    match err {
+        WorkspacePathError::Excluded { .. } => {
+            crate::error::RpcError::validation(err.to_string()).into()
+        }
+        other => other.into(),
+    }
 }
 
 fn canonicalize_in_workspace_inner(
@@ -777,7 +862,10 @@ fn canonicalize_in_workspace_inner(
 /// (exact or descendant) — same semantics as
 /// [`sqry_core::workspace::LogicalWorkspace::classify`]'s exclusion
 /// branch.
-fn exclusion_matches(path: &Path, workspace: &sqry_core::workspace::LogicalWorkspace) -> bool {
+pub(crate) fn exclusion_matches(
+    path: &Path,
+    workspace: &sqry_core::workspace::LogicalWorkspace,
+) -> bool {
     workspace
         .exclusions()
         .iter()

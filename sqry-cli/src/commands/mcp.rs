@@ -13,9 +13,42 @@ use std::time::SystemTime;
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
-use crate::args::{McpCommand, SetupScope, ToolTarget};
+use crate::args::{McpChannel, McpCommand, SetupScope, ToolTarget};
 
 const STANDALONE_MCP_ARG: &str = "--no-daemon";
+
+// ---------------------------------------------------------------------------
+// Channel configuration (issue #308)
+// ---------------------------------------------------------------------------
+
+/// Per-channel identifiers threaded through the setup writers so the stable
+/// and dev channels write to disjoint MCP server keys pointing at disjoint
+/// binaries. The stable channel reproduces the historical output byte for
+/// byte (`sqry` -> `sqry-mcp`); the dev channel writes `sqry_dev` ->
+/// `sqry-mcp-d` and can never touch the stable entry (and vice versa).
+#[derive(Debug, Clone, Copy)]
+struct ChannelConfig {
+    /// MCP server key written into each tool's config (`sqry` | `sqry_dev`).
+    server_key: &'static str,
+    /// Binary name resolved and written as the server `command`
+    /// (`sqry-mcp` | `sqry-mcp-d`).
+    mcp_binary_name: &'static str,
+}
+
+impl ChannelConfig {
+    fn from_channel(channel: McpChannel) -> Self {
+        match channel {
+            McpChannel::Stable => Self {
+                server_key: "sqry",
+                mcp_binary_name: "sqry-mcp",
+            },
+            McpChannel::Dev => Self {
+                server_key: "sqry_dev",
+                mcp_binary_name: "sqry-mcp-d",
+            },
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Public entry point
@@ -36,6 +69,7 @@ pub fn run(command: &McpCommand) -> Result<()> {
             force,
             dry_run,
             no_backup,
+            channel,
         } => run_setup(
             tool,
             scope,
@@ -43,6 +77,7 @@ pub fn run(command: &McpCommand) -> Result<()> {
             *force,
             *dry_run,
             *no_backup,
+            *channel,
         ),
         McpCommand::Status { json } => run_status(*json),
     }
@@ -52,32 +87,33 @@ pub fn run(command: &McpCommand) -> Result<()> {
 // Binary resolution
 // ---------------------------------------------------------------------------
 
-/// Find the sqry-mcp binary path.
+/// Find an MCP binary by name (e.g. `sqry-mcp` for the stable channel or
+/// `sqry-mcp-d` for the dev channel).
 ///
 /// Search order:
 /// 1. Same directory as the running `sqry` binary
 /// 2. `$PATH` via `which`
-/// 3. `~/.local/bin/sqry-mcp`
-/// 4. `~/.cargo/bin/sqry-mcp`
-fn find_sqry_mcp_binary() -> Result<PathBuf> {
+/// 3. `~/.local/bin/<name>`
+/// 4. `~/.cargo/bin/<name>`
+fn find_mcp_binary(name: &str) -> Result<PathBuf> {
     // 1. Same directory as current binary
     if let Ok(exe) = std::env::current_exe()
         && let Some(dir) = exe.parent()
     {
-        let candidate = dir.join("sqry-mcp");
+        let candidate = dir.join(name);
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
 
     // 2. $PATH
-    if let Ok(path) = which::which("sqry-mcp") {
+    if let Ok(path) = which::which(name) {
         return Ok(path);
     }
 
     // 3. ~/.local/bin/
     if let Some(home) = dirs::home_dir() {
-        let candidate = home.join(".local/bin/sqry-mcp");
+        let candidate = home.join(".local/bin").join(name);
         if candidate.is_file() {
             return Ok(candidate);
         }
@@ -85,14 +121,21 @@ fn find_sqry_mcp_binary() -> Result<PathBuf> {
 
     // 4. ~/.cargo/bin/
     if let Some(home) = dirs::home_dir() {
-        let candidate = home.join(".cargo/bin/sqry-mcp");
+        let candidate = home.join(".cargo/bin").join(name);
         if candidate.is_file() {
             return Ok(candidate);
         }
     }
 
+    if name == "sqry-mcp-d" {
+        bail!(
+            "Could not find the dev MCP binary `{name}`.\n\
+             Install the dev channel with: scripts/install-dev.sh\n\
+             (see docs/development/tooling/sqry-channel-separation.md)."
+        );
+    }
     bail!(
-        "Could not find sqry-mcp binary.\n\
+        "Could not find {name} binary.\n\
          Install it with: cargo install --path sqry-mcp\n\
          Or ensure it is on your PATH."
     );
@@ -107,9 +150,15 @@ fn find_sqry_mcp_binary() -> Result<PathBuf> {
 /// Delegates to [`sqry_core::workspace::discover_workspace_root`] so the
 /// walk is bounded by [`sqry_core::workspace::MAX_ANCESTOR_DEPTH`] and
 /// stops at the first project marker
-/// ([`sqry_core::workspace::PROJECT_MARKERS`]) — eliminating the
+/// ([`sqry_core::workspace::PROJECT_MARKERS`]), eliminating the
 /// stray-`~/.sqry/graph` foot-gun (cluster-E §E.1).
-fn detect_workspace_root() -> Option<PathBuf> {
+///
+/// `pub(crate)` so `commands::doctor` can resolve the exact same workspace
+/// root `sqry mcp setup --scope auto` would have used, and look up the
+/// matching `projects[<root>]` key it writes to Claude's config (issue
+/// #308 doctor blocker: a doctor that hand-rolls a different key format
+/// would silently miss the project-scoped entry).
+pub(crate) fn detect_workspace_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
     match sqry_core::workspace::discover_workspace_root(&cwd) {
         sqry_core::workspace::WorkspaceRootDiscovery::GraphFound { root, .. } => Some(root),
@@ -290,7 +339,7 @@ fn shim_path() -> Option<PathBuf> {
 // Setup command
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
 fn run_setup(
     tool: &ToolTarget,
     scope: &SetupScope,
@@ -298,7 +347,9 @@ fn run_setup(
     force: bool,
     dry_run: bool,
     no_backup: bool,
+    channel: McpChannel,
 ) -> Result<()> {
+    let channel_config = ChannelConfig::from_channel(channel);
     // Validate --workspace-root override if provided (before binary lookup
     // so argument errors are reported immediately)
     let workspace_root_validated = if let Some(root) = workspace_root_override {
@@ -327,7 +378,7 @@ fn run_setup(
         None
     };
 
-    let binary = find_sqry_mcp_binary()?;
+    let binary = find_mcp_binary(channel_config.mcp_binary_name)?;
     let binary_str = binary.to_string_lossy();
 
     // Auto-detect workspace root from CWD (used for Claude scope decisions)
@@ -360,6 +411,7 @@ fn run_setup(
                         force,
                         dry_run,
                         backup,
+                        channel_config,
                     ) {
                         Ok(msg) => configured.push(("Claude Code", msg)),
                         Err(e) => {
@@ -390,7 +442,7 @@ fn run_setup(
                 "not detected (codex not found on PATH)".to_string(),
             ));
         } else {
-            match configure_codex(&binary_str, force, dry_run, backup) {
+            match configure_codex(&binary_str, force, dry_run, backup, channel_config) {
                 Ok(msg) => configured.push(("Codex", msg)),
                 Err(e) => {
                     if matches!(tool, ToolTarget::All) {
@@ -411,7 +463,7 @@ fn run_setup(
                 "not detected (gemini not found on PATH)".to_string(),
             ));
         } else {
-            match configure_gemini(&binary_str, force, dry_run, backup) {
+            match configure_gemini(&binary_str, force, dry_run, backup, channel_config) {
                 Ok(msg) => configured.push(("Gemini", msg)),
                 Err(e) => {
                     if matches!(tool, ToolTarget::All) {
@@ -480,8 +532,10 @@ fn configure_claude(
     force: bool,
     dry_run: bool,
     backup: bool,
+    channel: ChannelConfig,
 ) -> Result<String> {
     let config_path = claude_config_path().context("Could not determine home directory")?;
+    let server_key = channel.server_key;
 
     // Build the MCP server entry
     let mut entry = serde_json::json!({
@@ -503,36 +557,37 @@ fn configure_claude(
 
             if dry_run {
                 println!("Would write to: {}", config_path.display());
-                println!("  Path: projects[\"{root_str}\"].mcpServers.sqry");
+                println!("  Path: projects[\"{root_str}\"].mcpServers.{server_key}");
                 println!("  Entry: {}", serde_json::to_string_pretty(&entry)?);
                 return Ok(format!("would configure ({scope_label})"));
             }
 
-            write_claude_project_entry(&config_path, &root_str, &entry, force, backup)?;
+            write_claude_project_entry(&config_path, &root_str, &entry, force, backup, server_key)?;
         }
         SetupScope::Global => {
             scope_label = "global".to_string();
 
             if dry_run {
                 println!("Would write to: {}", config_path.display());
-                println!("  Path: mcpServers.sqry");
+                println!("  Path: mcpServers.{server_key}");
                 println!("  Entry: {}", serde_json::to_string_pretty(&entry)?);
                 return Ok(format!("would configure ({scope_label})"));
             }
 
-            write_claude_global_entry(&config_path, &entry, force, backup)?;
+            write_claude_global_entry(&config_path, &entry, force, backup, server_key)?;
         }
     }
 
     Ok(format!("configured ({scope_label})"))
 }
 
-fn write_claude_project_entry(
+pub(crate) fn write_claude_project_entry(
     config_path: &Path,
     project_path: &str,
     entry: &Value,
     force: bool,
     backup: bool,
+    server_key: &str,
 ) -> Result<()> {
     let (mut config, mtime) = if config_path.exists() {
         let (content, mtime) = read_with_mtime(config_path)?;
@@ -566,14 +621,15 @@ fn write_claude_project_entry(
         .as_object_mut()
         .context("mcpServers is not a JSON object")?;
 
-    if servers.contains_key("sqry") && !force {
+    if servers.contains_key(server_key) && !force {
         bail!(
-            "Claude Code project entry for sqry already exists at projects[\"{project_path}\"].\n\
+            "Claude Code project entry for {server_key} already exists at \
+             projects[\"{project_path}\"].\n\
              Use --force to overwrite."
         );
     }
 
-    servers.insert("sqry".to_string(), entry.clone());
+    servers.insert(server_key.to_string(), entry.clone());
 
     // Write back
     if let Some(mt) = mtime {
@@ -589,6 +645,7 @@ fn write_claude_global_entry(
     entry: &Value,
     force: bool,
     backup: bool,
+    server_key: &str,
 ) -> Result<()> {
     let (mut config, mtime) = if config_path.exists() {
         let (content, mtime) = read_with_mtime(config_path)?;
@@ -609,14 +666,14 @@ fn write_claude_global_entry(
         .as_object_mut()
         .context("mcpServers is not a JSON object")?;
 
-    if servers.contains_key("sqry") && !force {
+    if servers.contains_key(server_key) && !force {
         bail!(
-            "Claude Code global sqry entry already exists.\n\
+            "Claude Code global {server_key} entry already exists.\n\
              Use --force to overwrite."
         );
     }
 
-    servers.insert("sqry".to_string(), entry.clone());
+    servers.insert(server_key.to_string(), entry.clone());
 
     if let Some(mt) = mtime {
         check_mtime(config_path, mt, force)?;
@@ -630,12 +687,19 @@ fn write_claude_global_entry(
 // Codex configuration
 // ---------------------------------------------------------------------------
 
-fn configure_codex(binary: &str, force: bool, dry_run: bool, backup: bool) -> Result<String> {
+fn configure_codex(
+    binary: &str,
+    force: bool,
+    dry_run: bool,
+    backup: bool,
+    channel: ChannelConfig,
+) -> Result<String> {
     let config_path = codex_config_path().context("Could not determine home directory")?;
+    let server_key = channel.server_key;
 
     if dry_run {
         println!("Would write to: {}", config_path.display());
-        println!("  Section: [mcp_servers.sqry]");
+        println!("  Section: [mcp_servers.{server_key}]");
         println!("  command = \"{binary}\"");
         println!("  args = [\"{STANDALONE_MCP_ARG}\"]");
         return Ok("would configure (global, CWD discovery)".to_string());
@@ -644,7 +708,7 @@ fn configure_codex(binary: &str, force: bool, dry_run: bool, backup: bool) -> Re
     if !config_path.exists() {
         // Create minimal config
         let content = format!(
-            "[mcp_servers.sqry]\ncommand = \"{binary}\"\nargs = [\"{STANDALONE_MCP_ARG}\"]\n"
+            "[mcp_servers.{server_key}]\ncommand = \"{binary}\"\nargs = [\"{STANDALONE_MCP_ARG}\"]\n"
         );
         atomic_write(&config_path, content.as_bytes(), false)?;
         return Ok("configured (global, CWD discovery) [created new config]".to_string());
@@ -657,12 +721,15 @@ fn configure_codex(binary: &str, force: bool, dry_run: bool, backup: bool) -> Re
         .parse()
         .context("Failed to parse ~/.codex/config.toml")?;
 
-    // Check if sqry entry exists
-    let has_sqry = doc.get("mcp_servers").and_then(|s| s.get("sqry")).is_some();
+    // Check if this channel's entry exists
+    let has_entry = doc
+        .get("mcp_servers")
+        .and_then(|s| s.get(server_key))
+        .is_some();
 
-    if has_sqry && !force {
+    if has_entry && !force {
         bail!(
-            "Codex sqry MCP entry already exists.\n\
+            "Codex {server_key} MCP entry already exists.\n\
              Use --force to overwrite."
         );
     }
@@ -672,13 +739,13 @@ fn configure_codex(binary: &str, force: bool, dry_run: bool, backup: bool) -> Re
         doc["mcp_servers"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
 
-    // Create [mcp_servers.sqry] table
+    // Create [mcp_servers.<server_key>] table
     let mut sqry_table = toml_edit::Table::new();
     sqry_table.insert("command", toml_edit::value(binary));
     sqry_table.insert("args", toml_edit::value(standalone_mcp_args_toml()));
 
     // Remove any existing env section (legacy SQRY_MCP_WORKSPACE_ROOT)
-    doc["mcp_servers"]["sqry"] = toml_edit::Item::Table(sqry_table);
+    doc["mcp_servers"][server_key] = toml_edit::Item::Table(sqry_table);
 
     check_mtime(&config_path, mtime, force)?;
     atomic_write(&config_path, doc.to_string().as_bytes(), backup)?;
@@ -690,8 +757,15 @@ fn configure_codex(binary: &str, force: bool, dry_run: bool, backup: bool) -> Re
 // Gemini configuration
 // ---------------------------------------------------------------------------
 
-fn configure_gemini(binary: &str, force: bool, dry_run: bool, backup: bool) -> Result<String> {
+fn configure_gemini(
+    binary: &str,
+    force: bool,
+    dry_run: bool,
+    backup: bool,
+    channel: ChannelConfig,
+) -> Result<String> {
     let config_path = gemini_config_path().context("Could not determine home directory")?;
+    let server_key = channel.server_key;
 
     let entry = serde_json::json!({
         "command": binary,
@@ -701,7 +775,7 @@ fn configure_gemini(binary: &str, force: bool, dry_run: bool, backup: bool) -> R
 
     if dry_run {
         println!("Would write to: {}", config_path.display());
-        println!("  Path: mcpServers.sqry");
+        println!("  Path: mcpServers.{server_key}");
         println!("  Entry: {}", serde_json::to_string_pretty(&entry)?);
         return Ok("would configure (global, CWD discovery)".to_string());
     }
@@ -725,14 +799,14 @@ fn configure_gemini(binary: &str, force: bool, dry_run: bool, backup: bool) -> R
         .as_object_mut()
         .context("mcpServers is not a JSON object")?;
 
-    if servers.contains_key("sqry") && !force {
+    if servers.contains_key(server_key) && !force {
         bail!(
-            "Gemini sqry MCP entry already exists.\n\
+            "Gemini {server_key} MCP entry already exists.\n\
              Use --force to overwrite."
         );
     }
 
-    servers.insert("sqry".to_string(), entry);
+    servers.insert(server_key.to_string(), entry);
 
     if let Some(mt) = mtime {
         check_mtime(&config_path, mt, force)?;
@@ -748,7 +822,11 @@ fn configure_gemini(binary: &str, force: bool, dry_run: bool, backup: bool) -> R
 // ---------------------------------------------------------------------------
 
 fn run_status(json_output: bool) -> Result<()> {
-    let binary = find_sqry_mcp_binary().ok();
+    // `sqry mcp status` stays deliberately narrow: it reports only the stable
+    // channel's `sqry` server entries. All cross-channel (stable vs dev)
+    // reporting lives in `sqry doctor channels` (issue #308 design
+    // correction 4).
+    let binary = find_mcp_binary("sqry-mcp").ok();
     let binary_display = binary.as_ref().map_or_else(
         || "not found".to_string(),
         |p| p.to_string_lossy().to_string(),
@@ -1331,7 +1409,8 @@ mod tests {
             "env": { "SQRY_MCP_WORKSPACE_ROOT": "/my/project" }
         });
 
-        write_claude_project_entry(&config_path, "/my/project", &entry, false, false).unwrap();
+        write_claude_project_entry(&config_path, "/my/project", &entry, false, false, "sqry")
+            .unwrap();
 
         let content: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
@@ -1366,7 +1445,8 @@ mod tests {
         .unwrap();
 
         let entry = serde_json::json!({ "command": "new" });
-        let result = write_claude_project_entry(&config_path, "/my/project", &entry, false, false);
+        let result =
+            write_claude_project_entry(&config_path, "/my/project", &entry, false, false, "sqry");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -1392,7 +1472,8 @@ mod tests {
         .unwrap();
 
         let entry = serde_json::json!({ "command": "new" });
-        write_claude_project_entry(&config_path, "/my/project", &entry, true, false).unwrap();
+        write_claude_project_entry(&config_path, "/my/project", &entry, true, false, "sqry")
+            .unwrap();
 
         let content: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
@@ -1413,7 +1494,7 @@ mod tests {
             "args": standalone_mcp_args_json()
         });
 
-        write_claude_global_entry(&config_path, &entry, false, false).unwrap();
+        write_claude_global_entry(&config_path, &entry, false, false, "sqry").unwrap();
 
         let content: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
@@ -1440,7 +1521,7 @@ mod tests {
         .unwrap();
 
         let entry = serde_json::json!({ "command": "new" });
-        let result = write_claude_global_entry(&config_path, &entry, false, false);
+        let result = write_claude_global_entry(&config_path, &entry, false, false, "sqry");
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("already exists"));
     }
@@ -1467,7 +1548,8 @@ mod tests {
             "command": "/usr/bin/sqry-mcp",
             "env": { "SQRY_MCP_WORKSPACE_ROOT": "/my/project" }
         });
-        write_claude_project_entry(&config_path, "/my/project", &entry, false, false).unwrap();
+        write_claude_project_entry(&config_path, "/my/project", &entry, false, false, "sqry")
+            .unwrap();
 
         let content: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
@@ -1551,6 +1633,7 @@ mod tests {
             false,
             true, // dry_run
             true,
+            McpChannel::Stable,
         );
         assert!(result.is_err());
         assert!(
@@ -1574,6 +1657,7 @@ mod tests {
             false,
             true, // dry_run
             true,
+            McpChannel::Stable,
         );
         assert!(result.is_err());
         assert!(
@@ -1582,5 +1666,105 @@ mod tests {
                 .to_string()
                 .contains("Codex/Gemini use global configs")
         );
+    }
+
+    // -- Channel selection (issue #308) --
+
+    #[test]
+    fn test_channel_config_stable_maps_to_sqry() {
+        let cfg = ChannelConfig::from_channel(McpChannel::Stable);
+        assert_eq!(cfg.server_key, "sqry");
+        assert_eq!(cfg.mcp_binary_name, "sqry-mcp");
+    }
+
+    #[test]
+    fn test_channel_config_dev_maps_to_sqry_dev() {
+        let cfg = ChannelConfig::from_channel(McpChannel::Dev);
+        assert_eq!(cfg.server_key, "sqry_dev");
+        assert_eq!(cfg.mcp_binary_name, "sqry-mcp-d");
+    }
+
+    /// Writing the dev entry (`sqry_dev`) must never touch an existing stable
+    /// `sqry` entry, and vice versa: the two keys are disjoint.
+    #[test]
+    fn test_dev_global_entry_does_not_clobber_stable() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("claude.json");
+
+        // Existing stable entry.
+        let existing = serde_json::json!({
+            "mcpServers": {
+                "sqry": { "command": "/usr/bin/sqry-mcp" }
+            }
+        });
+        fs::write(
+            &config_path,
+            serde_json::to_string_pretty(&existing).unwrap(),
+        )
+        .unwrap();
+
+        // Write a dev entry under sqry_dev.
+        let dev_entry = serde_json::json!({
+            "type": "stdio",
+            "command": "/home/dev/.local/bin/sqry-mcp-d",
+            "args": standalone_mcp_args_json()
+        });
+        write_claude_global_entry(&config_path, &dev_entry, false, false, "sqry_dev").unwrap();
+
+        let content: Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        // Stable entry untouched.
+        assert_eq!(
+            content["mcpServers"]["sqry"]["command"],
+            "/usr/bin/sqry-mcp"
+        );
+        // Dev entry added under its own key.
+        assert_eq!(
+            content["mcpServers"]["sqry_dev"]["command"],
+            "/home/dev/.local/bin/sqry-mcp-d"
+        );
+    }
+
+    /// The dev key is gated independently: writing `sqry_dev` twice without
+    /// `--force` conflicts on `sqry_dev`, not on the stable `sqry` key.
+    #[test]
+    fn test_dev_global_entry_gates_on_its_own_key() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("claude.json");
+
+        let dev_entry = serde_json::json!({ "command": "sqry-mcp-d" });
+        write_claude_global_entry(&config_path, &dev_entry, false, false, "sqry_dev").unwrap();
+
+        // Second dev write without force conflicts on sqry_dev.
+        let result = write_claude_global_entry(&config_path, &dev_entry, false, false, "sqry_dev");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("sqry_dev"));
+
+        // A stable write still succeeds (disjoint key).
+        let stable_entry = serde_json::json!({ "command": "sqry-mcp" });
+        write_claude_global_entry(&config_path, &stable_entry, false, false, "sqry").unwrap();
+        let content: Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(content["mcpServers"]["sqry"]["command"], "sqry-mcp");
+        assert_eq!(content["mcpServers"]["sqry_dev"]["command"], "sqry-mcp-d");
+    }
+
+    /// Stable channel writer output is unchanged: writing `sqry` still lands
+    /// under the `sqry` key exactly as before.
+    #[test]
+    fn test_stable_channel_key_unchanged() {
+        let tmp = TempDir::new().unwrap();
+        let config_path = tmp.path().join("claude.json");
+
+        let entry = serde_json::json!({ "command": "/usr/bin/sqry-mcp" });
+        write_claude_global_entry(&config_path, &entry, false, false, "sqry").unwrap();
+
+        let content: Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        assert_eq!(
+            content["mcpServers"]["sqry"]["command"],
+            "/usr/bin/sqry-mcp"
+        );
+        assert!(content["mcpServers"].get("sqry_dev").is_none());
     }
 }

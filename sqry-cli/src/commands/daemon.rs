@@ -940,14 +940,47 @@ fn run_daemon_load(path: &Path) -> Result<()> {
 ///
 /// Resolution order:
 /// 1. Explicit `--sqryd-path` override.
-/// 2. Sibling of `current_exe()` (canonical path, symlink-safe).
-/// 3. `SQRYD_PATH` environment variable.
+/// 2. `SQRYD_PATH` environment variable (when set).
+/// 3. Sibling of `current_exe()` (canonical path, symlink-safe).
 /// 4. `PATH` lookup via [`which::which`].
+///
+/// `SQRYD_PATH` is honored *before* the `current_exe()` sibling so that a
+/// dev-channel wrapper (which exports `SQRYD_PATH` pointing at its own
+/// `sqryd-d.bin`) never silently spawns the stable `sqryd` that sits beside
+/// it in a shared install dir such as `~/.local/bin`. Without this ordering
+/// the sibling lookup would win and defeat channel isolation entirely (issue
+/// #308 design corrections; codex/claude design-gate blocker). When
+/// `SQRYD_PATH` is set but points at a non-existent path it is treated as an
+/// explicit misconfiguration and surfaced as an error rather than silently
+/// falling through to the stable sibling.
 ///
 /// # Errors
 ///
 /// Returns an error if no `sqryd` binary can be found on the current system.
 fn resolve_sqryd_binary(explicit: Option<&Path>) -> Result<PathBuf> {
+    let sqryd_path_env = std::env::var_os("SQRYD_PATH").map(PathBuf::from);
+    let exe_dir = std::env::current_exe().ok().map(|exe| {
+        // Canonicalize to follow symlinks (security: prevents ../foo attacks).
+        std::fs::canonicalize(&exe).unwrap_or(exe)
+    });
+    let exe_dir = exe_dir.as_deref().and_then(Path::parent);
+    resolve_sqryd_binary_from(explicit, sqryd_path_env.as_deref(), exe_dir)
+}
+
+/// Pure resolution core for [`resolve_sqryd_binary`], with the environment
+/// (`SQRYD_PATH`) and the `current_exe()` directory passed in explicitly so
+/// the ordering can be unit-tested deterministically without mutating process
+/// state or mocking `current_exe`.
+///
+/// Order: explicit override, then `SQRYD_PATH`, then the `exe_dir` sibling,
+/// then a `PATH` lookup. `SQRYD_PATH` deliberately precedes the sibling so the
+/// dev channel's daemon selection cannot be shadowed by a co-located stable
+/// `sqryd` (issue #308).
+fn resolve_sqryd_binary_from(
+    explicit: Option<&Path>,
+    sqryd_path_env: Option<&Path>,
+    exe_dir: Option<&Path>,
+) -> Result<PathBuf> {
     // 1. Explicit override.
     if let Some(path) = explicit {
         if path.exists() {
@@ -956,30 +989,28 @@ fn resolve_sqryd_binary(explicit: Option<&Path>) -> Result<PathBuf> {
         anyhow::bail!("explicit --sqryd-path {} does not exist", path.display());
     }
 
-    // 2. Sibling of the current executable (canonical, symlink-resolved).
-    if let Ok(exe) = std::env::current_exe() {
-        // Canonicalize to follow symlinks (security: prevents ../foo attacks).
-        let canonical = std::fs::canonicalize(&exe).unwrap_or(exe);
-        if let Some(dir) = canonical.parent() {
-            let sibling = dir.join("sqryd");
-            if sibling.exists() {
-                return Ok(sibling);
-            }
-            // Windows: try .exe suffix.
-            let sibling_exe = dir.join("sqryd.exe");
-            if sibling_exe.exists() {
-                return Ok(sibling_exe);
-            }
-        }
-    }
-
-    // 3. SQRYD_PATH env var.
-    if let Some(val) = std::env::var_os("SQRYD_PATH") {
-        let path = PathBuf::from(val);
+    // 2. SQRYD_PATH env var, honored before the sibling lookup so a dev
+    //    wrapper's explicit daemon selection wins over a co-located stable
+    //    `sqryd`. A set-but-missing value is a misconfiguration, not a
+    //    reason to fall back to the stable sibling.
+    if let Some(path) = sqryd_path_env {
         if path.exists() {
-            return Ok(path);
+            return Ok(path.to_path_buf());
         }
         anyhow::bail!("SQRYD_PATH={} does not exist", path.display());
+    }
+
+    // 3. Sibling of the current executable (canonical, symlink-resolved).
+    if let Some(dir) = exe_dir {
+        let sibling = dir.join("sqryd");
+        if sibling.exists() {
+            return Ok(sibling);
+        }
+        // Windows: try .exe suffix.
+        let sibling_exe = dir.join("sqryd.exe");
+        if sibling_exe.exists() {
+            return Ok(sibling_exe);
+        }
     }
 
     // 4. PATH lookup.
@@ -1650,6 +1681,64 @@ mod tests {
 
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
         assert_eq!(result.unwrap(), sqryd_path);
+    }
+
+    /// SQRYD_PATH-first ordering (issue #308): when `SQRYD_PATH` is set and
+    /// exists it must win even though a sibling literally named `sqryd` also
+    /// exists in the `current_exe()` directory. This is the core channel
+    /// isolation guarantee: a dev wrapper installed beside the stable `sqryd`
+    /// must spawn its own `sqryd-d.bin` via `SQRYD_PATH`, never the stable
+    /// sibling. Uses the pure resolver core so both the env and the exe dir are
+    /// injected deterministically (no process-state mutation, no current_exe
+    /// mocking).
+    #[test]
+    fn resolve_sqryd_binary_prefers_env_over_sibling() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        // A sibling `sqryd` (the stable daemon) lives in the exe dir.
+        let sibling = dir.path().join("sqryd");
+        std::fs::write(&sibling, b"#!/bin/sh\n").expect("write sibling sqryd");
+
+        // The dev daemon binary the wrapper points SQRYD_PATH at.
+        let dev = dir.path().join("sqryd-d.bin");
+        std::fs::write(&dev, b"#!/bin/sh\n").expect("write dev sqryd");
+
+        let resolved = resolve_sqryd_binary_from(None, Some(dev.as_path()), Some(dir.path()))
+            .expect("resolve");
+        assert_eq!(
+            resolved, dev,
+            "SQRYD_PATH must win over the sibling `sqryd`, got {resolved:?}"
+        );
+    }
+
+    /// When `SQRYD_PATH` is unset, the sibling lookup still applies (stable
+    /// default behavior is preserved).
+    #[test]
+    fn resolve_sqryd_binary_uses_sibling_when_env_unset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let sibling = dir.path().join("sqryd");
+        std::fs::write(&sibling, b"#!/bin/sh\n").expect("write sibling sqryd");
+
+        let resolved = resolve_sqryd_binary_from(None, None, Some(dir.path())).expect("resolve");
+        assert_eq!(resolved, sibling);
+    }
+
+    /// A set-but-missing `SQRYD_PATH` is an explicit misconfiguration: it must
+    /// error rather than silently fall back to the stable sibling.
+    #[test]
+    fn resolve_sqryd_binary_errors_on_missing_env_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Sibling exists, but SQRYD_PATH points at a non-existent file.
+        let sibling = dir.path().join("sqryd");
+        std::fs::write(&sibling, b"#!/bin/sh\n").expect("write sibling sqryd");
+        let missing = dir.path().join("does-not-exist-sqryd-d.bin");
+
+        let result = resolve_sqryd_binary_from(None, Some(missing.as_path()), Some(dir.path()));
+        assert!(result.is_err(), "expected error, got {result:?}");
+        assert!(
+            result.unwrap_err().to_string().contains("SQRYD_PATH="),
+            "error should name SQRYD_PATH"
+        );
     }
 
     // -----------------------------------------------------------------------

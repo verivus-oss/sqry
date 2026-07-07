@@ -1320,6 +1320,29 @@ impl WorkspaceManager {
         matches
     }
 
+    /// Resolve a canonical path to the loaded workspace root that owns it.
+    ///
+    /// Issue #394 Part 1b: a daemon-hosted tool `path` may name a subdirectory
+    /// of a loaded workspace rather than the workspace root itself. This returns
+    /// the longest registered `source_root` that is an ancestor-or-equal of
+    /// `path` (the "owning" workspace), so the acquirer can classify against the
+    /// owning root and let the shared inner tool body scope results to the
+    /// requested subtree. Returns `None` when `path` is not contained by any
+    /// registered workspace, in which case the caller keeps the path as-is and
+    /// classification surfaces the existing "not loaded" error.
+    ///
+    /// O(n) in the number of registered workspaces; in practice n is small.
+    #[must_use]
+    pub fn find_owning_workspace_root(&self, path: &std::path::Path) -> Option<std::path::PathBuf> {
+        let workspaces = self.workspaces.read();
+        let roots: Vec<std::path::PathBuf> =
+            workspaces.keys().map(|k| k.source_root.clone()).collect();
+        sqry_core::workspace::scope::owning_workspace_root(
+            path,
+            roots.iter().map(std::path::PathBuf::as_path),
+        )
+    }
+
     /// Snapshot of daemon-wide status. Point-in-time, non-transactional.
     pub fn status(&self) -> DaemonStatus {
         self.status_with_watcher_state(|_| false)

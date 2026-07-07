@@ -145,7 +145,8 @@ async fn load_revision(
             }),
         )
         .await;
-    serde_json::from_value(expect_success(&resp).clone()).expect("loadRevision response")
+    serde_json::from_value(expect_success(&resp)["result"].clone())
+        .expect("loadRevision response envelope")
 }
 
 async fn daemon_query(

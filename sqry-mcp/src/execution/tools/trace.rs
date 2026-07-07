@@ -20,7 +20,7 @@ use sqry_core::graph::unified::edge::EdgeKind;
 use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::node::NodeId;
 
-use crate::engine::{canonicalize_in_workspace, engine_for_workspace, get_graph_identity};
+use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace, get_graph_identity};
 use crate::tools::TracePathArgs;
 
 use crate::execution::graph_builders::build_graph_metadata;
@@ -37,13 +37,11 @@ use crate::execution::utils::duration_to_ms;
 ///
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
-fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
+fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
     // Issue #394: resolve a subdirectory `path` to its owning workspace instead
     // of failing as if it were a workspace root. Subtree scoping for list/scan
     // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector(path)
-        .ok()
-        .flatten()
+    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
 }
 
 /// Execute the `trace_path` MCP tool (`direction` NodeId-anchored).
@@ -99,10 +97,10 @@ pub fn execute_trace_path(args: &TracePathArgs) -> Result<ToolExecution<TracePat
     // Pre-refactor timing started here — before engine resolution. Preserve
     // by capturing `start` in the wrapper and threading it into `inner::`.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _base = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _base = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require unified graph for path tracing
     let graph = engine.ensure_graph()?;

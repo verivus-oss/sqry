@@ -180,9 +180,18 @@ impl WorkspaceIndex {
         Ok(all_results)
     }
 
-    /// Get workspace-level statistics.
+    /// Get coarse workspace-level statistics.
     ///
     /// Returns aggregated stats across all repositories in the workspace.
+    ///
+    /// `total_symbols` sums each repository's
+    /// [`super::registry::WorkspaceRepository::symbol_count_at_registration`],
+    /// the last-known snapshot captured when the repository was
+    /// registered (`discover_repositories` / `sqry workspace add`), not a
+    /// live re-read of `.sqry/graph/manifest.json`. It goes stale after a
+    /// direct `sqry index --force` reindex until the member is removed
+    /// and re-added. Prefer [`Self::detailed_stats`] (backs `sqry
+    /// workspace stats`) when the count must reflect the current index.
     #[must_use]
     pub fn stats(&self) -> WorkspaceStats {
         let total_repos = self.registry.repositories.len();
@@ -196,7 +205,7 @@ impl WorkspaceIndex {
             .registry
             .repositories
             .iter()
-            .filter_map(|r| r.symbol_count)
+            .filter_map(|r| r.symbol_count_at_registration)
             .sum();
 
         WorkspaceStats {
@@ -209,7 +218,13 @@ impl WorkspaceIndex {
     /// Get detailed workspace statistics including staleness tracking.
     ///
     /// Returns comprehensive stats with freshness buckets, health scores,
-    /// and other detailed metrics.
+    /// and other detailed metrics. Unlike [`Self::stats`], the symbol
+    /// counts here are read **live** from each member's
+    /// `.sqry/graph/manifest.json` at call time (see
+    /// [`super::stats::DetailedWorkspaceStats::from_registry`]), so a
+    /// direct `sqry index --force` reindex of a member is reflected
+    /// immediately without a `workspace remove` + `workspace add`
+    /// round-trip.
     #[must_use]
     pub fn detailed_stats(&self) -> super::stats::DetailedWorkspaceStats {
         super::stats::DetailedWorkspaceStats::from_registry(&self.registry)

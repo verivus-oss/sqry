@@ -479,6 +479,11 @@ fn run_start_detach_unix(
     let cfg = load_config(config_path)?;
     let cfg = Arc::new(cfg);
 
+    // Issue #519 part a: pre-validate the socket path in the detach parent so
+    // an over-long path fails synchronously here (typed length error) instead
+    // of surfacing as a ready-timeout after the grandchild fails to bind.
+    cfg.validate_socket_path()?;
+
     let _tracing_guard = match install_tracing(&cfg, log_level) {
         Ok(g) => g,
         Err(e) => {

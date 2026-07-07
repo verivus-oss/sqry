@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 use super::error::{WorkspaceError, WorkspaceResult};
 use super::logical::MemberReason;
 use super::serde_time;
+use crate::graph::unified::persistence::{GraphStorage, ManifestCheck};
 use crate::project::types::ProjectRootMode;
 
 /// Current on-disk registry format version.
@@ -273,8 +274,25 @@ pub struct WorkspaceRepository {
     /// Optional timestamp when the index was most recently updated.
     #[serde(with = "serde_time::option")]
     pub last_indexed_at: Option<SystemTime>,
-    /// Optional cached symbol count.
-    pub symbol_count: Option<u64>,
+    /// Symbol count observed the last time this repository was
+    /// registered (`discover_repositories` / `sqry workspace add`),
+    /// read once from `.sqry/graph/manifest.json` at that moment via
+    /// [`WorkspaceRepository::symbol_count_from_manifest`].
+    ///
+    /// This is a point-in-time snapshot, not a live value: it goes
+    /// stale the moment the member is reindexed directly (`sqry index
+    /// --force`) without a matching `workspace remove` + `workspace
+    /// add` cycle. `sqry workspace stats`
+    /// ([`super::stats::DetailedWorkspaceStats::from_registry`]) does
+    /// **not** read this field for that reason; it re-reads each
+    /// member's manifest live at stats-computation time instead. This
+    /// field is kept for [`super::index::WorkspaceIndex::stats`] (the
+    /// coarse, non-detailed stats API) and for any display surface that
+    /// wants a cheap last-known count without touching the filesystem
+    /// again. On disk the JSON key stays `symbol_count` for backward
+    /// compatibility with existing `.sqry-workspace` registry files.
+    #[serde(rename = "symbol_count")]
+    pub symbol_count_at_registration: Option<u64>,
     /// Optional primary language for the repository.
     pub primary_language: Option<String>,
 }
@@ -295,8 +313,51 @@ impl WorkspaceRepository {
             root,
             index_path,
             last_indexed_at,
-            symbol_count: None,
+            symbol_count_at_registration: None,
             primary_language: None,
+        }
+    }
+
+    /// Reads the symbol count for `repo_root` from its
+    /// `.sqry/graph/manifest.json` sidecar.
+    ///
+    /// This is the same cheap per-repo metadata file (no full graph
+    /// snapshot load) that `sqry graph status --json` surfaces as its
+    /// `symbol_count` field (mapped from `Manifest::node_count`, see
+    /// [`crate::graph::unified::persistence::manifest::Manifest`]).
+    /// Two distinct call sites use it:
+    ///
+    /// - `discover_repositories` and `sqry workspace add` call it once,
+    ///   at registration time, to populate
+    ///   [`WorkspaceRepository::symbol_count_at_registration`] (a
+    ///   last-known snapshot).
+    /// - [`super::stats::DetailedWorkspaceStats::from_registry`] calls
+    ///   it again, live, for every indexed member each time `sqry
+    ///   workspace stats` runs, so a direct `sqry index --force`
+    ///   reindex is reflected immediately without requiring a
+    ///   `workspace remove` + `workspace add` round-trip to refresh the
+    ///   registration-time cache.
+    ///
+    /// Returns `None` when the manifest is missing (race with an
+    /// in-progress build) or corrupt/unreadable. Callers must not treat
+    /// `None` as "zero symbols": [`super::stats::DetailedWorkspaceStats`]
+    /// tracks unreadable manifests separately via
+    /// `unknown_symbol_count_repos`, so aggregate totals are never
+    /// silently understated.
+    #[must_use]
+    pub fn symbol_count_from_manifest(repo_root: &Path) -> Option<u64> {
+        match GraphStorage::new(repo_root).try_load_manifest() {
+            ManifestCheck::Present(manifest) => {
+                Some(u64::try_from(manifest.node_count).unwrap_or(u64::MAX))
+            }
+            ManifestCheck::Missing => None,
+            ManifestCheck::Corrupt(err) => {
+                log::warn!(
+                    "workspace: manifest.json for {} is corrupt or unreadable, symbol count unknown: {err}",
+                    repo_root.display()
+                );
+                None
+            }
         }
     }
 }

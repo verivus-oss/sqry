@@ -6,9 +6,10 @@ use std::{path::Path, process::Command, sync::Arc};
 
 use serde_json::{Value, json};
 use sqry_daemon::{EmptyGraphBuilder, JSONRPC_REVISION_SELECTOR_AMBIGUOUS, WorkspaceBuilder};
+use sqry_daemon_client::DaemonClient;
 use sqry_daemon_protocol::{
-    ENVELOPE_VERSION, LoadRevisionResult, QueryResult, RevisionStatus, SearchResult,
-    SourceByteMode, UnloadRevisionResult,
+    ENVELOPE_VERSION, ListRevisionsRequest, LoadRevisionRequest, LoadRevisionResult, QueryResult,
+    RevisionSelector, RevisionStatus, SearchResult, SourceByteMode, UnloadRevisionResult,
 };
 use support::ipc::{TestIpcClient, TestServer, expect_error, expect_success};
 use tempfile::TempDir;
@@ -123,7 +124,13 @@ async fn explicit_revision_search_returns_provenance_and_omitted_revision_stays_
         )
         .await;
     let list = expect_success(&list);
-    assert_eq!(list["revisions"].as_array().expect("revisions").len(), 1);
+    assert_eq!(
+        list["result"]["revisions"]
+            .as_array()
+            .expect("revisions")
+            .len(),
+        1
+    );
 
     let status = client
         .request(
@@ -131,8 +138,8 @@ async fn explicit_revision_search_returns_provenance_and_omitted_revision_stays_
             json!({"revision_id": loaded.status.revision_id}),
         )
         .await;
-    let status: RevisionStatus =
-        serde_json::from_value(expect_success(&status).clone()).expect("status response");
+    let status: RevisionStatus = serde_json::from_value(expect_success(&status)["result"].clone())
+        .expect("status response envelope");
     assert_eq!(status.artifact_id, loaded.artifact_id);
 
     let refused = client
@@ -154,7 +161,8 @@ async fn explicit_revision_search_returns_provenance_and_omitted_revision_stays_
         )
         .await;
     let unloaded: UnloadRevisionResult =
-        serde_json::from_value(expect_success(&unloaded).clone()).expect("unload response");
+        serde_json::from_value(expect_success(&unloaded)["result"].clone())
+            .expect("unload response envelope");
     assert!(unloaded.unloaded);
 
     server.stop().await;
@@ -203,6 +211,63 @@ async fn selector_query_reports_ambiguous_dirty_revisions() {
     server.stop().await;
 }
 
+/// Regression guard for verivus-oss/sqry#510.
+///
+/// Drives the real management client (`DaemonClient`, the same type the
+/// CLI `sqry daemon load-revision` / `list-revisions` path uses) end to
+/// end against a live server. Before the fix the revision handlers
+/// returned a bare result value while the client decodes a
+/// `ResponseEnvelope<T>`, so `load_revision`/`list_revisions` failed with
+/// `SchemaMismatch` ("missing field `result`") even though the daemon had
+/// built the revision graph. This test fails on the buggy bare shape and
+/// passes only when the handlers wrap their result in `ResponseEnvelope`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn daemon_client_round_trips_load_and_list_revisions() {
+    let repo = git_repo_with_one_commit();
+    let server =
+        TestServer::with_builder(Arc::new(EmptyGraphBuilder) as Arc<dyn WorkspaceBuilder>).await;
+
+    let mut client = DaemonClient::connect(&server.path)
+        .await
+        .expect("DaemonClient::connect must succeed");
+
+    let load = client
+        .load_revision(LoadRevisionRequest {
+            root: repo.path().to_path_buf(),
+            selector: RevisionSelector::Ref {
+                name: "main".to_owned(),
+            },
+            source_byte_mode: None,
+            pin: false,
+        })
+        .await
+        .expect("load_revision must decode the ResponseEnvelope");
+    assert_eq!(load.meta.daemon_version, env!("CARGO_PKG_VERSION"));
+    assert!(
+        load.result.resolved.commit_oid.is_some(),
+        "loaded immutable revision must carry a resolved commit oid"
+    );
+    let loaded_revision_id = load.result.revision_id.clone();
+
+    let list = client
+        .list_revisions(ListRevisionsRequest {
+            root: Some(repo.path().to_path_buf()),
+            include_unloaded: false,
+        })
+        .await
+        .expect("list_revisions must decode the ResponseEnvelope");
+    assert_eq!(list.meta.daemon_version, env!("CARGO_PKG_VERSION"));
+    assert!(
+        list.result
+            .revisions
+            .iter()
+            .any(|status| status.revision_id == loaded_revision_id),
+        "listed revisions must include the freshly loaded handle"
+    );
+
+    server.stop().await;
+}
+
 async fn connected_client(server: &TestServer) -> TestIpcClient {
     let mut client = TestIpcClient::connect(&server.path).await;
     client.hello(1).await;
@@ -225,7 +290,8 @@ async fn load_revision(
             }),
         )
         .await;
-    serde_json::from_value(expect_success(&resp).clone()).expect("loadRevision response")
+    serde_json::from_value(expect_success(&resp)["result"].clone())
+        .expect("loadRevision response envelope")
 }
 
 async fn daemon_search(

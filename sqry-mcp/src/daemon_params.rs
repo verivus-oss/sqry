@@ -507,6 +507,7 @@ pub fn params_to_export_graph_args(params: Value) -> Result<ExportGraphArgs, Rpc
         GraphFormatParam::Dot => "dot",
         GraphFormatParam::D2 => "d2",
         GraphFormatParam::Mermaid => "mermaid",
+        GraphFormatParam::Archify => "archify",
     };
 
     let mut symbols = params.symbols;

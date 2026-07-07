@@ -133,9 +133,15 @@ fn workspace_query_and_stats_flow() {
     let stats: Value = serde_json::from_slice(&stats_output).unwrap();
     assert_eq!(stats["repositories"]["total"], 2);
     assert_eq!(stats["repositories"]["indexed"], 2);
+    // Issue #515 regression: `workspace stats` used to report 0 symbols
+    // for member repos that `workspace query` (above) had just returned
+    // real hits from, because discovery never populated the registry's
+    // cached `symbol_count`. `is_number()` alone let that regress
+    // silently (0 is a number too), so this must assert nonzero.
     assert!(
-        stats["symbols"]["total"].is_number(),
-        "expected numeric total symbol count"
+        stats["symbols"]["total"].as_u64().unwrap_or(0) > 0,
+        "expected a nonzero total symbol count now that both service-a and \
+         service-b are indexed, got: {stats:?}"
     );
 
     // Text output includes repo column
@@ -151,6 +157,267 @@ fn workspace_query_and_stats_flow() {
     assert!(
         text.contains("repo service-a") || text.contains("repo service-b"),
         "expected repo column in output: {text}"
+    );
+}
+
+/// Regression test for issue #515: `sqry workspace stats` reported
+/// `Total symbols: 0` for a workspace whose member repos were indexed and
+/// queryable (`sqry workspace query` returned real hits from the same
+/// members). Root cause: `WorkspaceRepository::new` always defaults
+/// `symbol_count` to `None`, and neither `discover_repositories` nor
+/// `sqry workspace add` ever populated it, so `DetailedWorkspaceStats`'s
+/// `filter_map(|r| r.symbol_count)` summed zero every time, no matter how
+/// many symbols the member graphs actually held.
+///
+/// This test pins the fix to an exact, independently-verifiable number:
+/// it reads each member's own `.sqry/graph/manifest.json` `node_count`
+/// (the same manifest `sqry graph status --json`'s `symbol_count` field
+/// is sourced from) and asserts the workspace-level total equals their
+/// sum precisely, not just "some nonzero number".
+#[test]
+fn workspace_stats_symbol_count_matches_member_manifests() {
+    let workspace = TempDir::new().unwrap();
+    let workspace_path = workspace.path();
+
+    for repo in ["service-a", "service-b"] {
+        let repo_path = workspace_path.join(repo);
+        fs::create_dir_all(repo_path.join("src")).unwrap();
+        let mut file = fs::File::create(repo_path.join("src/lib.rs")).unwrap();
+        writeln!(
+            file,
+            "pub fn {}_func() {{}}\npub fn shared() {{}}",
+            repo.replace('-', "_")
+        )
+        .unwrap();
+
+        sqry_cmd()
+            .arg("index")
+            .current_dir(&repo_path)
+            .assert()
+            .success();
+    }
+
+    let workspace_str = workspace_path.to_str().unwrap();
+    let service_a = workspace_path.join("service-a");
+    let service_b = workspace_path.join("service-b");
+
+    sqry_cmd()
+        .args(["workspace", "init", workspace_str, "--name", "manifest-sum"])
+        .assert()
+        .success();
+
+    for repo_path in [&service_a, &service_b] {
+        sqry_cmd()
+            .args([
+                "workspace",
+                "add",
+                workspace_str,
+                repo_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+    }
+
+    // Ground truth: read node_count straight out of each member's own
+    // manifest.json, independently of anything the workspace registry
+    // computed.
+    let expected_total: u64 = [&service_a, &service_b]
+        .iter()
+        .map(|repo_path| {
+            let manifest_path = repo_path.join(".sqry/graph/manifest.json");
+            let manifest: Value =
+                serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+            manifest["node_count"]
+                .as_u64()
+                .expect("manifest.json must carry a numeric node_count")
+        })
+        .sum();
+    assert!(
+        expected_total > 0,
+        "test fixture sanity check: indexed repos must have a nonzero node_count"
+    );
+
+    let stats_output = sqry_cmd()
+        .args(["workspace", "stats", workspace_str, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let stats: Value = serde_json::from_slice(&stats_output).unwrap();
+
+    assert_eq!(
+        stats["symbols"]["total"].as_u64(),
+        Some(expected_total),
+        "workspace stats total_symbols must equal the sum of both members' \
+         manifest.json node_count, got: {stats:?}"
+    );
+    assert!(
+        (stats["symbols"]["avg_per_repo"].as_f64().unwrap() - (expected_total as f64 / 2.0)).abs()
+            < f64::EPSILON,
+        "avg_per_repo must be total_symbols / 2 (both members contributed a known count): {stats:?}"
+    );
+    assert_eq!(
+        stats["symbols"]["unknown_count_repos"].as_u64(),
+        Some(0),
+        "both members have a readable manifest.json, so unknown_count_repos must be 0: {stats:?}"
+    );
+
+    // Sibling counters that read from the same registry must stay
+    // consistent with the now-correct symbol totals, not regress
+    // alongside a partial fix.
+    assert_eq!(stats["repositories"]["total"], 2);
+    assert_eq!(stats["repositories"]["indexed"], 2);
+    assert_eq!(stats["repositories"]["unindexed"], 0);
+    assert_eq!(stats["freshness"]["never_indexed"], 0);
+
+    // The text-mode banner must show the same nonzero total, not a
+    // format-specific divergence between --json and text output.
+    let text_output = sqry_cmd()
+        .args(["workspace", "stats", workspace_str])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(text_output).unwrap();
+    assert!(
+        text.contains(&format!("Total symbols: {expected_total} ")),
+        "text output must report the same total as --json: {text}"
+    );
+}
+
+/// Staleness regression from the #515 cross-LLM gate: the original fix
+/// populated `WorkspaceRepository::symbol_count` only at `workspace
+/// init` / `workspace add` time and cached it in the registry, so `sqry
+/// workspace stats` kept reporting the *registration-time* count forever
+/// after a member was reindexed directly (`sqry index --force`) without
+/// a matching `workspace remove` + `workspace add` round-trip. Meanwhile
+/// `sqry workspace query` always read member graphs live and reflected
+/// the change immediately, so the two commands silently disagreed.
+///
+/// This test reindexes `service-a` in place (adding a third function, so
+/// its `node_count` grows) with no `workspace remove`/`add` in between,
+/// and asserts `workspace stats` picks up the new total on the very next
+/// run, matching each member's live `.sqry/graph/manifest.json`
+/// `node_count` exactly.
+#[test]
+fn workspace_stats_reflects_reindex_without_add_remove() {
+    let workspace = TempDir::new().unwrap();
+    let workspace_path = workspace.path();
+
+    let service_a = workspace_path.join("service-a");
+    let service_b = workspace_path.join("service-b");
+
+    for (repo_path, repo) in [(&service_a, "service-a"), (&service_b, "service-b")] {
+        fs::create_dir_all(repo_path.join("src")).unwrap();
+        let mut file = fs::File::create(repo_path.join("src/lib.rs")).unwrap();
+        writeln!(
+            file,
+            "pub fn {}_func() {{}}\npub fn shared() {{}}",
+            repo.replace('-', "_")
+        )
+        .unwrap();
+
+        sqry_cmd()
+            .arg("index")
+            .current_dir(repo_path)
+            .assert()
+            .success();
+    }
+
+    let workspace_str = workspace_path.to_str().unwrap();
+
+    sqry_cmd()
+        .args([
+            "workspace",
+            "init",
+            workspace_str,
+            "--name",
+            "reindex-drift",
+        ])
+        .assert()
+        .success();
+
+    for repo_path in [&service_a, &service_b] {
+        sqry_cmd()
+            .args([
+                "workspace",
+                "add",
+                workspace_str,
+                repo_path.to_str().unwrap(),
+            ])
+            .assert()
+            .success();
+    }
+
+    let read_node_count = |repo_path: &std::path::Path| -> u64 {
+        let manifest_path = repo_path.join(".sqry/graph/manifest.json");
+        let manifest: Value =
+            serde_json::from_str(&fs::read_to_string(&manifest_path).unwrap()).unwrap();
+        manifest["node_count"]
+            .as_u64()
+            .expect("manifest.json must carry a numeric node_count")
+    };
+
+    let stats_json = |workspace_str: &str| -> Value {
+        let output = sqry_cmd()
+            .args(["workspace", "stats", workspace_str, "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout
+            .clone();
+        serde_json::from_slice(&output).unwrap()
+    };
+
+    let node_count_a_before = read_node_count(&service_a);
+    let node_count_b = read_node_count(&service_b);
+
+    let stats_before = stats_json(workspace_str);
+    assert_eq!(
+        stats_before["symbols"]["total"].as_u64(),
+        Some(node_count_a_before + node_count_b),
+        "before reindex, stats must match both members' current manifests: {stats_before:?}"
+    );
+
+    // Reindex service-a directly (`sqry index --force`), growing its
+    // node_count by adding a third function, WITHOUT running `workspace
+    // remove` / `workspace add` again. This is the exact drift the gate
+    // reproduced (member 8 -> 18 nodes with stats stuck at the old
+    // total).
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(service_a.join("src/lib.rs"))
+        .unwrap();
+    writeln!(file, "pub fn extra_func() {{}}").unwrap();
+    drop(file);
+
+    sqry_cmd()
+        .args(["index", "--force"])
+        .current_dir(&service_a)
+        .assert()
+        .success();
+
+    let node_count_a_after = read_node_count(&service_a);
+    assert!(
+        node_count_a_after > node_count_a_before,
+        "test fixture sanity check: reindexing after adding a function must grow node_count \
+         (before: {node_count_a_before}, after: {node_count_a_after})"
+    );
+
+    let stats_after = stats_json(workspace_str);
+    assert_eq!(
+        stats_after["symbols"]["total"].as_u64(),
+        Some(node_count_a_after + node_count_b),
+        "workspace stats must reflect the reindexed service-a manifest immediately, \
+         without a workspace remove/add round-trip: before={stats_before:?} after={stats_after:?}"
+    );
+    assert_ne!(
+        stats_after["symbols"]["total"].as_u64(),
+        stats_before["symbols"]["total"].as_u64(),
+        "the total must actually change after the reindex, proving stats did not just \
+         echo the stale registration-time count: {stats_after:?}"
     );
 }
 

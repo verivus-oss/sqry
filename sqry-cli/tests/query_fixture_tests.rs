@@ -252,6 +252,83 @@ fn query_baseline_empty_result() -> Result<()> {
     Ok(())
 }
 
+/// Issue #513: `sqry query --help` advertises `file:` as an alias of `path:`,
+/// but `file:` used to match nothing while `path:` worked. Run both spellings
+/// against the same fixture and assert they return the identical result set,
+/// and that the set is non-empty (so we are not just comparing two empties).
+#[test]
+fn query_file_alias_matches_path() -> Result<()> {
+    let via_path = run_query_fixture(
+        "kind:function AND path:main.rs",
+        "tests/fixtures/polyglot_micro",
+    )?;
+    let via_file = run_query_fixture(
+        "kind:function AND file:main.rs",
+        "tests/fixtures/polyglot_micro",
+    )?;
+
+    // `path:main.rs` must actually match something in the fixture, otherwise
+    // the equality check below would pass vacuously against two empty sets.
+    let path_results = via_path
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("results array present for path: query");
+    assert!(
+        !path_results.is_empty(),
+        "path:main.rs should match at least one Rust function in the fixture"
+    );
+
+    // The alias must be a true alias: identical result sets and stats. Only
+    // the echoed `query.pattern` field legitimately differs (it reflects the
+    // raw input spelling), so compare the parts that describe the matches.
+    assert_eq!(
+        via_file.get("results"),
+        via_path.get("results"),
+        "file:main.rs and path:main.rs must return the same results"
+    );
+    assert_eq!(
+        via_file.get("stats"),
+        via_path.get("stats"),
+        "file:main.rs and path:main.rs must report the same match stats"
+    );
+
+    Ok(())
+}
+
+/// Issue #513 (subquery regression): the alias must also hold inside a relation
+/// subquery. `callers:(file:main.rs)` must return the same results as
+/// `callers:(path:main.rs)`. Before the fix the nested `file:` field survived
+/// unresolved and the relation matched nothing.
+#[test]
+fn query_file_alias_matches_path_in_subquery() -> Result<()> {
+    let via_path = run_query_fixture("callers:(path:main.rs)", "tests/fixtures/polyglot_micro")?;
+    let via_file = run_query_fixture("callers:(file:main.rs)", "tests/fixtures/polyglot_micro")?;
+
+    // The `path:` subquery must match at least one caller, otherwise the
+    // equality below would pass vacuously.
+    let path_results = via_path
+        .get("results")
+        .and_then(Value::as_array)
+        .expect("results array present for callers:(path:...) query");
+    assert!(
+        !path_results.is_empty(),
+        "callers:(path:main.rs) should match at least one caller in the fixture"
+    );
+
+    assert_eq!(
+        via_file.get("results"),
+        via_path.get("results"),
+        "callers:(file:main.rs) and callers:(path:main.rs) must return the same results"
+    );
+    assert_eq!(
+        via_file.get("stats"),
+        via_path.get("stats"),
+        "callers:(file:main.rs) and callers:(path:main.rs) must report the same stats"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn query_baseline_metadata_rich() -> Result<()> {
     let actual = run_query_fixture(

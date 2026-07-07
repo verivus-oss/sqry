@@ -410,8 +410,18 @@ impl WorkspaceSessionRegistry {
 /// Returns `None` only when both branches fail (e.g. `single_root`
 /// rejects a non-canonical or non-existent path), in which case the
 /// caller drops back to legacy single-root semantics.
+///
+/// This is also the daemon-hosted reconstruction seam (issue #469 U04):
+/// the sqryd daemon holds only the workspace root at tool-dispatch time
+/// (the IPC wire form carries `workspace_id` + source roots, not
+/// exclusions), so it re-runs this same on-disk discovery to reconstruct
+/// the `LogicalWorkspace` it binds via [`with_workspace_override`] on the
+/// blocking tool thread. Keeping one discovery function means the daemon
+/// and the standalone `SqryServer` resolve identical exclusion sets for
+/// the same root. Re-exported for the daemon via
+/// `crate::daemon_adapter::resolve_logical_workspace_for_root`.
 #[must_use]
-fn resolve_logical_workspace_for_root(workspace_root: &Path) -> Option<Arc<LogicalWorkspace>> {
+pub fn resolve_logical_workspace_for_root(workspace_root: &Path) -> Option<Arc<LogicalWorkspace>> {
     let registry = workspace_root.join(SQRY_WORKSPACE_FILENAME);
     if registry.is_file() {
         match LogicalWorkspace::from_sqry_workspace(&registry) {

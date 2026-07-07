@@ -30,7 +30,7 @@ use sqry_rules::rules::{self, ShippedRule, intake, recipes};
 use sqry_rules::witness::RuleSeverity;
 use sqry_rules::{RuleEngine, SqryDbRuleBackend};
 
-use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
+use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace};
 use crate::execution::types::{RulesRunData, RulesRunResultData, RulesRunStatus, ToolExecution};
 use crate::execution::utils::duration_to_ms;
 use crate::tools::RulesRunParams;
@@ -56,7 +56,7 @@ pub fn execute_rules_run(params: &RulesRunParams) -> Result<ToolExecution<RulesR
     let workspace_root = workspace_engine.workspace_root().to_path_buf();
     // Guard against path traversal on the workspace argument, same pattern
     // every other graph-backed tool uses.
-    let _ = canonicalize_in_workspace(&params.path, &workspace_root)?;
+    let _ = canonicalize_in_workspace_enforced(&params.path, &workspace_root)?;
 
     // Resolve the rule pack before touching the graph so a bad selector fails
     // fast (and a TOML path is confined to the workspace).
@@ -196,7 +196,7 @@ fn load_rules(rule_or_pack: &str, workspace_root: &Path) -> Result<LoadedRules> 
 
 fn load_toml_rule_pack(rule_or_pack: &str, workspace_root: &Path) -> Result<LoadedRules> {
     // Confine the TOML path to the workspace; reject traversal before any read.
-    let resolved = canonicalize_in_workspace(rule_or_pack, workspace_root)
+    let resolved = canonicalize_in_workspace_enforced(rule_or_pack, workspace_root)
         .with_context(|| format!("resolving TOML rule pack {rule_or_pack}"))?;
     if !resolved.is_file() {
         bail!(

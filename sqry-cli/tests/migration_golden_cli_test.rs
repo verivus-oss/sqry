@@ -1130,19 +1130,40 @@ fn cli_subgraph_same_name_frontier_invariant() {
 }
 
 #[test]
-fn cli_visualize_same_name_frontier_invariant() {
-    // Seed is `AlphaMarker::helper` via the --callers relation. The
-    // visualize traversal kernel must not pull in beta-side symbols.
+fn cli_visualize_same_name_matches_graph_direct_callers() {
+    // Seed is `AlphaMarker::helper` via the `callers:` relation.
     //
-    // Positive witness: `caller_a` (the only caller of AlphaMarker::helper
-    // in the fixture) must appear in the rendered diagram. This ensures the
-    // test cannot pass vacuously when the output is empty or stripped of
-    // all meaningful content.
-    // Negative witness: `caller_b` must NOT appear (it only calls
-    // BetaMarker::helper; it has no edge through AlphaMarker::helper).
+    // `visualize` now resolves relation roots with the same segment-aware
+    // matching `sqry graph direct-callers` and `sqry query callers:` use
+    // (DB18), so a `Type::method` query unions same-method-segment candidates
+    // (`AlphaMarker::helper` and `BetaMarker::helper`). This is the
+    // verivus-oss/sqry#516 parity fix: before it, `visualize` truncated to
+    // a single arbitrary root and diverged from `graph` / `query`.
+    //
+    // The kernel frontier invariant (DB19: no name re-resolution at depth >=
+    // 1) is unchanged; `caller_b` appears because `BetaMarker::helper` is a
+    // legitimate segment-aware root seed, not because the kernel broadened.
     let temp = TempDir::new().unwrap();
     write_same_name_fixture(temp.path());
     index(temp.path());
+
+    // Baseline: what `graph direct-callers` resolves for the same name. The
+    // graph subcommand discovers the index from the working directory.
+    let graph_out = Command::new(sqry_bin())
+        .current_dir(temp.path())
+        .arg("graph")
+        .arg("direct-callers")
+        .arg("AlphaMarker::helper")
+        .output()
+        .expect("graph command failed");
+    assert!(graph_out.status.success(), "graph failed: {graph_out:?}");
+    let graph_rendered = String::from_utf8_lossy(&graph_out.stdout);
+    // Confirm the baseline unions both callers (DB18 segment-aware behavior),
+    // so the parity assertion below is not vacuous.
+    assert!(
+        graph_rendered.contains("caller_a") && graph_rendered.contains("caller_b"),
+        "graph direct-callers baseline must union both callers, got {graph_rendered}"
+    );
 
     let out_file = temp.path().join("visualize.dot");
     let output = Command::new(sqry_bin())
@@ -1165,10 +1186,13 @@ fn cli_visualize_same_name_frontier_invariant() {
          symbol (caller_a or AlphaMarker) in the diagram; got empty/regressed \
          output: {rendered}"
     );
-    // Negative: beta-side must be absent.
+    // Parity: visualize must resolve the same segment-aware root set as
+    // `graph direct-callers`, so `caller_b` (a caller of the sibling
+    // `BetaMarker::helper`) appears in both (verivus-oss/sqry#516).
     assert!(
-        !rendered.contains("caller_b"),
-        "caller_b must NOT leak into visualize(callers:AlphaMarker::helper), rendered = {rendered}"
+        rendered.contains("caller_b"),
+        "visualize must match graph direct-callers for a qualified name; \
+         caller_b missing from {rendered}"
     );
 }
 

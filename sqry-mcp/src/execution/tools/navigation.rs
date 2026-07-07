@@ -32,13 +32,15 @@ use crate::tools::{
 ///
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
-fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
+fn resolve_workspace_path(path: &str) -> Result<Option<PathBuf>> {
     // Issue #394: resolve a subdirectory `path` to its owning workspace instead
     // of failing as if it were a workspace root. Subtree scoping for list/scan
     // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector(path)
-        .ok()
-        .flatten()
+    //
+    // Issue #469 Surface 2: an *excluded* `path` is rejected (invalid_params)
+    // rather than swallowed into a discovery fallback; other resolution
+    // failures still fall back to None.
+    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
 }
 
 fn candidate_nodes_for_symbol(
@@ -77,7 +79,7 @@ pub fn execute_get_definition(
     args: &GetDefinitionArgs,
 ) -> Result<ToolExecution<GetDefinitionData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
@@ -365,7 +367,7 @@ pub fn execute_get_references(
     args: &GetReferencesArgs,
 ) -> Result<ToolExecution<GetReferencesData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
@@ -438,7 +440,7 @@ pub fn execute_get_references(
 /// resolution fails.
 pub fn execute_get_hover_info(args: &GetHoverInfoArgs) -> Result<ToolExecution<HoverInfoData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
@@ -518,7 +520,7 @@ pub fn execute_get_document_symbols(
     args: &GetDocumentSymbolsArgs,
 ) -> Result<ToolExecution<GetDocumentSymbolsData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
@@ -529,13 +531,26 @@ pub fn execute_get_document_symbols(
     let files = graph.files();
     let strings = graph.strings();
 
+    // Surface 1 enforcement (issue #469): reject a `file_path` that targets an
+    // excluded subtree before any graph lookup, with the same invalid_params
+    // error as the `path` argument, so an excluded file cannot be read via
+    // `file_path`. A path that does not canonicalize (e.g. present in the graph
+    // but removed from disk) yields None and keeps the existing lookup
+    // fallbacks.
+    let canonical_file =
+        crate::engine::enforce_exclusion_for_file_path(&args.file_path, &workspace_root)?;
+
     // Find the file ID for the given path
     let target_path = std::path::Path::new(&args.file_path);
-    let file_id = files.get(target_path).or_else(|| {
-        // Try with workspace prefix
-        let full_path = workspace_root.join(&args.file_path);
-        files.get(&full_path)
-    });
+    let file_id = canonical_file
+        .as_deref()
+        .and_then(|canon| files.get(canon))
+        .or_else(|| files.get(target_path))
+        .or_else(|| {
+            // Try with workspace prefix
+            let full_path = workspace_root.join(&args.file_path);
+            files.get(&full_path)
+        });
 
     let file_id =
         file_id.ok_or_else(|| anyhow::anyhow!("File '{}' not found in graph", args.file_path))?;
@@ -617,7 +632,7 @@ pub fn execute_get_workspace_symbols(
     args: &GetWorkspaceSymbolsArgs,
 ) -> Result<ToolExecution<GetWorkspaceSymbolsData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 

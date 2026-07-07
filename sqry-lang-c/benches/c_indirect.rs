@@ -16,19 +16,31 @@
 //!    using `iter_batched_ref` so each iteration starts from a fresh
 //!    clone of the populated graph.
 //!
-//! 3. `bench_full_build_linux_fs_subset` — end-to-end build of the
-//!    Phase A fixture `test-fixtures/c-icall-precision/linux-driver-subset/`.
-//!    This is the load-bearing build-time bench per DESIGN §14.4.
-//!    The pre-Phase-A baseline JSON committed at
-//!    `docs/development/c-semantic-phase-a-icall-precision/measurements/2026-05-14-bench-baseline.json`
-//!    is captured against this bench function, and
-//!    `scripts/measure/check_phase_a_perf_gate.sh` enforces the +15%
-//!    build-time budget against the same mean.
+//! 3. `bench_full_build_linux_fs_subset`: end-to-end build of the
+//!    Phase A fixture `test-fixtures/c-icall-precision/linux-driver-subset/`
+//!    with Phase A ON. This is the load-bearing build-time bench per
+//!    DESIGN §14.4.
+//!
+//! 4. `bench_full_build_linux_fs_subset_without_phase_a`: the same
+//!    end-to-end build with Phase A OFF (via
+//!    `sqry_lang_c::CPlugin::without_phase_a`). Gated behind the
+//!    `phase-a-toggle` cargo feature. This arm exists for absolute criterion
+//!    profiling of the Phase-A-off build.
+//!
+//! The SPEC §5.2 build-time gate (`scripts/measure/check_phase_a_perf_gate.sh`)
+//! does NOT difference two criterion means: Phase A's marginal is roughly 1 ms
+//! on a roughly 12 ms build, which is buried in the 5 to 15 percent run-to-run
+//! variance of two whole-build means measured tens of seconds apart. The gate
+//! instead drives the `phase_a_marginal` example, which times the on and off
+//! builds back-to-back many times, alternating order, so common-mode drift
+//! cancels in the paired difference and the +15% same-commit marginal budget
+//! is reproducible. Both replace the earlier gate that compared a fresh mean
+//! against a frozen absolute baseline JSON (host- and version-drift-prone).
 
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::Criterion;
 
 use sqry_core::graph::unified::build::{
     BuildConfig, build_unified_graph, pass5b_c_indirect::resolve_c_indirect_calls,
@@ -173,6 +185,19 @@ fn build_c_only(root: &Path) -> CodeGraph {
         .expect("build_unified_graph must succeed for pass5b bench fixture")
 }
 
+/// Same as [`build_c_only`] but registers a Phase-A-disabled C plugin. Used
+/// only by `bench_full_build_linux_fs_subset_without_phase_a` to produce the
+/// same-commit marginal baseline. Requires the `phase-a-toggle` feature so
+/// the non-production `CPlugin::without_phase_a` constructor is in scope.
+#[cfg(feature = "phase-a-toggle")]
+fn build_c_only_without_phase_a(root: &Path) -> CodeGraph {
+    let mut plugins = PluginManager::new();
+    plugins.register_builtin(Box::new(CPlugin::without_phase_a()));
+    let config = BuildConfig::default();
+    build_unified_graph(root, &plugins, &config)
+        .expect("build_unified_graph (phase-a-off) must succeed for perf-gate baseline")
+}
+
 fn bench_pass5b_resolve_synthetic(c: &mut Criterion) {
     // Build the synthetic workspace ONCE at bench setup. The criterion
     // iter loop clones the graph per iteration and measures only
@@ -235,13 +260,44 @@ fn bench_full_build_linux_fs_subset(c: &mut Criterion) {
 }
 
 // ---------------------------------------------------------------------------
+// Bench 4: end-to-end build with Phase A OFF (perf-gate baseline arm)
+// ---------------------------------------------------------------------------
+
+/// Same fixture and build path as `bench_full_build_linux_fs_subset` but with
+/// the Phase A C indirect-call precision walks disabled. Emitting both means
+/// in one `cargo bench` run gives `check_phase_a_perf_gate.sh` a same-commit
+/// `(with - without) / without` marginal that is reproducible on any host.
+#[cfg(feature = "phase-a-toggle")]
+fn bench_full_build_linux_fs_subset_without_phase_a(c: &mut Criterion) {
+    let fixture = linux_driver_subset_fixture();
+    assert!(
+        fixture.exists(),
+        "Phase A fixture must exist at {} (run `git status` to confirm checkout)",
+        fixture.display(),
+    );
+
+    c.bench_function("bench_full_build_linux_fs_subset_without_phase_a", |b| {
+        b.iter(|| {
+            let graph = build_c_only_without_phase_a(black_box(&fixture));
+            black_box(graph);
+        });
+    });
+}
+
+// ---------------------------------------------------------------------------
 // criterion harness
 // ---------------------------------------------------------------------------
 
-criterion_group!(
-    c_indirect_benches,
-    bench_build_local_scope_index,
-    bench_pass5b_resolve_synthetic,
-    bench_full_build_linux_fs_subset
-);
-criterion_main!(c_indirect_benches);
+// A hand-rolled `main` (rather than `criterion_main!`) so the Phase-A-off
+// bench can be conditionally registered behind the `phase-a-toggle` feature.
+// The perf gate runs `cargo bench --features phase-a-toggle` to collect both
+// the ON and OFF means in a single session.
+fn main() {
+    let mut criterion = Criterion::default().configure_from_args();
+    bench_build_local_scope_index(&mut criterion);
+    bench_pass5b_resolve_synthetic(&mut criterion);
+    bench_full_build_linux_fs_subset(&mut criterion);
+    #[cfg(feature = "phase-a-toggle")]
+    bench_full_build_linux_fs_subset_without_phase_a(&mut criterion);
+    criterion.final_summary();
+}

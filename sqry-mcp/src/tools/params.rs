@@ -382,6 +382,8 @@ pub enum GraphFormatParam {
     Dot,
     D2,
     Mermaid,
+    /// Archify architecture-diagram JSON (seeded, grouped, tier-typed).
+    Archify,
 }
 
 impl From<GraphFormatParam> for CoreOutputFormat {
@@ -391,6 +393,7 @@ impl From<GraphFormatParam> for CoreOutputFormat {
             GraphFormatParam::Dot => CoreOutputFormat::Dot,
             GraphFormatParam::D2 => CoreOutputFormat::D2,
             GraphFormatParam::Mermaid => CoreOutputFormat::Mermaid,
+            GraphFormatParam::Archify => CoreOutputFormat::Archify,
         }
     }
 }
@@ -402,6 +405,7 @@ impl From<CoreOutputFormat> for GraphFormatParam {
             CoreOutputFormat::Dot => GraphFormatParam::Dot,
             CoreOutputFormat::D2 => GraphFormatParam::D2,
             CoreOutputFormat::Mermaid => GraphFormatParam::Mermaid,
+            CoreOutputFormat::Archify => GraphFormatParam::Archify,
         }
     }
 }

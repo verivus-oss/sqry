@@ -558,7 +558,13 @@ fn is_nfs(dir: &std::path::Path) -> bool {
     if rc != 0 {
         return false;
     }
-    buf.f_type == NFS_SUPER_MAGIC
+    // `statfs.f_type` is `__fsword_t` (i64) on glibc but `unsigned long` (u64)
+    // on musl, so a direct comparison against `NFS_SUPER_MAGIC` (a `c_long`)
+    // fails to type-check on one libc or the other. Widen both operands to
+    // `i128`: the cast is genuinely necessary on every target (no libc uses a
+    // 128-bit `f_type`), so it also sidesteps clippy's `unnecessary_cast` lint,
+    // and `0x6969` round-trips losslessly from either an i64 or a u64.
+    buf.f_type as i128 == NFS_SUPER_MAGIC as i128
 }
 
 #[cfg(all(unix, target_os = "macos"))]
@@ -793,6 +799,46 @@ mod tests {
             lockfile.exists(),
             "lockfile must NOT be removed after drop (§D.4)"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // T3b: two_private_sockets_in_one_dir_do_not_collide
+    //
+    // Issue #519 part b: two daemons on distinct custom sockets sharing a
+    // single directory must each acquire their own lock without colliding on
+    // a global `sqryd.lock`, because the lock/pid co-locate beside the socket
+    // using the socket's file stem.
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn two_private_sockets_in_one_dir_do_not_collide() {
+        let fix = TestCfg::new();
+        let dir = fix._tmp.path().join("shared");
+
+        let mut cfg_a = fix.cfg().clone();
+        cfg_a.socket.path = Some(dir.join("alpha.sock"));
+        let mut cfg_b = fix.cfg().clone();
+        cfg_b.socket.path = Some(dir.join("beta.sock"));
+
+        // Distinct locks / pids derived from distinct socket stems.
+        assert_eq!(cfg_a.lock_path(), dir.join("alpha.lock"));
+        assert_eq!(cfg_b.lock_path(), dir.join("beta.lock"));
+        assert_ne!(cfg_a.lock_path(), cfg_b.lock_path());
+        assert_ne!(cfg_a.pid_path(), cfg_b.pid_path());
+
+        // Both acquire concurrently held locks without an AlreadyRunning
+        // collision, proving true per-socket isolation within one directory.
+        let lock_a = acquire_pidfile_lock(&cfg_a).expect("alpha lock must acquire");
+        let lock_b = acquire_pidfile_lock(&cfg_b).expect("beta lock must acquire while alpha held");
+
+        assert_eq!(lock_a.ownership(), PidfileOwnership::WriteOwner);
+        assert_eq!(lock_b.ownership(), PidfileOwnership::WriteOwner);
+        assert!(cfg_a.pid_path().exists());
+        assert!(cfg_b.pid_path().exists());
+
+        drop(lock_a);
+        drop(lock_b);
     }
 
     // -----------------------------------------------------------------------

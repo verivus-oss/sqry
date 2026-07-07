@@ -15,7 +15,7 @@ use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::{FileScope, ResolutionMode, SymbolQuery, SymbolResolutionOutcome};
 use sqry_core::search::matcher::{FuzzyMatcher, MatchConfig};
 
-use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
+use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace};
 use crate::tools::{SearchSimilarArgs, SemanticSearchArgs, StructuralSimilarArgs};
 
 use crate::execution::location::node_location_for_reporting_snapshot;
@@ -42,13 +42,11 @@ struct SemanticSortKey {
 ///
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
-fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
+fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
     // Issue #394: resolve a subdirectory `path` to its owning workspace instead
     // of failing as if it were a workspace root. Subtree scoping for list/scan
     // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector(path)
-        .ok()
-        .flatten()
+    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
 }
 
 /// Resolve workspace root for security checking only (no validation required).
@@ -160,10 +158,10 @@ pub fn execute_semantic_search(
     let workspace_root_for_security = resolve_workspace_root_for_security()?;
 
     // Check path security before any other operations
-    let search_root = canonicalize_in_workspace(&args.path, &workspace_root_for_security)?;
+    let search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root_for_security)?;
 
     // Now load the engine (requires valid workspace)
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
@@ -435,11 +433,11 @@ fn find_reference_node(
 #[allow(clippy::too_many_lines)]
 pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<FindSimilarData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _scope_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
-    let file_path = canonicalize_in_workspace(&args.file_path, &workspace_root)?;
+    let _scope_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
+    let file_path = canonicalize_in_workspace_enforced(&args.file_path, &workspace_root)?;
 
     tracing::debug!(
         file_path = %args.file_path,
@@ -648,7 +646,7 @@ pub fn execute_structural_similar(
     args: &StructuralSimilarArgs,
 ) -> Result<ToolExecution<StructuralSimilarData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
     let graph = engine.ensure_graph()?;
@@ -673,7 +671,7 @@ pub(crate) fn structural_similar_from_snapshot(
     let want_file = args
         .file_path
         .as_ref()
-        .map(|f| canonicalize_in_workspace(f, workspace_root))
+        .map(|f| canonicalize_in_workspace_enforced(f, workspace_root))
         .transpose()?;
 
     // Resolve the probe: first Function/Method carrying a descriptor that matches

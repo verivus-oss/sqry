@@ -182,25 +182,6 @@ impl DaemonMcpHandler {
     pub fn advertised_tools(&self) -> &[rmcp::model::Tool] {
         &self.tools
     }
-
-    /// SGA04 building block — construct a daemon graph provider over
-    /// this handler's [`WorkspaceManager`] / [`WorkspaceBuilder`] pair.
-    ///
-    /// SGA05 routes read-only MCP tool dispatch through
-    /// [`tool_core::acquire_and_execute`], which builds a provider
-    /// internally per request via `tool_core::daemon_graph_provider`.
-    /// This accessor stays exposed for SGA06 / SGA07 surfaces that
-    /// need to construct a provider explicitly (e.g. LSP integration
-    /// or out-of-band parity probes) without going through the
-    /// dispatch wrapper. The `rebuild_index` flow remains outside this
-    /// code path — it owns its own load semantics.
-    #[allow(dead_code)] // Reserved for SGA06 / SGA07 surfaces.
-    pub(crate) fn daemon_graph_provider(&self) -> crate::workspace::acquirer::DaemonGraphProvider {
-        tool_core::daemon_graph_provider(
-            Arc::clone(&self.manager),
-            Arc::clone(&self.workspace_builder),
-        )
-    }
 }
 
 impl ServerHandler for DaemonMcpHandler {

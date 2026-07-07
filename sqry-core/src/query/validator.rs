@@ -485,9 +485,40 @@ impl Validator {
     }
 
     fn normalize_condition(&self, condition: &Condition) -> Result<Condition, ValidationError> {
-        // Fast path: exact match
-        if self.registry.get(condition.field.as_str()).is_some() {
-            return Ok(condition.clone());
+        // Normalize a nested subquery value first, recursively, so alias
+        // resolution reaches every field inside a relation subquery, e.g.
+        // `callers:(file:main.rs)`, and not just the outer condition.
+        // `validate_node_with_depth` and `resolve_variables` both descend into
+        // `Value::Subquery`, so normalization must too; otherwise a `file:`
+        // alias nested in a subquery survives to the executor unresolved,
+        // hits graph_eval's `_ => Ok(false)` (no `file` arm), and silently
+        // matches nothing. Recursing through `normalize_expr` covers boolean
+        // and negation wrappers inside the subquery as well (issue #513).
+        let normalized_value = match &condition.value {
+            Value::Subquery(inner) => Value::Subquery(Box::new(self.normalize_expr(inner)?)),
+            other => other.clone(),
+        };
+
+        // Fast path: known field, either a canonical name or a registered alias.
+        //
+        // Resolve any alias to its canonical field name here. Downstream
+        // evaluators match on the canonical field (e.g. `path`), so an alias
+        // like `file` (registered as `file` -> `path`) that survives to the
+        // executor has no match arm and silently returns zero results even
+        // though validation passed. Rewriting the field to its canonical form
+        // makes `file:` a true alias of `path:` end to end (issue #513).
+        let field_name = condition.field.as_str();
+        let canonical = self
+            .registry
+            .resolve_canonical(field_name)
+            .map(std::string::ToString::to_string);
+        if let Some(canonical) = canonical {
+            let mut resolved = condition.clone();
+            if canonical != field_name {
+                resolved.field = Field::new(canonical);
+            }
+            resolved.value = normalized_value;
+            return Ok(resolved);
         }
 
         // Fuzzy disabled: reject unknown fields outright.
@@ -520,6 +551,7 @@ impl Validator {
                 }
 
                 corrected.field = Field::new(candidate);
+                corrected.value = normalized_value;
                 Ok(corrected)
             }
             n if n > 1 => Err(ValidationError::UnknownField {
@@ -635,6 +667,190 @@ mod tests {
             result.unwrap_err(),
             ValidationError::UnknownField { .. }
         ));
+    }
+
+    /// Issue #513: `file:` is advertised as an alias of `path:` but the
+    /// executor only has a `path` match arm, so an unresolved `file` field
+    /// silently matched nothing. `normalize_expr` must rewrite the alias to
+    /// its canonical field name so both spell out to the same condition.
+    #[test]
+    fn test_normalize_resolves_file_alias_to_path() {
+        let registry = FieldRegistry::with_core_fields();
+        let validator = Validator::new(registry);
+
+        let file_expr = Expr::Condition(Condition {
+            field: Field::new("file"),
+            operator: Operator::Equal,
+            value: Value::String("crates/**".to_string()),
+            span: Span::default(),
+        });
+        let normalized = validator.normalize_expr(&file_expr).unwrap();
+        let Expr::Condition(cond) = normalized else {
+            panic!("expected condition");
+        };
+        assert_eq!(cond.field.as_str(), "path");
+        assert!(matches!(cond.value, Value::String(ref s) if s == "crates/**"));
+        assert_eq!(cond.operator, Operator::Equal);
+    }
+
+    /// `file:X` and `path:X` must normalize to identical conditions so the two
+    /// spellings return the same matches end to end (issue #513).
+    #[test]
+    fn test_normalize_file_and_path_are_equivalent() {
+        let registry = FieldRegistry::with_core_fields();
+        let validator = Validator::new(registry);
+
+        let make = |field: &str| {
+            Expr::Condition(Condition {
+                field: Field::new(field),
+                operator: Operator::Equal,
+                value: Value::String("src/**/*.rs".to_string()),
+                span: Span::default(),
+            })
+        };
+
+        let from_file = validator.normalize_expr(&make("file")).unwrap();
+        let from_path = validator.normalize_expr(&make("path")).unwrap();
+
+        let (Expr::Condition(file_cond), Expr::Condition(path_cond)) = (from_file, from_path)
+        else {
+            panic!("expected conditions");
+        };
+        assert_eq!(file_cond.field.as_str(), path_cond.field.as_str());
+        assert_eq!(file_cond.field.as_str(), "path");
+        assert_eq!(file_cond.operator, path_cond.operator);
+        assert!(matches!((&file_cond.value, &path_cond.value),
+                (Value::String(a), Value::String(b)) if a == b));
+
+        // Both must still pass validation after normalization.
+        assert!(validator.validate(&Expr::Condition(file_cond)).is_ok());
+        assert!(validator.validate(&Expr::Condition(path_cond)).is_ok());
+    }
+
+    /// The `language` -> `lang` alias must canonicalize the same way, and a
+    /// nested alias inside a boolean expression must be rewritten too.
+    #[test]
+    fn test_normalize_language_alias_and_nested() {
+        let registry = FieldRegistry::with_core_fields();
+        let validator = Validator::new(registry);
+
+        let expr = Expr::And(vec![
+            Expr::Condition(Condition {
+                field: Field::new("kind"),
+                operator: Operator::Equal,
+                value: Value::String("struct".to_string()),
+                span: Span::default(),
+            }),
+            Expr::Condition(Condition {
+                field: Field::new("file"),
+                operator: Operator::Equal,
+                value: Value::String("crates/**".to_string()),
+                span: Span::default(),
+            }),
+            Expr::Condition(Condition {
+                field: Field::new("language"),
+                operator: Operator::Equal,
+                value: Value::String("rust".to_string()),
+                span: Span::default(),
+            }),
+        ]);
+
+        let Expr::And(operands) = validator.normalize_expr(&expr).unwrap() else {
+            panic!("expected And");
+        };
+        let fields: Vec<&str> = operands
+            .iter()
+            .map(|op| match op {
+                Expr::Condition(c) => c.field.as_str(),
+                _ => panic!("expected condition"),
+            })
+            .collect();
+        assert_eq!(fields, vec!["kind", "path", "lang"]);
+    }
+
+    /// Issue #513 (subquery regression): a `file:` alias inside a relation
+    /// subquery, e.g. `callers:(file:main.rs)`, must be canonicalized to
+    /// `path` too. Normalization used to rewrite only the outer condition and
+    /// leave `Value::Subquery` fields untouched, so nested `file:` reached the
+    /// executor unresolved and matched nothing.
+    #[test]
+    fn test_normalize_resolves_file_alias_inside_subquery() {
+        let registry = FieldRegistry::with_core_fields();
+        let validator = Validator::new(registry);
+
+        let relation_with = |inner_field: &str| {
+            Expr::Condition(Condition {
+                field: Field::new("callers"),
+                operator: Operator::Equal,
+                value: Value::Subquery(Box::new(Expr::Condition(Condition {
+                    field: Field::new(inner_field),
+                    operator: Operator::Equal,
+                    value: Value::String("main.rs".to_string()),
+                    span: Span::default(),
+                }))),
+                span: Span::default(),
+            })
+        };
+
+        let from_file = validator.normalize_expr(&relation_with("file")).unwrap();
+        let from_path = validator.normalize_expr(&relation_with("path")).unwrap();
+
+        // The inner subquery field must be canonicalized to `path`, and the two
+        // spellings must produce an identical normalized AST.
+        assert_eq!(from_file, from_path);
+
+        let Expr::Condition(cond) = from_file else {
+            panic!("expected condition");
+        };
+        let Value::Subquery(inner) = cond.value else {
+            panic!("expected subquery value");
+        };
+        let Expr::Condition(inner_cond) = *inner else {
+            panic!("expected inner condition");
+        };
+        assert_eq!(inner_cond.field.as_str(), "path");
+    }
+
+    /// The recursion must also reach fields nested inside a boolean wrapper
+    /// within a subquery, e.g. `callers:(file:a.rs OR file:b.rs)`.
+    #[test]
+    fn test_normalize_resolves_file_alias_in_nested_boolean_subquery() {
+        let registry = FieldRegistry::with_core_fields();
+        let validator = Validator::new(registry);
+
+        let make_leaf = |value: &str| {
+            Expr::Condition(Condition {
+                field: Field::new("file"),
+                operator: Operator::Equal,
+                value: Value::String(value.to_string()),
+                span: Span::default(),
+            })
+        };
+        let expr = Expr::Condition(Condition {
+            field: Field::new("callers"),
+            operator: Operator::Equal,
+            value: Value::Subquery(Box::new(Expr::Or(vec![
+                make_leaf("a.rs"),
+                make_leaf("b.rs"),
+            ]))),
+            span: Span::default(),
+        });
+
+        let Expr::Condition(cond) = validator.normalize_expr(&expr).unwrap() else {
+            panic!("expected condition");
+        };
+        let Value::Subquery(inner) = cond.value else {
+            panic!("expected subquery value");
+        };
+        let Expr::Or(operands) = *inner else {
+            panic!("expected Or inside subquery");
+        };
+        for op in operands {
+            let Expr::Condition(leaf) = op else {
+                panic!("expected condition leaf");
+            };
+            assert_eq!(leaf.field.as_str(), "path");
+        }
     }
 
     #[test]

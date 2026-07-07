@@ -158,12 +158,12 @@ public = [
     # mutation-gate.yml summary renderer. Reads cargo-mutants outcomes.json
     # and emits Markdown into GITHUB_STEP_SUMMARY.
     "scripts/ci/mutants_summary.py",
-    # Phase A C indirect-call precision (2026-05-14): build-time perf gate
-    # enforcing SPEC §5.2's amended +30% bench-time budget on the
-    # linux-driver-subset fixture, and fan-out histogram tool consuming
+    # Phase A C indirect-call precision: build-time perf gate enforcing
+    # SPEC §5.2's +15% SAME-COMMIT MARGINAL budget on the linux-driver-subset
+    # fixture (2026-07-06 remethodology, verivus-oss/sqry#280; drives the
+    # paired-alternating `sqry-lang-c/examples/phase_a_marginal` binary rather
+    # than a frozen absolute baseline), and a fan-out histogram tool consuming
     # `cargo run --example measure_indirect_fanout` output for cap calibration.
-    # Both are referenced from CI matrix gate §4 of
-    # docs/development/c-semantic-phase-a-icall-precision/03_IMPLEMENTATION_PLAN.
     "scripts/measure/VERSION",
     "scripts/measure/check_phase_a_perf_gate.sh",
     "scripts/measure/icall_fanout_histogram.py",
@@ -192,6 +192,12 @@ public = [
 
 [selection.fixtures]
 required_public = [
+    # Vendored Archify JSON schemas (issue #480). Consumed by sqry-core's
+    # hermetic schema-conformance test; pinned to tt-a1i/archify
+    # fa7fbce7fba812fbb8ac813408602412806fe40f (see the sibling SOURCE.md).
+    "test-fixtures/archify-schema/architecture.schema.json",
+    "test-fixtures/archify-schema/common.schema.json",
+    "test-fixtures/archify-schema/SOURCE.md",
     "test-fixtures/cross-language-typeparams/csharp/Generics.cs",
     "test-fixtures/cross-language-typeparams/go/generics.go",
     "test-fixtures/cross-language-typeparams/java/Generics.java",

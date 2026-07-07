@@ -23,7 +23,7 @@ use sqry_db::queries::context_propagation::{
 };
 use sqry_db::queries::dispatch::make_query_db_cold;
 
-use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
+use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace};
 use crate::execution::types::{
     ContextLeakDto, ContextLeakNodeRef, ContextLeakSpan, ContextPropagationData, ToolExecution,
 };
@@ -57,7 +57,7 @@ pub fn execute_context_propagation(
     };
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _ = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _ = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     let graph = engine
         .ensure_graph()
@@ -72,7 +72,7 @@ pub fn execute_context_propagation(
     let scope = match &args.scope {
         ContextScopeArg::Global => ContextScope::Global,
         ContextScopeArg::File(path) => {
-            let canonical = canonicalize_in_workspace(path, &workspace_root)?;
+            let canonical = canonicalize_in_workspace_enforced(path, &workspace_root)?;
             let Some(file_id) = snapshot.files().iter().find_map(|(fid, registered)| {
                 if registered.as_ref() == canonical.as_path() {
                     Some(fid)

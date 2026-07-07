@@ -454,8 +454,23 @@ impl GraphSnapshot {
         symbol: &str,
         file_scope: FileScope<'_>,
     ) -> Result<NodeId, SymbolResolveError> {
-        // Strict mode rejects suffix candidates — only exact-qualified
-        // and exact-simple buckets are eligible. That's correct here:
+        self.resolve_global_symbol_ambiguity_aware_with_line(symbol, file_scope, None)
+    }
+
+    /// Compute the raw single-node resolution outcome for `symbol` under
+    /// `file_scope`, including the display-normalized (`.` / `#` to `::`)
+    /// fallback.
+    ///
+    /// Extracted so both the plain ambiguity-aware resolver and the
+    /// line-disambiguating variant share one canonical bucket-selection plus
+    /// dot-norm-fallback path.
+    fn resolve_global_symbol_outcome(
+        &self,
+        symbol: &str,
+        file_scope: FileScope<'_>,
+    ) -> SymbolResolutionOutcome {
+        // Strict mode rejects suffix candidates: only exact-qualified
+        // and exact-simple buckets are eligible. That's correct here,
         // canonical-suffix matching is a fuzzy fallback that has no place
         // in a "resolve to one canonical node" contract.
         let primary = self.resolve_symbol(&SymbolQuery {
@@ -464,7 +479,7 @@ impl GraphSnapshot {
             mode: ResolutionMode::Strict,
         });
 
-        let outcome = match primary {
+        match primary {
             // Successful resolution short-circuits before the dot-norm fallback.
             SymbolResolutionOutcome::Resolved(_) | SymbolResolutionOutcome::Ambiguous(_) => primary,
             // Display-normalized fallback: a user passing `pkg.subpkg.fn`
@@ -484,18 +499,77 @@ impl GraphSnapshot {
                     primary
                 }
             }
-        };
+        }
+    }
 
-        match outcome {
+    /// Resolve `symbol` to a single node, disambiguating an ambiguous match
+    /// set by the definition's one-based start line.
+    ///
+    /// Behaves exactly like [`resolve_global_symbol_ambiguity_aware`] when
+    /// `line` is `None`. When `line` is `Some(n)` and the raw resolution is
+    /// ambiguous, the candidate set is narrowed to nodes whose definition
+    /// starts on line `n`:
+    ///
+    /// * exactly one survivor: resolved to that node.
+    /// * zero survivors: [`SymbolResolveError::NotFound`] (no definition on
+    ///   that line).
+    /// * two or more survivors (two definitions sharing a start line, a rare
+    ///   generated-code case): [`SymbolResolveError::Ambiguous`] over the
+    ///   narrowed set.
+    ///
+    /// This is the on-disk counterpart to `--in <file>` file scoping: `--in`
+    /// narrows by file (via `file_scope`), `--line` narrows by start line.
+    /// Together they disambiguate the same-file / same-qualified-name case
+    /// that a file path alone cannot (for example two methods named `summary`
+    /// in one file). Shared by `sqry explain`, `sqry impact`, and
+    /// `sqry visualize`.
+    ///
+    /// # Errors
+    ///
+    /// * [`SymbolResolveError::NotFound`]: no nodes matched, or `line` was
+    ///   supplied and no candidate starts on that line.
+    /// * [`SymbolResolveError::Ambiguous`]: two or more nodes remain after
+    ///   the (optional) line filter.
+    pub fn resolve_global_symbol_ambiguity_aware_with_line(
+        &self,
+        symbol: &str,
+        file_scope: FileScope<'_>,
+        line: Option<u32>,
+    ) -> Result<NodeId, SymbolResolveError> {
+        match self.resolve_global_symbol_outcome(symbol, file_scope) {
             SymbolResolutionOutcome::Resolved(node_id) => Ok(node_id),
             SymbolResolutionOutcome::NotFound | SymbolResolutionOutcome::FileNotIndexed => {
                 Err(SymbolResolveError::NotFound {
                     name: symbol.to_string(),
                 })
             }
-            SymbolResolutionOutcome::Ambiguous(candidates) => Err(SymbolResolveError::Ambiguous(
-                self.build_ambiguous_symbol_error(symbol, &candidates),
-            )),
+            SymbolResolutionOutcome::Ambiguous(candidates) => {
+                let candidates = match line {
+                    Some(target_line) => {
+                        let narrowed: Vec<NodeId> = candidates
+                            .iter()
+                            .copied()
+                            .filter(|node_id| {
+                                self.get_node(*node_id)
+                                    .is_some_and(|entry| entry.start_line == target_line)
+                            })
+                            .collect();
+                        match narrowed.len() {
+                            1 => return Ok(narrowed[0]),
+                            0 => {
+                                return Err(SymbolResolveError::NotFound {
+                                    name: symbol.to_string(),
+                                });
+                            }
+                            _ => narrowed,
+                        }
+                    }
+                    None => candidates,
+                };
+                Err(SymbolResolveError::Ambiguous(
+                    self.build_ambiguous_symbol_error(symbol, &candidates),
+                ))
+            }
         }
     }
 
@@ -936,7 +1010,7 @@ mod tests {
 
     use super::{
         FileScope, NormalizedSymbolQuery, ResolutionMode, ResolvedFileScope, SymbolCandidateBucket,
-        SymbolCandidateOutcome, SymbolQuery, SymbolResolutionOutcome,
+        SymbolCandidateOutcome, SymbolQuery, SymbolResolutionOutcome, SymbolResolveError,
         canonicalize_graph_qualified_name, display_graph_qualified_name,
     };
 
@@ -1656,6 +1730,91 @@ mod tests {
         assert_eq!(
             snapshot.find_symbol_candidates(&query),
             SymbolCandidateOutcome::Candidates(vec![function_node.node_id, variable_node.node_id])
+        );
+    }
+
+    /// Two definitions of `summary` in the same file, on lines 4 and 10, model
+    /// the verivus-oss/sqry#512 same-file collision.
+    fn same_file_collision_snapshot() -> (CodeGraph, TestNode, TestNode) {
+        let mut graph = CodeGraph::new();
+        let file_path = abs_path("src/lib.rs");
+        let report = add_node(
+            &mut graph,
+            NodeKind::Method,
+            "summary",
+            Some("Report::summary"),
+            &file_path,
+            Some(Language::Rust),
+            4,
+            4,
+        );
+        let ledger = add_node(
+            &mut graph,
+            NodeKind::Method,
+            "summary",
+            Some("Ledger::summary"),
+            &file_path,
+            Some(Language::Rust),
+            10,
+            4,
+        );
+        (graph, report, ledger)
+    }
+
+    #[test]
+    fn with_line_disambiguates_same_file_collision() {
+        let (graph, report, ledger) = same_file_collision_snapshot();
+        let snapshot = graph.snapshot();
+
+        assert_eq!(
+            snapshot.resolve_global_symbol_ambiguity_aware_with_line(
+                "summary",
+                FileScope::Any,
+                Some(4)
+            ),
+            Ok(report.node_id)
+        );
+        assert_eq!(
+            snapshot.resolve_global_symbol_ambiguity_aware_with_line(
+                "summary",
+                FileScope::Any,
+                Some(10)
+            ),
+            Ok(ledger.node_id)
+        );
+    }
+
+    #[test]
+    fn with_line_none_is_ambiguous_for_collision() {
+        let (graph, _report, _ledger) = same_file_collision_snapshot();
+        let snapshot = graph.snapshot();
+
+        match snapshot.resolve_global_symbol_ambiguity_aware_with_line(
+            "summary",
+            FileScope::Any,
+            None,
+        ) {
+            Err(SymbolResolveError::Ambiguous(err)) => {
+                assert_eq!(err.candidates.len(), 2);
+            }
+            other => panic!("expected ambiguity without a line, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_line_absent_line_is_not_found() {
+        let (graph, _report, _ledger) = same_file_collision_snapshot();
+        let snapshot = graph.snapshot();
+
+        assert_eq!(
+            snapshot.resolve_global_symbol_ambiguity_aware_with_line(
+                "summary",
+                FileScope::Any,
+                Some(999)
+            ),
+            Err(SymbolResolveError::NotFound {
+                name: "summary".to_string()
+            })
         );
     }
 

@@ -52,7 +52,7 @@ fn workspace_index_stats() {
             None,
         );
         if indexed {
-            repo.symbol_count = Some(100);
+            repo.symbol_count_at_registration = Some(100);
             repo.last_indexed_at = Some(std::time::SystemTime::now());
         }
         registry.upsert_repo(repo).unwrap();

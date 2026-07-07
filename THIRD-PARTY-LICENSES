@@ -322,12 +322,14 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
 -------------------------------------------------------------------------------
-tree-sitter-perl
+tree-sitter-perl-sqry (tree-sitter-perl)
 -------------------------------------------------------------------------------
 
 Source: https://github.com/tree-sitter-perl/tree-sitter-perl
-Commit: 0c24d001dd1921e418fb933d208a7bd7dd3f923a
+Release: v1.2.1 (published crate ts-parser-perl 1.2.1)
+Commit: c3e17b31179bf8f658c9f37c7a3ea6a202212d5a
 License: MIT
+Vendored in: crates/tree-sitter-perl-sqry/grammar-src/ (see crates/tree-sitter-perl-sqry/LICENSE)
 
 Copyright 2025 Avishai "Veesh" Goldman
 

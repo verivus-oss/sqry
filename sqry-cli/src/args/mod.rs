@@ -640,6 +640,22 @@ pub enum Command {
         #[arg(help_heading = headings::SEARCH_INPUT, display_order = 20)]
         path: Option<String>,
 
+        /// Exact (literal-only) match against interned symbol name
+        /// (disables regex).
+        ///
+        /// Equivalent to the top-level `sqry --exact <pattern>` shorthand:
+        /// both look the pattern up byte-for-byte against `entry.name` /
+        /// `entry.qualified_name` (the planner's `name:<literal>` predicate,
+        /// `B1_ALIGN`) instead of treating it as a regex. Glob meta
+        /// (`*`, `?`, `[`) is matched as literal characters; for glob or
+        /// structural matching use `sqry query 'name:parse_*'` instead.
+        /// Before this flag existed on the subcommand, `sqry search PAT
+        /// --exact` was rejected even though the help advertised it (#511);
+        /// the value now folds into the same match path the top-level
+        /// shorthand drives, so both spellings return identical sets.
+        #[arg(long, short = 'x', help_heading = headings::MATCH_BEHAVIOUR, display_order = 10)]
+        exact: bool,
+
         /// Save this search as a named alias for later reuse.
         ///
         /// The alias can be invoked with @name syntax:
@@ -988,7 +1004,13 @@ pub enum Command {
         /// `--format json`; passing both `--format text` (or any
         /// non-`json` value) and `--json` is an error so silent
         /// disagreement between the two flags can never occur.
-        #[arg(long, short = 'f', help_heading = headings::GRAPH_CONFIGURATION, display_order = 20)]
+        ///
+        /// `global = true` so the flag is position-independent: it is
+        /// accepted both before the operation (`sqry graph --format json
+        /// stats`) and after it (`sqry graph stats --format json`), which
+        /// matches the always-position-independent global `--json` and the
+        /// "All commands support --format json" promise in the help (#517).
+        #[arg(long, short = 'f', global = true, help_heading = headings::GRAPH_CONFIGURATION, display_order = 20)]
         format: Option<String>,
 
         /// Show verbose output with detailed metadata.
@@ -1704,6 +1726,8 @@ pub enum Command {
         /// - d2: D2 diagram format
         /// - mermaid: Mermaid markdown format
         /// - json: JSON format for programmatic use
+        /// - archify: Archify architecture-diagram JSON (requires a seed:
+        ///   --symbol or --file)
         #[arg(long, short = 'f', default_value = "dot", help_heading = headings::EXPORT_OPTIONS, display_order = 10)]
         format: String,
 
@@ -1737,6 +1761,31 @@ pub enum Command {
         /// Output file (default: stdout).
         #[arg(long, short = 'o', help_heading = headings::OUTPUT_CONTROL, display_order = 10)]
         output: Option<String>,
+
+        /// Seed symbol name (archify format only).
+        ///
+        /// Required (with `--file`) when `--format archify`. The architecture
+        /// diagram is built from a seeded, depth-limited subgraph rooted at
+        /// this symbol. Ignored by the dot/d2/mermaid/json formats, which
+        /// export the whole snapshot.
+        #[arg(long, help_heading = headings::EXPORT_OPTIONS, display_order = 80)]
+        symbol: Option<String>,
+
+        /// Seed file path (archify format only).
+        ///
+        /// Required (with `--symbol`) when `--format archify`. Seeds the
+        /// architecture subgraph from every symbol defined in this file.
+        #[arg(long, help_heading = headings::EXPORT_OPTIONS, display_order = 90)]
+        file: Option<String>,
+
+        /// BFS depth from the seed (archify format only). Default 2, cap 5.
+        #[arg(long, help_heading = headings::EXPORT_OPTIONS, display_order = 100)]
+        max_depth: Option<usize>,
+
+        /// Cap on raw nodes visited during the seeded walk (archify format
+        /// only). Default 1000.
+        #[arg(long, help_heading = headings::EXPORT_OPTIONS, display_order = 110)]
+        max_results: Option<usize>,
     },
 
     /// Explain a symbol with context and relations
@@ -1762,6 +1811,18 @@ pub enum Command {
         /// Search path (defaults to current directory).
         #[arg(long, help_heading = headings::SEARCH_INPUT, display_order = 30)]
         path: Option<String>,
+
+        /// File the target symbol is defined in (disambiguator for ambiguous
+        /// names, same contract as `sqry impact --in`). Overrides the `<FILE>`
+        /// positional as the resolution scope. Accepts repo-relative or
+        /// absolute paths.
+        #[arg(long = "in", help_heading = headings::SEARCH_INPUT, display_order = 25, value_name = "FILE")]
+        in_file: Option<String>,
+
+        /// One-based start line of the intended definition. Disambiguates two
+        /// definitions that share the same file (which `--in` alone cannot).
+        #[arg(long, help_heading = headings::SEARCH_INPUT, display_order = 26, value_name = "N")]
+        line: Option<u32>,
 
         /// Skip code context in output.
         #[arg(long, help_heading = headings::OUTPUT_CONTROL, display_order = 10)]
@@ -1901,10 +1962,15 @@ pub enum Command {
         path: Option<String>,
 
         /// File the target symbol is defined in (disambiguator for ambiguous
-        /// names — equivalent to the MCP `dependency_impact.file_path`
+        /// names, equivalent to the MCP `dependency_impact.file_path`
         /// argument). Accepts repo-relative or absolute paths.
         #[arg(long = "in", help_heading = headings::SEARCH_INPUT, display_order = 25, value_name = "FILE")]
         in_file: Option<String>,
+
+        /// One-based start line of the intended definition. Disambiguates two
+        /// definitions that share the same file (which `--in` alone cannot).
+        #[arg(long, help_heading = headings::SEARCH_INPUT, display_order = 26, value_name = "N")]
+        line: Option<u32>,
 
         /// Maximum analysis depth (default: 3).
         #[arg(long, short = 'd', default_value = "3", help_heading = headings::GRAPH_FILTERING, display_order = 10)]
@@ -2049,6 +2115,35 @@ pub enum Command {
     Daemon {
         #[command(subcommand)]
         action: Box<DaemonAction>,
+    },
+
+    /// Diagnose the local sqry installation.
+    ///
+    /// Read-only checks that never mutate config, index, or daemon state.
+    ///
+    /// Examples:
+    ///   sqry doctor channels           # Diagnose stable vs dev channel separation
+    ///   sqry doctor channels --json    # Machine-readable report
+    #[command(display_order = 52, verbatim_doc_comment)]
+    Doctor {
+        #[command(subcommand)]
+        what: DoctorCommand,
+    },
+}
+
+/// Diagnostic (`sqry doctor`) subcommands.
+#[derive(Subcommand, Debug, Clone)]
+pub enum DoctorCommand {
+    /// Diagnose stable vs dev sqry channel separation (issue #308).
+    ///
+    /// Resolves the stable (`sqry`/`sqry-mcp`/`sqry-lsp`/`sqryd`) and dev
+    /// (`-d` wrapper) toolchains, cross-checks MCP config keys, daemon
+    /// socket paths, and the two channels' plugin rosters, and reports any
+    /// mixed-channel condition. Exits non-zero when a mismatch is detected.
+    Channels {
+        /// Emit a machine-readable JSON report instead of the human table.
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -2279,6 +2374,17 @@ pub enum McpCommand {
         /// Skip creating .bak backup files.
         #[arg(long)]
         no_backup: bool,
+
+        /// Toolchain channel to configure.
+        ///
+        /// - stable (default): server key `sqry`, binary `sqry-mcp`. Output is
+        ///   byte-for-byte identical to prior releases.
+        /// - dev: server key `sqry_dev`, binary `sqry-mcp-d`. The dev entry is
+        ///   written under a distinct key so it never overwrites (or is
+        ///   overwritten by) the stable `sqry` entry. Requires the dev channel
+        ///   to be installed via `scripts/install-dev.sh` (see issue #308).
+        #[arg(long, value_enum, default_value = "stable")]
+        channel: McpChannel,
     },
 
     /// Show current MCP configuration status across all tools
@@ -2315,6 +2421,20 @@ pub enum SetupScope {
     Project,
     /// Global entries (CWD-dependent workspace resolution)
     Global,
+}
+
+/// Toolchain channel selected for `sqry mcp setup` (issue #308).
+///
+/// The stable and dev channels write to disjoint MCP server keys (`sqry`
+/// vs `sqry_dev`) pointing at disjoint binaries (`sqry-mcp` vs `sqry-mcp-d`),
+/// so a dev config can coexist beside a stable config without either
+/// clobbering the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum McpChannel {
+    /// Stable channel: server key `sqry`, binary `sqry-mcp` (default).
+    Stable,
+    /// Dev channel: server key `sqry_dev`, binary `sqry-mcp-d`.
+    Dev,
 }
 
 /// Graph-based query operations
@@ -3020,6 +3140,18 @@ pub struct VisualizeCommand {
     /// Target path (defaults to CLI positional path).
     #[arg(long, help_heading = headings::VISUALIZATION_INPUT, display_order = 20)]
     pub path: Option<String>,
+
+    /// Restrict the relation root to a symbol defined in this file. Narrows an
+    /// ambiguous bare name (same contract as `sqry impact --in`) so the
+    /// diagram traverses from the intended definition instead of every match.
+    #[arg(long = "in", help_heading = headings::VISUALIZATION_INPUT, display_order = 25, value_name = "FILE")]
+    pub in_file: Option<String>,
+
+    /// Restrict the relation root to the definition starting on this one-based
+    /// line. Disambiguates two definitions that share a file (which `--in`
+    /// alone cannot).
+    #[arg(long, help_heading = headings::VISUALIZATION_INPUT, display_order = 26, value_name = "N")]
+    pub line: Option<u32>,
 
     /// Diagram syntax format (mermaid, graphviz, d2).
     ///

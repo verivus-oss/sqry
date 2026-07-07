@@ -152,13 +152,20 @@ pub fn discover_repositories(
             });
         }
 
-        repositories.push(WorkspaceRepository::new(
-            repo_id,
-            name,
-            repo_root,
-            manifest_path,
-            last_indexed_at,
-        ));
+        // Read the cheap manifest.json sidecar (no full graph load) so the
+        // registration-time snapshot is populated instead of the `None`
+        // `WorkspaceRepository::new` defaults to. `sqry workspace stats`
+        // re-reads this same manifest live at stats-computation time
+        // (see `DetailedWorkspaceStats::from_registry`), so this value is
+        // only a last-known fallback for other consumers, not the source
+        // of truth for `stats`. Must run before `repo_root` moves into
+        // `WorkspaceRepository::new`.
+        let symbol_count = WorkspaceRepository::symbol_count_from_manifest(&repo_root);
+
+        let mut repo =
+            WorkspaceRepository::new(repo_id, name, repo_root, manifest_path, last_indexed_at);
+        repo.symbol_count_at_registration = symbol_count;
+        repositories.push(repo);
     }
 
     repositories.sort_by(|a, b| a.id.cmp(&b.id));

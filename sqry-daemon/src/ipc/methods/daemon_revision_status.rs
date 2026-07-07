@@ -5,6 +5,7 @@ use std::path::Path;
 use serde_json::Value;
 use sqry_daemon_protocol::{ListRevisionsRequest, ListRevisionsResult, RevisionStatusRequest};
 
+use super::super::protocol::{ResponseEnvelope, ResponseMeta};
 use super::{HandlerContext, MethodError};
 
 /// Handle `daemon/listRevisions`.
@@ -19,7 +20,11 @@ pub(crate) fn handle_list(ctx: &HandlerContext, params: Value) -> Result<Value, 
             .manager
             .resident_revision_statuses(root.as_deref(), req.include_unloaded),
     };
-    serde_json::to_value(result).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
+    let envelope = ResponseEnvelope {
+        result,
+        meta: ResponseMeta::management(ctx.daemon_version),
+    };
+    serde_json::to_value(&envelope).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
 }
 
 /// Handle `daemon/revisionStatus`.
@@ -39,8 +44,11 @@ pub(crate) fn handle_status(ctx: &HandlerContext, params: Value) -> Result<Value
         }
         .into());
     };
-    serde_json::to_value(handle.status())
-        .map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
+    let envelope = ResponseEnvelope {
+        result: handle.status(),
+        meta: ResponseMeta::management(ctx.daemon_version),
+    };
+    serde_json::to_value(&envelope).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
 }
 
 fn canonical_or_original(path: &Path) -> std::path::PathBuf {

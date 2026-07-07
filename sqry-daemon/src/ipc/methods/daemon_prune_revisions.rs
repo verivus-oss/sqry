@@ -11,6 +11,7 @@ use sqry_daemon_protocol::{ArtifactId, PruneRevisionsRequest, PruneRevisionsResu
 
 use crate::workspace::revision::{ManagedWorktreeRegistry, RevisionArtifactStore, plan_prune};
 
+use super::super::protocol::{ResponseEnvelope, ResponseMeta};
 use super::{HandlerContext, MethodError};
 
 /// Handle `daemon/pruneRevisions`.
@@ -53,7 +54,11 @@ pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, Metho
         applied: req.apply,
         reclaimed_bytes,
     };
-    serde_json::to_value(result).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
+    let envelope = ResponseEnvelope {
+        result,
+        meta: ResponseMeta::management(ctx.daemon_version),
+    };
+    serde_json::to_value(&envelope).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
 }
 
 fn canonical_or_original(path: &Path) -> std::path::PathBuf {

@@ -101,6 +101,12 @@ use crate::{
 /// - [`DaemonError::AutoStartTimeout`] — daemon did not become ready in time.
 /// - [`DaemonError::Io`] — filesystem, spawn, or connect error.
 pub async fn start_detached(cfg: &DaemonConfig) -> DaemonResult<u32> {
+    // Pre-validate the socket path before spawning so an over-long path
+    // surfaces the typed, actionable length error synchronously to the
+    // auto-start caller (the sqry-mcp / sqry-lsp shim) instead of a bare
+    // ready-timeout after the grandchild fails to bind (issue #519 part a).
+    cfg.validate_socket_path()?;
+
     let socket_path = cfg.socket_path();
     let timeout = Duration::from_secs(cfg.auto_start_ready_timeout_secs);
     let deadline = Instant::now() + timeout;
@@ -232,13 +238,23 @@ const POLL_INTERVAL_MS: u64 = 50;
 /// so the bootstrap-lock acquire and the daemon-lifetime lock are
 /// fully orthogonal (§H design note).
 ///
-/// The file is created in the same runtime directory as the main lock.
+/// The file lives in the same directory as the main lock and mirrors its
+/// file stem, so a default lock `sqryd.lock` yields `sqryd.bootstrap.lock`
+/// and a custom-socket lock `foo.lock` yields `foo.bootstrap.lock`. This
+/// keeps the bootstrap lock per-socket isolated alongside the main lock
+/// (issue #519 part b).
 #[must_use]
 pub fn bootstrap_lock_path(cfg: &DaemonConfig) -> PathBuf {
     let lock = cfg.lock_path();
-    lock.parent()
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .join("sqryd.bootstrap.lock")
+    let parent = lock
+        .parent()
+        .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
+    let stem = lock
+        .file_stem()
+        .unwrap_or_else(|| std::ffi::OsStr::new("sqryd"));
+    let mut name = stem.to_os_string();
+    name.push(".bootstrap.lock");
+    parent.join(name)
 }
 
 // ---------------------------------------------------------------------------
@@ -524,6 +540,32 @@ mod tests {
             bootstrap.file_name().and_then(|n| n.to_str()),
             Some("sqryd.bootstrap.lock"),
             "bootstrap lock filename must be 'sqryd.bootstrap.lock'"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // T1b: bootstrap_lock_path mirrors a custom socket's file stem, so a
+    //      private socket `…/foo.sock` yields `…/foo.bootstrap.lock` beside
+    //      its `foo.lock` (issue #519 part b).
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_lock_path_mirrors_custom_socket_stem() {
+        let fix = TestCfg::new();
+        let mut cfg = fix.cfg().clone();
+        let dir = fix._tmp.path().join("priv");
+        cfg.socket.path = Some(dir.join("foo.sock"));
+
+        assert_eq!(cfg.lock_path(), dir.join("foo.lock"));
+        assert_eq!(cfg.pid_path(), dir.join("foo.pid"));
+
+        let bootstrap = bootstrap_lock_path(&cfg);
+        assert_eq!(bootstrap, dir.join("foo.bootstrap.lock"));
+        assert_eq!(
+            bootstrap.parent(),
+            cfg.lock_path().parent(),
+            "bootstrap lock must sit beside the main lock"
         );
     }
 

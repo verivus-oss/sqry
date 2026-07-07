@@ -48,7 +48,7 @@ use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::node::NodeKind;
 
-use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
+use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace};
 use crate::tools::{CallHierarchyArgs, CallHierarchyDirection, RelationQueryArgs, RelationType};
 
 use crate::execution::graph_builders::build_graph_metadata;
@@ -64,13 +64,11 @@ use crate::execution::utils::{duration_to_ms, paginate};
 ///
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
-fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
+fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
     // Issue #394: resolve a subdirectory `path` to its owning workspace instead
     // of failing as if it were a workspace root. Subtree scoping for list/scan
     // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector(path)
-        .ok()
-        .flatten()
+    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
 }
 
 /// Execute the `relation_query` tool to find symbol relations.
@@ -83,10 +81,10 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
 pub fn execute_relation_query(
     args: &RelationQueryArgs,
 ) -> Result<ToolExecution<RelationQueryData>> {
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require unified graph for relation queries
     let graph = engine.ensure_graph()?;
@@ -1041,10 +1039,10 @@ fn fallback_ref(name: &str, workspace_root: &Path) -> NodeRefData {
 pub fn execute_call_hierarchy(
     args: &CallHierarchyArgs,
 ) -> Result<ToolExecution<CallHierarchyData>> {
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require unified graph for call hierarchy
     let graph = engine.ensure_graph()?;
@@ -1066,14 +1064,25 @@ pub fn execute_call_hierarchy(
 
     // If file_path is specified, filter to nodes in that file
     let file_filtered: Vec<NodeId> = if let Some(ref file_path) = args.file_path {
+        // Surface 1 enforcement (issue #469): reject an excluded `file_path`
+        // with the same invalid_params error as the `path` argument, and never
+        // surface a call-hierarchy root whose resolved file is excluded (the
+        // suffix `ends_with` matcher below is otherwise exclusion-blind, so an
+        // excluded file could be targeted by name).
+        crate::engine::enforce_exclusion_for_file_path(file_path, &workspace_root)?;
+        let logical = crate::workspace_session::current_logical_workspace();
         let files = snapshot.files();
         root_nodes
             .into_iter()
             .filter(|&node_id| {
                 if let Some(entry) = snapshot.get_node(node_id) {
-                    files
-                        .resolve(entry.file)
-                        .is_some_and(|p| p.as_ref().ends_with(file_path))
+                    files.resolve(entry.file).is_some_and(|p| {
+                        let p = p.as_ref();
+                        p.ends_with(file_path)
+                            && !logical
+                                .as_deref()
+                                .is_some_and(|ws| crate::engine::exclusion_matches(p, ws))
+                    })
                 } else {
                     false
                 }
@@ -1283,7 +1292,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_path_dot_returns_none() {
-        assert!(resolve_workspace_path(".").is_none());
+        assert!(resolve_workspace_path(".").unwrap().is_none());
     }
 
     #[test]
@@ -1291,7 +1300,7 @@ mod tests {
         // Issue #394: the shim delegates to the shared scope resolver, so a
         // nonexistent path falls back to ambient discovery (`None`) instead of
         // echoing `Some(path)` that would later fail engine resolution.
-        let result = resolve_workspace_path("/workspace/project/does/not/exist");
+        let result = resolve_workspace_path("/workspace/project/does/not/exist").unwrap();
         assert!(result.is_none());
     }
 
@@ -1299,7 +1308,7 @@ mod tests {
     fn resolve_workspace_path_empty_string_returns_none() {
         // Issue #394: empty string now means "whole ambient workspace" (None),
         // matching the "." case, rather than being treated as an explicit path.
-        let result = resolve_workspace_path("");
+        let result = resolve_workspace_path("").unwrap();
         assert!(result.is_none());
     }
 

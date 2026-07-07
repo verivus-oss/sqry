@@ -4,7 +4,9 @@
 
 use crate::args::Cli;
 use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
-use crate::commands::impact::{emit_ambiguous_symbol_error, emit_symbol_not_found};
+use crate::commands::impact::{
+    DisambiguationHint, emit_ambiguous_symbol_error, emit_symbol_not_found,
+};
 use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result, anyhow};
@@ -53,17 +55,23 @@ struct SymbolContext {
 ///
 /// The resolver scope is restricted to `file_path` so the candidate set
 /// reflects "what `symbol_name` could mean inside that one file." When
-/// two or more candidates collide (e.g. a struct field shadowed by a
-/// local variable in another function in the same file) the typed
+/// two or more candidates collide (e.g. two methods named `summary`
+/// defined in the same file, verivus-oss/sqry#512) the typed
 /// [`SymbolResolveError::Ambiguous`] payload propagates up to
 /// [`run_explain`], which renders the standard `sqry::ambiguous_symbol`
-/// envelope.
+/// envelope. A caller-supplied `line` narrows that same-file collision to
+/// the definition starting on that one-based line.
 fn resolve_symbol_by_file_and_name(
     snapshot: &GraphSnapshot,
     file_path: &std::path::Path,
     symbol_name: &str,
+    line: Option<u32>,
 ) -> Result<sqry_core::graph::unified::NodeId, SymbolResolveError> {
-    snapshot.resolve_global_symbol_ambiguity_aware(symbol_name, FileScope::Path(file_path))
+    snapshot.resolve_global_symbol_ambiguity_aware_with_line(
+        symbol_name,
+        FileScope::Path(file_path),
+        line,
+    )
 }
 
 /// Build a `SymbolContext` by reading the source file and extracting the relevant lines.
@@ -96,6 +104,13 @@ fn build_symbol_context(
 
 /// Run the explain command.
 ///
+/// `file_path` is the required `<FILE>` positional that scopes resolution to
+/// one file. `in_file` (`--in <FILE>`) overrides that scope when supplied,
+/// aligning `explain` with `impact`'s file disambiguator
+/// (verivus-oss/sqry#512). `line` (`--line <N>`) further narrows an
+/// ambiguous match set to the definition on that one-based line, which is the
+/// only disambiguator that works when two definitions share a single file.
+///
 /// # Errors
 /// Returns an error if the graph cannot be loaded or symbol cannot be found.
 pub fn run_explain(
@@ -103,6 +118,8 @@ pub fn run_explain(
     file_path: &str,
     symbol_name: &str,
     path: Option<&str>,
+    in_file: Option<&str>,
+    line: Option<u32>,
     include_context: bool,
     _include_relations: bool,
 ) -> Result<()> {
@@ -129,23 +146,32 @@ pub fn run_explain(
     let snapshot = graph.snapshot();
     let strings = snapshot.strings();
     let files_registry = snapshot.files();
-    let requested_file_path = if std::path::Path::new(file_path).is_absolute() {
-        std::path::PathBuf::from(file_path)
+    // `--in <FILE>` overrides the `<FILE>` positional as the resolution
+    // scope (verivus-oss/sqry#512); absent `--in`, the positional wins.
+    let scope_file = in_file.unwrap_or(file_path);
+    let requested_file_path = if std::path::Path::new(scope_file).is_absolute() {
+        std::path::PathBuf::from(scope_file)
     } else {
-        loc.index_root.join(file_path)
+        loc.index_root.join(scope_file)
     };
 
     // Route resolution through the shared ambiguity-aware resolver. On
-    // ambiguity (e.g. `NeedTags` matching a struct field + a local
-    // variable inside the same file) we surface the typed
-    // `sqry::ambiguous_symbol` envelope and exit with the canonical
-    // ambiguous-symbol exit code (4); on absence we surface the
-    // `sqry::symbol_not_found` envelope and exit with 2.
+    // ambiguity (e.g. two methods named `summary` in the same file) we
+    // surface the typed `sqry::ambiguous_symbol` envelope and exit with the
+    // canonical ambiguous-symbol exit code (4); on absence we surface the
+    // `sqry::symbol_not_found` envelope and exit with 2. `--line <N>` narrows
+    // the same-file collision to a single definition before we ever reach the
+    // ambiguity branch.
     let node_id =
-        match resolve_symbol_by_file_and_name(&snapshot, &requested_file_path, symbol_name) {
+        match resolve_symbol_by_file_and_name(&snapshot, &requested_file_path, symbol_name, line) {
             Ok(id) => id,
             Err(SymbolResolveError::Ambiguous(err)) => {
-                let exit_code = emit_ambiguous_symbol_error(&mut streams, &err, cli.json);
+                let exit_code = emit_ambiguous_symbol_error(
+                    &mut streams,
+                    &err,
+                    cli.json,
+                    DisambiguationHint::file_and_line(),
+                );
                 std::process::exit(exit_code);
             }
             Err(SymbolResolveError::NotFound { name }) => {

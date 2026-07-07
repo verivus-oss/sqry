@@ -3,10 +3,12 @@
 //! The Rust binding in this crate is first-party (maintained in the sqry
 //! repository). The grammar under grammar-src/ is vendored THIRD-PARTY code
 //! reproduced under its upstream license; the full license text and copyright
-//! notice are in the repository-root THIRD-PARTY-LICENSES file.
+//! notice ship next to the sources in grammar-src/LICENSE and are also recorded
+//! in the repository-root THIRD-PARTY-LICENSES file.
 //!
 //! **Source Grammar**: <https://github.com/tree-sitter-perl/tree-sitter-perl>
-//! **Commit**: 0c24d001dd1921e418fb933d208a7bd7dd3f923a
+//! **Release**: v1.2.1 (published crate `ts-parser-perl` 1.2.1)
+//! **Commit**: c3e17b31179bf8f658c9f37c7a3ea6a202212d5a
 //! **License**: MIT
 
 use tree_sitter::Language;

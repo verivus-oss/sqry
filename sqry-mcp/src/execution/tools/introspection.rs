@@ -23,13 +23,11 @@ use crate::tools::{ExpandCacheStatusArgs, GetGraphStatsArgs, ListFilesArgs, List
 ///
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
-fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
+fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
     // Issue #394: resolve a subdirectory `path` to its owning workspace instead
     // of failing as if it were a workspace root. Subtree scoping for list/scan
     // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector(path)
-        .ok()
-        .flatten()
+    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
 }
 /// Check if a file's language matches the filter.
 fn matches_language_filter(language: Option<&str>, filter: &str) -> bool {
@@ -101,7 +99,7 @@ pub fn execute_list_files(args: &ListFilesArgs) -> Result<ToolExecution<ListFile
     let selector = crate::execution::workspace_scope::resolve_workspace_selector(&args.path)?;
     let engine = engine_for_workspace(selector.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let subtree = crate::execution::workspace_scope::subtree_within(&args.path, &workspace_root);
+    let subtree = crate::execution::workspace_scope::subtree_within(&args.path, &workspace_root)?;
 
     tracing::debug!(path = %args.path, language = ?args.language, subtree = ?subtree, "Executing list_files tool");
 
@@ -203,7 +201,7 @@ pub fn execute_list_symbols(args: &ListSymbolsArgs) -> Result<ToolExecution<List
     let selector = crate::execution::workspace_scope::resolve_workspace_selector(&args.path)?;
     let engine = engine_for_workspace(selector.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let subtree = crate::execution::workspace_scope::subtree_within(&args.path, &workspace_root);
+    let subtree = crate::execution::workspace_scope::subtree_within(&args.path, &workspace_root)?;
 
     tracing::debug!(
         path = %args.path,
@@ -456,7 +454,7 @@ fn compute_scoped_summary(
 /// Returns an error if workspace resolution or graph acquisition fails.
 pub fn execute_get_graph_stats(args: &GetGraphStatsArgs) -> Result<ToolExecution<GraphStatsData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
@@ -714,7 +712,7 @@ pub fn execute_get_insights(
     };
 
     let start = std::time::Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
@@ -896,7 +894,7 @@ pub fn execute_expand_cache_status(
     args: &ExpandCacheStatusArgs,
 ) -> Result<ToolExecution<ExpandCacheStatusData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
 
@@ -1198,7 +1196,7 @@ pub fn execute_complexity_metrics(
         graph,
         executor: engine.executor_arc(),
     };
-    Ok(inner::execute_complexity_metrics(&ctx, args, start))
+    inner::execute_complexity_metrics(&ctx, args, start)
 }
 
 pub(crate) mod inner {
@@ -1213,7 +1211,7 @@ pub(crate) mod inner {
         ctx: &WorkspaceContext,
         args: &crate::tools::ComplexityMetricsArgs,
         start: Instant,
-    ) -> ToolExecution<super::super::super::types::ComplexityMetricsData> {
+    ) -> anyhow::Result<ToolExecution<super::super::super::types::ComplexityMetricsData>> {
         use super::super::super::types::ComplexityMetricData;
 
         let snapshot = ctx.graph.snapshot();
@@ -1221,9 +1219,11 @@ pub(crate) mod inner {
 
         // Issue #394: scope to the requested subtree (relative to the resolved
         // workspace root) so `complexity_metrics(path="<subdir>")` reports only
-        // that subtree. `None` => whole workspace (unchanged).
+        // that subtree. `None` => whole workspace (unchanged). Issue #469: an
+        // excluded subtree is rejected here (Surface 2), which is the only
+        // enforcement seam on the daemon-hosted `complexity_metrics` path.
         let subtree =
-            crate::execution::workspace_scope::subtree_within(&args.path, &ctx.workspace_root);
+            crate::execution::workspace_scope::subtree_within(&args.path, &ctx.workspace_root)?;
 
         let mut metrics: Vec<ComplexityMetricData> = Vec::new();
 
@@ -1288,7 +1288,7 @@ pub(crate) mod inner {
             "complexity_metrics completed"
         );
 
-        ToolExecution {
+        Ok(ToolExecution {
             data,
             used_index: false,
             used_graph: true,
@@ -1301,7 +1301,7 @@ pub(crate) mod inner {
             workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
                 &ctx.workspace_root,
             ),
-        }
+        })
     }
 }
 
@@ -1581,7 +1581,7 @@ mod tests {
 
     #[test]
     fn resolve_workspace_path_dot_returns_none() {
-        assert!(resolve_workspace_path(".").is_none());
+        assert!(resolve_workspace_path(".").unwrap().is_none());
     }
 
     #[test]
@@ -1591,7 +1591,11 @@ mod tests {
         // input. A nonexistent path no longer resolves to `Some(path)`; it falls
         // back to ambient discovery (`None`) instead of producing a path that
         // would later fail engine resolution.
-        assert!(resolve_workspace_path("/some/path/that/does/not/exist").is_none());
+        assert!(
+            resolve_workspace_path("/some/path/that/does/not/exist")
+                .unwrap()
+                .is_none()
+        );
     }
 
     // ===== matches_language_filter tests =====

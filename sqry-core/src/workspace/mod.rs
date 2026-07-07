@@ -6,6 +6,7 @@ pub mod error;
 pub mod index;
 pub mod logical;
 pub mod registry;
+pub mod scope;
 mod serde_time;
 pub mod stats;
 
@@ -29,6 +30,9 @@ pub use logical::{
 pub use registry::{
     WORKSPACE_REGISTRY_VERSION, WorkspaceMemberFolder, WorkspaceMetadata, WorkspaceRegistry,
     WorkspaceRepoId, WorkspaceRepository,
+};
+pub use scope::{
+    WorkspaceScope, classify_within, owning_workspace_root, path_in_subtree, subtree_within,
 };
 pub use stats::{DetailedWorkspaceStats, FreshnessBuckets};
 

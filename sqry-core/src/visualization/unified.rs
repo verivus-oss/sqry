@@ -411,11 +411,20 @@ impl<'a> UnifiedDotExporter<'a> {
         dot.push_str("  overlap=false;\n");
         dot.push_str("  splines=true;\n\n");
 
-        // Collect visible nodes
+        // Collect visible nodes. `filter_nodes` returns a `HashSet`, whose
+        // iteration order is not stable across calls (each `HashSet` gets
+        // its own randomized hasher seed), so sort a snapshot `Vec` by
+        // `NodeId` (index, then generation) before emitting nodes to keep
+        // the output byte-stable. Edge emission stays on
+        // `self.graph.iter_edges()`, which already walks the arena in a
+        // deterministic order, so it needs no separate sort; the `HashSet`
+        // itself is kept around for O(1) membership checks.
         let visible_nodes = self.filter_nodes();
+        let mut sorted_node_ids: Vec<NodeId> = visible_nodes.iter().copied().collect();
+        sorted_node_ids.sort();
 
         // Export nodes
-        for node_id in &visible_nodes {
+        for node_id in &sorted_node_ids {
             if let Some(entry) = self.graph.get_node(*node_id) {
                 self.export_node(&mut dot, *node_id, entry);
             }
@@ -764,7 +773,12 @@ impl<'a> UnifiedD2Exporter<'a> {
             .expect("write to String never fails");
         d2.push('\n');
 
-        // Collect visible nodes
+        // Collect visible nodes. Sort a `Vec` snapshot by `NodeId` before
+        // emission so the `HashSet`'s per-instance randomized iteration
+        // order cannot make node emission (and therefore the whole
+        // output) nondeterministic across calls. Edge emission walks
+        // `self.graph.iter_edges()` directly, which is already arena-order
+        // deterministic, so only membership checks use the `HashSet`.
         let visible_nodes: HashSet<NodeId> =
             if let Some(ref filter_ids) = self.config.filter_node_ids {
                 filter_ids.clone()
@@ -775,9 +789,11 @@ impl<'a> UnifiedD2Exporter<'a> {
                     .map(|(id, _)| id)
                     .collect()
             };
+        let mut sorted_node_ids: Vec<NodeId> = visible_nodes.iter().copied().collect();
+        sorted_node_ids.sort();
 
         // Export nodes
-        for node_id in &visible_nodes {
+        for node_id in &sorted_node_ids {
             if let Some(entry) = self.graph.get_node(*node_id) {
                 self.export_node(&mut d2, *node_id, entry);
             }
@@ -1012,7 +1028,12 @@ impl<'a> UnifiedMermaidExporter<'a> {
         writeln!(mermaid, "graph {}", self.config.direction.as_str())
             .expect("write to String never fails");
 
-        // Collect visible nodes
+        // Collect visible nodes. Sort a `Vec` snapshot by `NodeId` before
+        // emission so the `HashSet`'s per-instance randomized iteration
+        // order cannot make node emission (and therefore the whole
+        // output) nondeterministic across calls. Edge emission walks
+        // `self.graph.iter_edges()` directly, which is already arena-order
+        // deterministic, so only membership checks use the `HashSet`.
         let visible_nodes: HashSet<NodeId> =
             if let Some(ref filter_ids) = self.config.filter_node_ids {
                 filter_ids.clone()
@@ -1023,9 +1044,11 @@ impl<'a> UnifiedMermaidExporter<'a> {
                     .map(|(id, _)| id)
                     .collect()
             };
+        let mut sorted_node_ids: Vec<NodeId> = visible_nodes.iter().copied().collect();
+        sorted_node_ids.sort();
 
         // Export nodes
-        for node_id in &visible_nodes {
+        for node_id in &sorted_node_ids {
             if let Some(entry) = self.graph.get_node(*node_id) {
                 self.export_node(&mut mermaid, *node_id, entry);
             }
@@ -1905,6 +1928,36 @@ mod tests {
             indices,
             crate::graph::unified::NodeMetadataStore::new(),
         )
+    }
+
+    /// Regression guard (issue #480, punch-list B1): adding the Archify format
+    /// and its modules must not perturb the existing dot / d2 / mermaid / json
+    /// exporters. This locks that each stays byte-stable for a fixture, so any
+    /// accidental change to the shared code paths breaks here.
+    #[test]
+    fn raw_exporters_are_byte_stable() {
+        let graph = create_test_graph_for_export();
+        let snapshot = graph.snapshot();
+
+        let dot_a = UnifiedDotExporter::new(&snapshot).export();
+        let dot_b = UnifiedDotExporter::new(&snapshot).export();
+        let d2_a = UnifiedD2Exporter::new(&snapshot).export();
+        let d2_b = UnifiedD2Exporter::new(&snapshot).export();
+        let mm_a = UnifiedMermaidExporter::new(&snapshot).export();
+        let mm_b = UnifiedMermaidExporter::new(&snapshot).export();
+        let js_a = serde_json::to_string(&UnifiedJsonExporter::new(&snapshot).export()).unwrap();
+        let js_b = serde_json::to_string(&UnifiedJsonExporter::new(&snapshot).export()).unwrap();
+
+        assert_eq!(dot_a, dot_b, "DOT output must be byte-stable");
+        assert_eq!(d2_a, d2_b, "D2 output must be byte-stable");
+        assert_eq!(mm_a, mm_b, "Mermaid output must be byte-stable");
+        assert_eq!(js_a, js_b, "JSON output must be byte-stable");
+
+        // The raw exporters render the graph they are given; the Archify format
+        // never routes through them (it has its own path), so no
+        // archify-specific tokens leak into their structure.
+        assert!(dot_a.starts_with("digraph CodeGraph {"));
+        assert!(!dot_a.contains("schema_version"));
     }
 
     // ===== DOT Exporter tests =====

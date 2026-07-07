@@ -6,12 +6,16 @@ use anyhow::{Context, Result, anyhow, bail};
 use sqry_core::graph::unified::GraphSnapshot;
 use sqry_core::graph::unified::edge::{EdgeKind, ExportKind};
 use sqry_core::graph::unified::node::{NodeId, NodeKind};
+use sqry_core::graph::unified::resolution::{FileScope, ResolvedFileScope};
 use sqry_core::graph::unified::{
     EdgeFilter, TraversalConfig, TraversalDirection, TraversalLimits, traverse,
 };
 use sqry_core::output::diagram::{
     D2Formatter, Diagram, DiagramEdge, DiagramFormat, DiagramFormatter, DiagramOptions, Direction,
     GraphType, GraphVizFormatter, MermaidFormatter, Node,
+};
+use sqry_core::query::executor::graph_eval::{
+    entry_query_texts, extract_method_name, language_aware_segments_match,
 };
 use std::collections::HashSet;
 use std::fs;
@@ -47,7 +51,14 @@ pub fn run_visualize(cli: &Cli, cmd: &VisualizeCommand) -> Result<()> {
     let max_depth = cmd.depth.max(1);
     let capped_nodes = cmd.max_nodes.clamp(1, 500);
 
-    let graph_data = collect_graph_data_unified(&relation, &snapshot, max_depth, capped_nodes);
+    let graph_data = collect_graph_data_unified(
+        &relation,
+        &snapshot,
+        max_depth,
+        capped_nodes,
+        cmd.in_file.as_deref(),
+        cmd.line,
+    );
 
     let has_placeholder_root = !graph_data.extra_nodes.is_empty();
 
@@ -156,9 +167,11 @@ fn collect_graph_data_unified(
     snapshot: &GraphSnapshot,
     max_depth: usize,
     max_nodes: usize,
+    in_file: Option<&str>,
+    line: Option<u32>,
 ) -> GraphData {
     // Resolve root nodes
-    let root_nodes = resolve_nodes(snapshot, &relation.target, relation.kind);
+    let root_nodes = resolve_nodes(snapshot, &relation.target, relation.kind, in_file, line);
 
     if root_nodes.is_empty() {
         let placeholder = placeholder_node(&relation.target);
@@ -275,22 +288,135 @@ fn edge_filter_exports_only() -> EdgeFilter {
     }
 }
 
-fn resolve_nodes(snapshot: &GraphSnapshot, name: &str, relation_kind: RelationKind) -> Vec<NodeId> {
-    let required_kind = required_node_kind(relation_kind);
-    let matches = collect_node_matches(snapshot, name, required_kind);
-    let mut candidates = select_node_candidates(relation_kind, &matches);
+fn resolve_nodes(
+    snapshot: &GraphSnapshot,
+    name: &str,
+    relation_kind: RelationKind,
+    in_file: Option<&str>,
+    line: Option<u32>,
+) -> Vec<NodeId> {
+    // Resolve the relation roots to the SAME node set `sqry graph
+    // direct-callers` / `direct-callees` and `sqry query callers:`/`callees:`
+    // resolve (verivus-oss/sqry#516). For `Calls`-edge relations that means
+    // the segment-aware matcher: a query for `Alpha::helper` matches every
+    // node whose trailing method segment is `helper` (so `Beta::helper` too),
+    // exactly as `graph_eval` / sqry-db reconcile it. Import / export
+    // relations keep the bucket matcher, which honours the `Import` node kind
+    // and module-name buckets those surfaces use.
+    let mut candidates = match relation_kind {
+        RelationKind::Callers | RelationKind::Callees => {
+            resolve_call_relation_roots(snapshot, name)
+        }
+        RelationKind::Imports | RelationKind::Exports => {
+            let required_kind = required_node_kind(relation_kind);
+            let matches = collect_node_matches(snapshot, name, required_kind);
+            select_node_candidates(relation_kind, &matches)
+        }
+    };
+
+    // Narrow by the optional `--in <file>` / `--line <N>` disambiguators.
+    candidates = apply_disambiguators(snapshot, candidates, in_file, line);
 
     if candidates.is_empty() {
         return Vec::new();
     }
 
     candidates.sort_by_key(|node_id| node_sort_key(snapshot, *node_id));
-    if relation_kind == RelationKind::Imports {
-        candidates
-    } else {
-        candidates.truncate(1);
-        candidates
+    candidates.dedup();
+
+    // Traverse from every matching definition (union), matching the
+    // resolution used by `sqry graph direct-callees` / `sqry query`. The
+    // previous `candidates.truncate(1)` picked a single arbitrary node by
+    // sort order, so an ambiguous name whose first-sorted match had no
+    // outgoing edges rendered an edge-less node-only diagram even though the
+    // relation existed on a sibling definition (verivus-oss/sqry#516). The
+    // traversal kernel takes a `&[NodeId]` seed set and never re-resolves the
+    // name at depth >= 1, so multiple roots do not broaden the frontier.
+    candidates
+}
+
+/// Resolve the root nodes for a `callers:` / `callees:` relation with the same
+/// segment-aware name matching `sqry graph direct-call*` and `sqry query`
+/// use.
+///
+/// A node is a root when any of its query texts (interned name, qualified
+/// name, display-qualified name) segment-matches `name` under
+/// [`language_aware_segments_match`], the shared predicate `graph_eval` and
+/// sqry-db reconcile on. So a qualified `Type::method` query resolves to the
+/// identical node set as `graph direct-callees Type::method` (every node whose
+/// trailing method segment matches), not just the exact-qualified node.
+/// Unified losers are skipped, matching [`collect_node_matches`].
+///
+/// The trailing-method-segment fallback mirrors sqry-db's
+/// `method_segment_matches` (relation.rs): some plugins (JS / TS via
+/// `semantic_name_for_node_input`, which short-circuits on a `/`) intern a
+/// slash-containing callable as its full name with no bare-method query text,
+/// so `Foo::fetchUsers` would not segment-match `frontend/api.js::fetchUsers`.
+/// sqry-db still unions those through the method-name fallback, so `graph
+/// direct-callees` finds them; replicate it here for identical resolution.
+fn resolve_call_relation_roots(snapshot: &GraphSnapshot, name: &str) -> Vec<NodeId> {
+    let query_method = extract_method_name(name);
+    snapshot
+        .iter_nodes()
+        .filter_map(|(node_id, entry)| {
+            if entry.is_unified_loser() {
+                return None;
+            }
+            let texts = entry_query_texts(snapshot, entry);
+            let segment_match = texts
+                .iter()
+                .any(|text| language_aware_segments_match(snapshot, entry.file, text, name));
+            let method_match = query_method.as_deref().is_some_and(|method| {
+                texts
+                    .iter()
+                    .filter_map(|text| extract_method_name(text))
+                    .any(|candidate| candidate == method)
+            });
+            (segment_match || method_match).then_some(node_id)
+        })
+        .collect()
+}
+
+/// Narrow a candidate node set by the optional `--in <file>` and
+/// `--line <N>` disambiguators.
+///
+/// `--in` is resolved against the graph's file registry via the shared
+/// [`GraphSnapshot::resolve_file_scope`] so its path-normalization matches
+/// `sqry impact --in`. A file that is not indexed yields an empty set (the
+/// caller then renders the no-match placeholder). `--line` keeps only nodes
+/// whose definition starts on that one-based line.
+fn apply_disambiguators(
+    snapshot: &GraphSnapshot,
+    candidates: Vec<NodeId>,
+    in_file: Option<&str>,
+    line: Option<u32>,
+) -> Vec<NodeId> {
+    let mut result = candidates;
+
+    if let Some(file) = in_file {
+        match snapshot.resolve_file_scope(&FileScope::Path(Path::new(file))) {
+            Ok(ResolvedFileScope::File(file_id)) => {
+                result.retain(|node_id| {
+                    snapshot
+                        .get_node(*node_id)
+                        .is_some_and(|entry| entry.file == file_id)
+                });
+            }
+            // `ResolvedFileScope::Any` cannot arise from `FileScope::Path`;
+            // an unindexed file resolves the whole set to empty.
+            _ => result.clear(),
+        }
     }
+
+    if let Some(target_line) = line {
+        result.retain(|node_id| {
+            snapshot
+                .get_node(*node_id)
+                .is_some_and(|entry| entry.start_line == target_line)
+        });
+    }
+
+    result
 }
 
 struct NodeMatches {
@@ -619,5 +745,52 @@ mod tests {
     #[test]
     fn rejects_unknown_relation() {
         assert!(RelationQuery::parse("unknown:foo").is_err());
+    }
+
+    #[test]
+    fn resolve_call_roots_matches_path_qualified_name_via_method_segment() {
+        use sqry_core::graph::node::Language;
+        use sqry_core::graph::unified::concurrent::CodeGraph;
+        use sqry_core::graph::unified::storage::arena::NodeEntry;
+        use std::path::Path;
+
+        // A callable whose interned name carries a '/', the shape
+        // `semantic_name_for_node_input` produces for slash-qualified inputs
+        // (JS / TS): the full name is interned with no bare-method query text.
+        // `language_aware_segments_match` alone cannot line up a suffix
+        // boundary against `Api::fetchUsers`, so parity with `graph
+        // direct-callees` depends on the trailing-method-segment fallback this
+        // test locks (verivus-oss/sqry#516).
+        let slash_name = "frontend/api.js::fetchUsers";
+
+        let mut graph = CodeGraph::new();
+        let name_id = graph.strings_mut().intern(slash_name).unwrap();
+        let file_id = graph
+            .files_mut()
+            .register_with_language(Path::new("frontend/api.js"), Some(Language::JavaScript))
+            .unwrap();
+        let entry = NodeEntry::new(NodeKind::Function, name_id, file_id)
+            .with_qualified_name(name_id)
+            .with_location(1, 0, 1, 1);
+        let node_id = graph.nodes_mut().alloc(entry).unwrap();
+        graph
+            .indices_mut()
+            .add(node_id, NodeKind::Function, name_id, Some(name_id), file_id);
+
+        let snapshot = graph.snapshot();
+
+        // The segment matcher alone misses, so the resolution below exercises
+        // the method-segment fallback rather than the plain segment path.
+        assert!(
+            !language_aware_segments_match(&snapshot, file_id, slash_name, "Api::fetchUsers"),
+            "segment matcher must miss the slash-qualified name (fallback needed)"
+        );
+
+        let roots = resolve_call_relation_roots(&snapshot, "Api::fetchUsers");
+        assert!(
+            roots.contains(&node_id),
+            "slash-qualified callable must resolve via the trailing-method-segment \
+             fallback, matching graph direct-callees"
+        );
     }
 }

@@ -22,7 +22,7 @@ use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
 use url::Url;
 
-use crate::engine::{canonicalize_in_workspace, engine_for_workspace, get_graph_identity};
+use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace, get_graph_identity};
 use crate::tools::{ExportGraphArgs, ShowDependenciesArgs, SubgraphArgs};
 use sqry_core::visualization::unified::{
     D2Config, DotConfig, MermaidConfig, UnifiedD2Exporter, UnifiedDotExporter,
@@ -45,13 +45,11 @@ use crate::execution::utils::{duration_to_ms, paginate};
 ///
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
-fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
+fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
     // Issue #394: resolve a subdirectory `path` to its owning workspace instead
     // of failing as if it were a workspace root. Subtree scoping for list/scan
     // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector(path)
-        .ok()
-        .flatten()
+    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
 }
 
 /// Execute the `show_dependencies` tool to walk a symbol's bidirectional
@@ -94,10 +92,10 @@ pub fn execute_get_dependencies(
 ) -> Result<ToolExecution<DependencyGraphData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _base = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _base = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     tracing::debug!(
         file_path = args.file_path.as_deref(),
@@ -170,7 +168,7 @@ fn collect_unified_seeds(
     let mut seeds = Vec::new();
 
     if let Some(ref file_path) = args.file_path {
-        let canon = canonicalize_in_workspace(file_path, workspace_root)?;
+        let canon = canonicalize_in_workspace_enforced(file_path, workspace_root)?;
         let rel_path = canon.strip_prefix(workspace_root).unwrap_or(&canon);
 
         for (node_id, entry) in snapshot.iter_nodes() {
@@ -329,10 +327,10 @@ fn call_edge_metadata(edge_kind: &EdgeKind) -> Option<Value> {
 pub fn execute_export_graph(args: &ExportGraphArgs) -> Result<ToolExecution<DependencyGraphData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _base = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _base = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph
     let graph = engine.ensure_graph()?;
@@ -351,7 +349,7 @@ fn collect_seeds_by_file(
     file_path: &str,
     workspace_root: &Path,
 ) -> Result<Vec<NodeId>> {
-    let canon = canonicalize_in_workspace(file_path, workspace_root)?;
+    let canon = canonicalize_in_workspace_enforced(file_path, workspace_root)?;
     let relative_path = canon.strip_prefix(workspace_root).unwrap_or(&canon);
     let files = snapshot.files();
 
@@ -698,8 +696,93 @@ fn render_export_graph(
             let exporter = UnifiedMermaidExporter::with_config(&snapshot, config);
             Some(exporter.export())
         }
+        // "archify" is handled on a dedicated path in
+        // `inner::execute_export_graph` (its own seeded walk + edge retention),
+        // and "json" returns `None` above. Neither reaches this match.
         _ => None,
     }
+}
+
+/// Seed description surfaced in the Archify Overview card.
+fn archify_seed_label(args: &ExportGraphArgs) -> String {
+    if let Some(ref name) = args.symbol_name {
+        return name.clone();
+    }
+    if let Some(ref file) = args.file_path {
+        return file.clone();
+    }
+    if !args.symbols.is_empty() {
+        return args.symbols.join(", ");
+    }
+    String::new()
+}
+
+/// Rendered Archify JSON plus the seeded-walk's truncation signal.
+///
+/// `truncated` / `total_edges` come straight from the seeded subgraph walk
+/// ([`sqry_core::visualization::archify::ArchifyBuildMeta`]), the same
+/// walk that produced `json`. `execute_export_graph` reports these on
+/// `ToolExecution` instead of hardcoding `truncated: false` / `total: 0`,
+/// which used to discard the real signal entirely.
+struct ArchifyRendered {
+    json: String,
+    truncated: bool,
+    total_edges: u64,
+}
+
+/// Build the Archify architecture JSON for an `export_graph` call.
+///
+/// This is fully decoupled from [`classify_edge_for_export`] and the
+/// dot/d2/mermaid/json walk: it runs its own seeded, depth-limited traversal
+/// ([`sqry_core::visualization::subgraph`]) with the Archify edge classifier
+/// ([`sqry_core::visualization::archify::archify_classify_edge`]), so the
+/// existing export formats are provably unchanged by this feature.
+///
+/// # Errors
+///
+/// Returns an error if the Archify self-validation fails (for example an empty
+/// or fully language-filtered subgraph) or if serialization fails.
+fn build_archify_rendered(
+    snapshot: &GraphSnapshot,
+    seeds: &[NodeId],
+    args: &ExportGraphArgs,
+) -> Result<ArchifyRendered> {
+    use sqry_core::graph::node::Language;
+    use sqry_core::visualization::archify::{
+        ArchifyConfig, DEFAULT_MAX_COMPONENTS, build_archify_document_with_meta,
+    };
+    use sqry_core::visualization::subgraph::SeededSubgraphConfig;
+
+    let languages: Vec<Language> = args
+        .languages
+        .iter()
+        .filter_map(|l| Language::from_id(l))
+        .collect();
+
+    let subgraph_config = SeededSubgraphConfig {
+        max_depth: args.max_depth,
+        max_results: args.max_results,
+        languages,
+    }
+    .normalized();
+
+    let archify_config = ArchifyConfig {
+        seed_label: archify_seed_label(args),
+        title: String::new(),
+        max_depth: subgraph_config.max_depth,
+        max_components: DEFAULT_MAX_COMPONENTS,
+    };
+
+    let meta = build_archify_document_with_meta(snapshot, seeds, &subgraph_config, &archify_config)
+        .map_err(|e| anyhow::anyhow!("archify export failed: {e}"))?;
+    let json = serde_json::to_string_pretty(&meta.document)
+        .map_err(|e| anyhow::anyhow!("archify export failed: {e}"))?;
+
+    Ok(ArchifyRendered {
+        json,
+        truncated: meta.truncated,
+        total_edges: meta.total_edges as u64,
+    })
 }
 
 /// Execute subgraph extraction around seed symbols.
@@ -742,10 +825,10 @@ fn render_export_graph(
 pub fn execute_subgraph(args: &SubgraphArgs) -> Result<ToolExecution<DependencyGraphData>> {
     // Pre-refactor timing: `start` fires before engine resolution.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let _base = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let _base = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Require the unified graph
     let graph = engine.ensure_graph()?;
@@ -1240,10 +1323,10 @@ pub(crate) mod inner {
     use super::{
         CacheOutcome, CacheRequestContext, DependencyGraphData, ExportGraphArgs, NodeRefData,
         RelationEdgeData, Result, ShowDependenciesArgs, SubgraphArgs, ToolExecution,
-        apply_subgraph_pagination, build_graph_metadata, collect_export_graph_data_unified,
-        collect_export_graph_seeds_unified, compute_dependencies_unified, compute_subgraph_data,
-        duration_to_ms, get_graph_identity, graph_cache, paginate, paginate_export_graph,
-        render_export_graph, resolve_page_node_ids,
+        apply_subgraph_pagination, build_archify_rendered, build_graph_metadata,
+        collect_export_graph_data_unified, collect_export_graph_seeds_unified,
+        compute_dependencies_unified, compute_subgraph_data, duration_to_ms, get_graph_identity,
+        graph_cache, paginate, paginate_export_graph, render_export_graph, resolve_page_node_ids,
     };
     use crate::daemon_adapter::WorkspaceContext;
     use std::time::Instant;
@@ -1298,6 +1381,38 @@ pub(crate) mod inner {
     ) -> Result<ToolExecution<DependencyGraphData>> {
         let snapshot = ctx.graph.snapshot();
         let seeds = collect_export_graph_seeds_unified(args, &snapshot, &ctx.workspace_root)?;
+
+        // Archify runs a dedicated, decoupled path: its own seeded walk with the
+        // Archify edge classifier, emitting the architecture JSON via `rendered`
+        // and leaving the raw node/edge walk untouched (existing formats
+        // provably unchanged).
+        if args.format == "archify" {
+            let archify = build_archify_rendered(&snapshot, &seeds, args)?;
+            let graph_metadata =
+                build_graph_metadata(Some(&ctx.workspace_root), Some(&snapshot), None);
+            return Ok(ToolExecution {
+                data: DependencyGraphData {
+                    nodes: Vec::new(),
+                    edges: Vec::new(),
+                    rendered: Some(archify.json),
+                },
+                used_index: false,
+                used_graph: true,
+                graph_metadata: Some(graph_metadata),
+                execution_ms: duration_to_ms(start.elapsed()),
+                next_page_token: None,
+                // Real signal from the seeded walk, not a hardcoded
+                // false/0: the walk sets `truncated` when `max_results` is
+                // hit, same as the non-archify branch below.
+                total: Some(archify.total_edges),
+                truncated: Some(archify.truncated),
+                candidates_scanned: None,
+                workspace_path: crate::execution::symbol_utils::path_to_forward_slash(
+                    &ctx.workspace_root,
+                ),
+            });
+        }
+
         let (nodes, edges, was_truncated) =
             collect_export_graph_data_unified(args, &snapshot, &ctx.workspace_root, &seeds);
 
@@ -1742,6 +1857,235 @@ mod tests {
 
         let result = execute_export_graph(&args);
         assert!(result.is_err(), "missing workspace should fail gracefully");
+    }
+
+    /// Decoupling proof (issue #480, punch-list B1): the shared
+    /// `classify_edge_for_export` that feeds dot/d2/mermaid/json is NOT widened
+    /// to carry the semantic cross-service edges. Those edges stay dropped here
+    /// (so existing formats are unchanged), while the Archify path's own
+    /// classifier retains them independently.
+    #[test]
+    fn classify_edge_for_export_still_drops_semantic_edges() {
+        use sqry_core::graph::unified::edge::{DbQueryType, EdgeKind, HttpMethod, MqProtocol};
+
+        // Every include flag on, to prove the drop is not a flag artifact.
+        let args = ExportGraphArgs {
+            path: "unused".to_string(),
+            file_path: None,
+            symbol_name: None,
+            symbols: vec![],
+            max_depth: 2,
+            max_results: 100,
+            format: "dot".to_string(),
+            include_calls: true,
+            include_imports: true,
+            include_exports: true,
+            include_returns: true,
+            languages: vec![],
+            verbose: false,
+            pagination: PaginationArgs {
+                offset: 0,
+                size: 50,
+            },
+        };
+
+        let semantic = [
+            EdgeKind::HttpRequest {
+                method: HttpMethod::Get,
+                url: None,
+            },
+            EdgeKind::DbQuery {
+                query_type: DbQueryType::Select,
+                table: None,
+            },
+            EdgeKind::MessageQueue {
+                protocol: MqProtocol::Kafka,
+                topic: None,
+            },
+        ];
+
+        for kind in &semantic {
+            // Shared exporter classifier drops it (existing formats unchanged).
+            assert!(
+                classify_edge_for_export(kind, &args).is_none(),
+                "classify_edge_for_export must keep dropping {kind:?}"
+            );
+            // Archify's independent classifier retains it.
+            assert!(
+                sqry_core::visualization::archify::archify_classify_edge(kind).is_some(),
+                "archify_classify_edge must retain {kind:?}"
+            );
+        }
+    }
+
+    // ============================================================================
+    // build_archify_rendered truncated/total propagation tests (issue #480 B2)
+    // ============================================================================
+
+    /// Like `create_test_graph`, but with a real `Calls` edge from `main` to
+    /// `helper` so the seeded walk has something to retain and count
+    /// (`create_test_graph`'s edge store is always empty).
+    fn create_test_graph_with_call_edge() -> (CodeGraph, NodeId, NodeId) {
+        let mut nodes = NodeArena::new();
+        let mut strings = StringInterner::new();
+        let mut files = FileRegistry::new();
+        let edges = BidirectionalEdgeStore::new();
+        let mut indices = AuxiliaryIndices::new();
+
+        let file_id = files
+            .register_with_language(Path::new("src/main.rs"), Some(Language::Rust))
+            .unwrap();
+
+        let name_main = strings.intern("main").unwrap();
+        let name_helper = strings.intern("helper").unwrap();
+        let qname_main = strings.intern("crate::main").unwrap();
+        let qname_helper = strings.intern("crate::helper").unwrap();
+
+        let main_entry = NodeEntry {
+            kind: NodeKind::Function,
+            name: name_main,
+            file: file_id,
+            start_byte: 0,
+            end_byte: 100,
+            start_line: 1,
+            start_column: 0,
+            end_line: 10,
+            end_column: 1,
+            signature: None,
+            doc: None,
+            qualified_name: Some(qname_main),
+            visibility: None,
+            is_async: false,
+            is_static: false,
+            body_hash: None,
+            is_unsafe: false,
+            is_definition: true,
+        };
+        let main_id = nodes.alloc(main_entry.clone()).unwrap();
+        indices.add(
+            main_id,
+            main_entry.kind,
+            main_entry.name,
+            main_entry.qualified_name,
+            main_entry.file,
+        );
+
+        let helper_entry = NodeEntry {
+            kind: NodeKind::Function,
+            name: name_helper,
+            file: file_id,
+            start_byte: 100,
+            end_byte: 200,
+            start_line: 11,
+            start_column: 0,
+            end_line: 20,
+            end_column: 1,
+            signature: None,
+            doc: None,
+            qualified_name: Some(qname_helper),
+            visibility: None,
+            is_async: false,
+            is_static: false,
+            body_hash: None,
+            is_unsafe: false,
+            is_definition: true,
+        };
+        let helper_id = nodes.alloc(helper_entry.clone()).unwrap();
+        indices.add(
+            helper_id,
+            helper_entry.kind,
+            helper_entry.name,
+            helper_entry.qualified_name,
+            helper_entry.file,
+        );
+
+        edges.add_edge(
+            main_id,
+            helper_id,
+            EdgeKind::Calls {
+                argument_count: 0,
+                is_async: false,
+                resolved_via: ResolvedVia::Direct,
+            },
+            file_id,
+        );
+
+        let graph = CodeGraph::from_components(
+            nodes,
+            edges,
+            strings,
+            files,
+            indices,
+            sqry_core::graph::unified::NodeMetadataStore::new(),
+        );
+        (graph, main_id, helper_id)
+    }
+
+    fn base_archify_args(max_results: usize) -> ExportGraphArgs {
+        ExportGraphArgs {
+            path: "unused".to_string(),
+            file_path: None,
+            symbol_name: Some("main".to_string()),
+            symbols: vec![],
+            max_depth: 2,
+            max_results,
+            format: "archify".to_string(),
+            include_calls: true,
+            include_imports: false,
+            include_exports: false,
+            include_returns: false,
+            languages: vec![],
+            verbose: false,
+            pagination: PaginationArgs {
+                offset: 0,
+                size: 50,
+            },
+        }
+    }
+
+    /// Regression test for the MCP-side `truncated` hardcoding (issue #480
+    /// B2): before this fix, `execute_export_graph`'s archify branch always
+    /// reported `truncated: Some(false)` / `total: Some(0)`, discarding the
+    /// seeded walk's real signal. `build_archify_rendered` is the function
+    /// that feeds those fields into `ToolExecution`; this asserts it reports
+    /// the true values in both directions, so a truncated export and a
+    /// non-truncated export actually disagree, matching what the
+    /// non-archify branch (`collect_export_graph_data_unified`'s
+    /// `was_truncated`) already does.
+    #[test]
+    fn build_archify_rendered_reports_real_truncated_and_total() {
+        let (graph, main_id, helper_id) = create_test_graph_with_call_edge();
+        let snapshot = graph.snapshot();
+        let seeds = [main_id, helper_id];
+
+        // max_results=1 forces the walk to stop after the first seed node,
+        // before it can visit the second one or retain the Calls edge
+        // between them.
+        let truncated_args = base_archify_args(1);
+        let truncated = build_archify_rendered(&snapshot, &seeds, &truncated_args)
+            .expect("single-node archify doc should still build");
+        assert!(
+            truncated.truncated,
+            "max_results=1 with 2 seed nodes must report truncated=true"
+        );
+
+        // A generous max_results lets the walk visit both nodes and retain
+        // the Calls edge between them; nothing should be truncated.
+        let full_args = base_archify_args(100);
+        let full = build_archify_rendered(&snapshot, &seeds, &full_args)
+            .expect("two-node archify doc should build");
+        assert!(
+            !full.truncated,
+            "max_results=100 with 2 seed nodes must report truncated=false"
+        );
+        assert_eq!(
+            full.total_edges, 1,
+            "the Calls edge between main and helper must be retained and counted, not hardcoded to 0"
+        );
+
+        // The two branches must actually disagree: this is exactly the
+        // regression the hardcoded `truncated: Some(false)` masked.
+        assert_ne!(truncated.truncated, full.truncated);
     }
 
     #[test]

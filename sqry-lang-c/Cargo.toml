@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "C language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "27.0.8", path = "../sqry-core" }
+sqry-core = { version = "28.0.0", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-c.workspace = true
@@ -25,6 +25,14 @@ criterion = { version = "0.8", features = ["html_reports"] }
 [features]
 default = ["has_relations"]
 has_relations = []
+# Test/bench-only. Exposes `CPlugin::without_phase_a` / the matching
+# `CGraphBuilder::without_phase_a` constructor so the c_indirect bench and the
+# phase_a_marginal example can build the fixture with Phase A disabled.
+# `scripts/measure/check_phase_a_perf_gate.sh` runs
+# `cargo run --release --example phase_a_marginal --features phase-a-toggle`
+# (a paired, alternating same-commit measurement, not a criterion bench) to
+# measure the marginal build-time cost. Never enabled by production builds.
+phase-a-toggle = []
 
 [[bench]]
 name = "c_indirect"

@@ -106,8 +106,15 @@ impl IpcServer {
         )
         .map_err(DaemonError::Internal)?;
 
+        // Issue #519 part a: pre-validate the resolved socket path against
+        // the platform `sockaddr_un.sun_path` limit before any bind attempt,
+        // so an over-long path surfaces a typed `DaemonError::Config` with
+        // the actual length and the limit instead of an opaque
+        // `ENAMETOOLONG` deep inside `bind(2)`. No-op on Windows named pipes.
+        config.validate_socket_path()?;
+
         let socket_path = config.socket_path();
-        // Cluster-G §5.2 — pre-flight the socket parent directory so a
+        // Cluster-G §5.2: pre-flight the socket parent directory so a
         // missing or unwritable parent surfaces as a typed
         // `DaemonError::SocketSetup` (-32007) with copy-paste recovery
         // text rather than a generic `EACCES` from the bind syscall.

@@ -1,7 +1,7 @@
 # sqry VS Code Extension - User Guide
 
-**Version**: 27.0.8
-**Last Updated**: 2026-07-06
+**Version**: 28.0.0
+**Last Updated**: 2026-07-07
 
 ---
 
@@ -56,7 +56,7 @@ cargo install --path sqry-cli
 
 # Verify installation
 sqry --version
-# Should output: sqry 27.0.8 (or later)
+# Should output: sqry 28.0.0 (or later)
 ```
 
 ### Option 1: Install from VSIX
@@ -896,6 +896,6 @@ This build installs locally via VSIX while we prepare the Marketplace release—
 
 ---
 
-**Last Updated**: 2026-07-06
-**Extension Version**: 27.0.8
-**sqry Version**: 27.0.8+
+**Last Updated**: 2026-07-07
+**Extension Version**: 28.0.0
+**sqry Version**: 28.0.0+

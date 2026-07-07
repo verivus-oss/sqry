@@ -14,7 +14,7 @@
 //! - **Walrus operator**: `:=` creates binding in enclosing function scope, NOT
 //!   comprehension scope.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use sqry_core::graph::local_scopes::{self, ResolutionOutcome, ScopeId, ScopeKindTrait, ScopeTree};
 use sqry_core::graph::unified::build::helper::GraphBuildHelper;
@@ -87,8 +87,14 @@ pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<PythonScopeTree> 
     build_scopes_recursive(&mut tree, root, content, module_scope, &mut guard)?;
     tree.rebuild_index();
 
+    // Phase 1.5: Collect per-function `global`/`nonlocal` exclusions. Must run
+    // after `rebuild_index()` (it relies on the rebuilt interval index via
+    // `innermost_scope_at`) and before Phase 2 so declaration binding can skip
+    // names that refer to outer scopes.
+    let exclusions = collect_scope_exclusions(&tree, root, content);
+
     // Phase 2: Bind declarations (assignments, for-loop variables, parameters, etc.)
-    bind_declarations_recursive(&mut tree, root, content, &mut guard)?;
+    bind_declarations_recursive(&mut tree, root, content, &exclusions, &mut guard)?;
     tree.rebuild_index();
 
     Ok(tree)
@@ -170,6 +176,7 @@ fn bind_declarations_recursive(
     tree: &mut PythonScopeTree,
     node: Node,
     content: &[u8],
+    exclusions: &GlobalNonlocalExclusions,
     guard: &mut sqry_core::query::security::RecursionGuard,
 ) -> GraphResult<()> {
     guard
@@ -187,37 +194,37 @@ fn bind_declarations_recursive(
         }
         "for_statement" => {
             // `for x in iterable:` — bind x to enclosing function/module scope
-            bind_for_variable(tree, node, content);
+            bind_for_variable(tree, node, content, exclusions);
         }
         "expression_statement" => {
             // Check for assignment inside expression_statement
             let mut cursor = node.walk();
             for child in node.children(&mut cursor) {
                 if child.kind() == "assignment" {
-                    bind_assignment(tree, child, content);
+                    bind_assignment(tree, child, content, exclusions);
                 }
             }
         }
         "assignment" => {
             // Direct assignment (may appear outside expression_statement in some contexts)
-            bind_assignment(tree, node, content);
+            bind_assignment(tree, node, content, exclusions);
         }
         "named_expression" => {
             // Walrus operator: `(x := expr)` — binds to enclosing function scope
-            bind_walrus(tree, node, content);
+            bind_walrus(tree, node, content, exclusions);
         }
         "except_clause" => {
             // `except Exception as e:` — bind e to enclosing function scope
-            bind_except_variable(tree, node, content);
+            bind_except_variable(tree, node, content, exclusions);
         }
         "with_statement" => {
             // `with expr as x:` — bind x to enclosing function scope
-            bind_with_variable(tree, node, content);
+            bind_with_variable(tree, node, content, exclusions);
         }
         "for_in_clause" => {
             // Comprehension variable: `for x in iterable`
             // Bind to the comprehension scope
-            bind_comprehension_variable(tree, node, content);
+            bind_comprehension_variable(tree, node, content, exclusions);
         }
         _ => {}
     }
@@ -225,7 +232,7 @@ fn bind_declarations_recursive(
     // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        bind_declarations_recursive(tree, child, content, guard)?;
+        bind_declarations_recursive(tree, child, content, exclusions, guard)?;
     }
 
     guard.exit();
@@ -366,7 +373,12 @@ fn bind_identifier_param(
 /// In Python, `x = expr` both declares and assigns. The left-hand side
 /// can be a simple identifier, a tuple/list pattern, or an attribute/subscript
 /// (which we skip — not local variable declarations).
-fn bind_assignment(tree: &mut PythonScopeTree, assignment_node: Node, content: &[u8]) {
+fn bind_assignment(
+    tree: &mut PythonScopeTree,
+    assignment_node: Node,
+    content: &[u8],
+    exclusions: &GlobalNonlocalExclusions,
+) {
     let Some(left) = assignment_node.child_by_field_name("left") else {
         return;
     };
@@ -382,14 +394,27 @@ fn bind_assignment(tree: &mut PythonScopeTree, assignment_node: Node, content: &
         .child_by_field_name("right")
         .map(|r| r.start_byte());
 
-    bind_pattern(tree, scope_id, left, content, init_start, assignment_node);
+    bind_pattern(
+        tree,
+        scope_id,
+        left,
+        content,
+        init_start,
+        assignment_node,
+        exclusions,
+    );
 }
 
 /// Bind for-loop variables.
 ///
 /// `for x in iterable:` — binds x to the enclosing function/module scope
 /// (NOT a new scope, since Python has no block scoping).
-fn bind_for_variable(tree: &mut PythonScopeTree, for_node: Node, content: &[u8]) {
+fn bind_for_variable(
+    tree: &mut PythonScopeTree,
+    for_node: Node,
+    content: &[u8],
+    exclusions: &GlobalNonlocalExclusions,
+) {
     let Some(left) = for_node.child_by_field_name("left") else {
         return;
     };
@@ -399,7 +424,7 @@ fn bind_for_variable(tree: &mut PythonScopeTree, for_node: Node, content: &[u8])
         return;
     };
 
-    bind_pattern(tree, scope_id, left, content, None, for_node);
+    bind_pattern(tree, scope_id, left, content, None, for_node, exclusions);
 }
 
 /// Bind walrus operator target.
@@ -407,7 +432,12 @@ fn bind_for_variable(tree: &mut PythonScopeTree, for_node: Node, content: &[u8])
 /// `(x := expr)` binds to the enclosing function scope, even when inside
 /// a comprehension (unlike regular assignment which would bind to the
 /// comprehension scope in list/dict/set comprehensions).
-fn bind_walrus(tree: &mut PythonScopeTree, walrus_node: Node, content: &[u8]) {
+fn bind_walrus(
+    tree: &mut PythonScopeTree,
+    walrus_node: Node,
+    content: &[u8],
+    exclusions: &GlobalNonlocalExclusions,
+) {
     let Some(name_node) = walrus_node.child_by_field_name("name") else {
         return;
     };
@@ -422,6 +452,10 @@ fn bind_walrus(tree: &mut PythonScopeTree, walrus_node: Node, content: &[u8]) {
     };
     let name = name.trim();
     if name.is_empty() {
+        return;
+    }
+    // Skip names declared `global`/`nonlocal` in this scope.
+    if is_excluded(exclusions, scope_id, name) {
         return;
     }
 
@@ -453,7 +487,12 @@ fn bind_walrus(tree: &mut PythonScopeTree, walrus_node: Node, content: &[u8]) {
 ///   :
 ///   block
 /// ```
-fn bind_except_variable(tree: &mut PythonScopeTree, except_node: Node, content: &[u8]) {
+fn bind_except_variable(
+    tree: &mut PythonScopeTree,
+    except_node: Node,
+    content: &[u8],
+    exclusions: &GlobalNonlocalExclusions,
+) {
     let mut cursor = except_node.walk();
     for child in except_node.children(&mut cursor) {
         if child.kind() == "as_pattern" {
@@ -470,7 +509,7 @@ fn bind_except_variable(tree: &mut PythonScopeTree, except_node: Node, content: 
                             return;
                         };
                         let name = name.trim();
-                        if !name.is_empty() {
+                        if !name.is_empty() && !is_excluded(exclusions, scope_id, name) {
                             tree.add_binding(
                                 scope_id,
                                 name,
@@ -504,14 +543,19 @@ fn bind_except_variable(tree: &mut PythonScopeTree, except_node: Node, content: 
 ///   :
 ///   block
 /// ```
-fn bind_with_variable(tree: &mut PythonScopeTree, with_node: Node, content: &[u8]) {
+fn bind_with_variable(
+    tree: &mut PythonScopeTree,
+    with_node: Node,
+    content: &[u8],
+    exclusions: &GlobalNonlocalExclusions,
+) {
     let mut cursor = with_node.walk();
     for child in with_node.children(&mut cursor) {
         if child.kind() == "with_clause" {
             let mut clause_cursor = child.walk();
             for item in child.children(&mut clause_cursor) {
                 if item.kind() == "with_item" {
-                    bind_with_item(tree, item, content, with_node.start_byte());
+                    bind_with_item(tree, item, content, with_node.start_byte(), exclusions);
                 }
             }
         }
@@ -519,7 +563,13 @@ fn bind_with_variable(tree: &mut PythonScopeTree, with_node: Node, content: &[u8
 }
 
 /// Bind a single `with_item`'s `as` target via `as_pattern` → `as_pattern_target`.
-fn bind_with_item(tree: &mut PythonScopeTree, item: Node, content: &[u8], context_byte: usize) {
+fn bind_with_item(
+    tree: &mut PythonScopeTree,
+    item: Node,
+    content: &[u8],
+    context_byte: usize,
+    exclusions: &GlobalNonlocalExclusions,
+) {
     let mut cursor = item.walk();
     for child in item.children(&mut cursor) {
         if child.kind() == "as_pattern" {
@@ -535,7 +585,7 @@ fn bind_with_item(tree: &mut PythonScopeTree, item: Node, content: &[u8], contex
                             return;
                         };
                         let name = name.trim();
-                        if !name.is_empty() {
+                        if !name.is_empty() && !is_excluded(exclusions, scope_id, name) {
                             tree.add_binding(
                                 scope_id,
                                 name,
@@ -547,7 +597,15 @@ fn bind_with_item(tree: &mut PythonScopeTree, item: Node, content: &[u8], contex
                         }
                     } else {
                         // Tuple pattern in as target
-                        bind_pattern(tree, scope_id, inner_child, content, None, inner_child);
+                        bind_pattern(
+                            tree,
+                            scope_id,
+                            inner_child,
+                            content,
+                            None,
+                            inner_child,
+                            exclusions,
+                        );
                     }
                     return;
                 }
@@ -559,7 +617,12 @@ fn bind_with_item(tree: &mut PythonScopeTree, item: Node, content: &[u8], contex
 /// Bind comprehension iteration variable.
 ///
 /// `for x in iterable` inside a comprehension — binds to the comprehension scope.
-fn bind_comprehension_variable(tree: &mut PythonScopeTree, for_in_node: Node, content: &[u8]) {
+fn bind_comprehension_variable(
+    tree: &mut PythonScopeTree,
+    for_in_node: Node,
+    content: &[u8],
+    exclusions: &GlobalNonlocalExclusions,
+) {
     // for_in_clause has a "left" field with the iteration variable(s)
     let Some(left) = for_in_node.child_by_field_name("left") else {
         return;
@@ -570,7 +633,7 @@ fn bind_comprehension_variable(tree: &mut PythonScopeTree, for_in_node: Node, co
         return;
     };
 
-    bind_pattern(tree, scope_id, left, content, None, for_in_node);
+    bind_pattern(tree, scope_id, left, content, None, for_in_node, exclusions);
 }
 
 // ============================================================================
@@ -591,6 +654,7 @@ fn bind_pattern(
     content: &[u8],
     init_start: Option<usize>,
     declarator_node: Node,
+    exclusions: &GlobalNonlocalExclusions,
 ) {
     match pattern.kind() {
         "identifier" => {
@@ -600,6 +664,11 @@ fn bind_pattern(
             let name = name.trim();
             // Skip _ wildcard and special names
             if name.is_empty() || name == "_" {
+                return;
+            }
+            // Skip names declared `global`/`nonlocal` in this scope: they refer
+            // to an outer binding, not a new local.
+            if is_excluded(exclusions, scope_id, name) {
                 return;
             }
             tree.add_binding(
@@ -615,7 +684,15 @@ fn bind_pattern(
             // Tuple/list unpacking: `a, b = ...` or `[a, b] = ...`
             let mut cursor = pattern.walk();
             for child in pattern.children(&mut cursor) {
-                bind_pattern(tree, scope_id, child, content, init_start, declarator_node);
+                bind_pattern(
+                    tree,
+                    scope_id,
+                    child,
+                    content,
+                    init_start,
+                    declarator_node,
+                    exclusions,
+                );
             }
         }
         "list_splat_pattern" => {
@@ -625,7 +702,7 @@ fn bind_pattern(
                     return;
                 };
                 let name = name.trim();
-                if !name.is_empty() && name != "_" {
+                if !name.is_empty() && name != "_" && !is_excluded(exclusions, scope_id, name) {
                     tree.add_binding(
                         scope_id,
                         name,
@@ -952,11 +1029,80 @@ fn contains_node(haystack: Node, needle: Node) -> bool {
     false
 }
 
+/// Per-function-scope set of names declared `global` or `nonlocal`.
+///
+/// Keyed by [`ScopeId`] (not by bare name) so that two functions declaring
+/// the same name `global` do not cross-contaminate, and so module-level
+/// assignments (whose scope never receives an entry) stay untouched.
+pub(crate) type GlobalNonlocalExclusions = HashMap<ScopeId, HashSet<String>>;
+
+/// Return `true` when `name` is declared `global` or `nonlocal` in `scope_id`.
+///
+/// Such names refer to a binding in an outer scope, so a local assignment,
+/// walrus, `with ... as`, or `except ... as` inside that scope must NOT create
+/// a new local binding for them. Scopes without an entry (module scope, and any
+/// function that never used `global`/`nonlocal`) are never excluded.
+fn is_excluded(exclusions: &GlobalNonlocalExclusions, scope_id: ScopeId, name: &str) -> bool {
+    exclusions
+        .get(&scope_id)
+        .is_some_and(|names| names.contains(name))
+}
+
+/// Build the per-function exclusion map by walking every `function_definition`
+/// node in the tree.
+///
+/// For each function, resolve its own scope via
+/// `tree.innermost_scope_at(func_node.start_byte())` (the same idiom
+/// `bind_parameters` uses, which returns the function scope, not its parent),
+/// then collect the `global`/`nonlocal` names from the function **body block**
+/// (`child_by_field_name("body")`), not the `function_definition` node itself.
+/// Passing the definition node would hit the `function_definition` boundary arm
+/// in [`collect_global_nonlocal_recursive`] on the first match and return an
+/// empty set, silently turning the whole fix into a no-op.
+///
+/// Only `function_definition` scopes are collected: lambdas cannot hold
+/// statements, and a module-level `global` is a Python no-op. The module scope
+/// therefore never receives an entry. Class-body `global`/`nonlocal` is an
+/// explicit out-of-scope follow-up (see the module design doc).
+///
+/// Must run after Phase 1 `rebuild_index()`, because `innermost_scope_at`
+/// requires the rebuilt interval index.
+pub(crate) fn collect_scope_exclusions(
+    tree: &PythonScopeTree,
+    root: Node,
+    content: &[u8],
+) -> GlobalNonlocalExclusions {
+    let mut exclusions = GlobalNonlocalExclusions::new();
+    collect_scope_exclusions_recursive(tree, root, content, &mut exclusions);
+    exclusions
+}
+
+fn collect_scope_exclusions_recursive(
+    tree: &PythonScopeTree,
+    node: Node,
+    content: &[u8],
+    exclusions: &mut GlobalNonlocalExclusions,
+) {
+    if node.kind() == "function_definition"
+        && let Some(scope_id) = tree.innermost_scope_at(node.start_byte())
+        && let Some(body) = node.child_by_field_name("body")
+    {
+        let names = collect_global_nonlocal_names(body, content);
+        if !names.is_empty() {
+            exclusions.entry(scope_id).or_default().extend(names);
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_scope_exclusions_recursive(tree, child, content, exclusions);
+    }
+}
+
 /// Collect `global` and `nonlocal` names in a function scope.
 ///
-/// These names should NOT be treated as local variables — they refer
-/// to variables in outer scopes.
-#[allow(dead_code)] // Reserved for future enhanced resolution
+/// These names should NOT be treated as local variables (they refer
+/// to variables in outer scopes).
 fn collect_global_nonlocal_names(func_body: Node, content: &[u8]) -> HashSet<String> {
     let mut names = HashSet::new();
     collect_global_nonlocal_recursive(func_body, content, &mut names);

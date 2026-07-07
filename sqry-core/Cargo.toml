@@ -142,6 +142,10 @@ nix = { version = "0.31", features = ["signal"] }
 [dev-dependencies]
 tempfile = "3.27"
 criterion = "0.8"
+# Hermetic Archify architecture-JSON schema-conformance tests (issue #480).
+# default-features off keeps it network-free (no HTTP $ref retrieval); the
+# vendored common.schema.json is served through an in-memory retriever.
+jsonschema = { version = "0.46", default-features = false }
 filetime = "0.2"
 env_logger.workspace = true
 chrono.workspace = true

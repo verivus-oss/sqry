@@ -56,12 +56,20 @@ const DEFAULT_SCOPE_DEPTH: usize = 4;
 #[derive(Debug, Clone, Copy)]
 pub struct CGraphBuilder {
     max_scope_depth: usize,
+    /// Whether the Phase A C indirect-call precision walks run during
+    /// `build_graph`. Production always leaves this `true`; the only way to
+    /// set it `false` is the test/bench-only [`CGraphBuilder::without_phase_a`]
+    /// constructor, gated behind `cfg(any(test, feature = "phase-a-toggle"))`.
+    /// A release build cannot construct a Phase-A-disabled builder, so
+    /// production behaviour is byte-identical to the always-on path.
+    phase_a_enabled: bool,
 }
 
 impl Default for CGraphBuilder {
     fn default() -> Self {
         Self {
             max_scope_depth: DEFAULT_SCOPE_DEPTH,
+            phase_a_enabled: true,
         }
     }
 }
@@ -69,7 +77,37 @@ impl Default for CGraphBuilder {
 impl CGraphBuilder {
     #[must_use]
     pub fn new(max_scope_depth: usize) -> Self {
-        Self { max_scope_depth }
+        Self {
+            max_scope_depth,
+            phase_a_enabled: true,
+        }
+    }
+
+    /// Test/bench-only constructor that skips the three Phase A C-plugin
+    /// instrumentation walks in `build_graph`: address-taken classification,
+    /// the local-scope index, and the known-function-names leg. This is the
+    /// SPEC §5.2 "C plugin build time" cost.
+    ///
+    /// It deliberately does NOT disable the per-callsite / per-binding /
+    /// per-field capture in `walk_tree_for_graph` or the core
+    /// `pass5b_c_indirect` resolution pass; those still run, matching PR #351's
+    /// "no Phase-A instrumentation" floor, so the perf gate isolates the
+    /// instrumentation walk cost without conflating the core resolution pass
+    /// (which sqry-core runs for any plugin that emits indirect callsites).
+    ///
+    /// It exists solely so `scripts/measure/check_phase_a_perf_gate.sh` can
+    /// build the same fixture with and without the instrumentation walks at one
+    /// commit and measure the marginal build-time delta. Gated behind
+    /// `cfg(any(test, feature = "phase-a-toggle"))` so release builds cannot
+    /// construct it. The `type_permits` maps `walk_tree_for_graph` needs are
+    /// still produced, so the normal-edge graph is unchanged.
+    #[cfg(any(test, feature = "phase-a-toggle"))]
+    #[must_use]
+    pub fn without_phase_a() -> Self {
+        Self {
+            max_scope_depth: DEFAULT_SCOPE_DEPTH,
+            phase_a_enabled: false,
+        }
     }
 }
 
@@ -96,35 +134,64 @@ impl GraphBuilder for CGraphBuilder {
         // synthetic `Calls` edges into precise binding-plane / type-match
         // candidates.
         //
-        // Step 1 — single combined pre-pass over the AST that collects both
-        // (a) every known C function name in the file (definitions +
-        // declarations), used as a predicate by `classify_address_taken_sites`,
-        // and (b) the type-permits maps (DESIGN §2.6). These were two
-        // independent full-tree walks; PERF-280 fuses them into one
-        // traversal. `type_permits` is also consumed by
-        // `walk_tree_for_graph` below.
-        let (known_fn_names, type_permits) =
-            collect_known_fns_and_type_permits(tree.root_node(), content);
+        // Steps 1-3 below are the Phase A C-plugin instrumentation walks (the
+        // SPEC §5.2 "C plugin build time" cost: DESIGN §14.3 / PR #351's
+        // attribution matrix). `self.phase_a_enabled` is always `true` in
+        // production (the only way to flip it is the test/bench-only
+        // `CGraphBuilder::without_phase_a`), so the `else` arm exists solely
+        // for the same-commit marginal perf gate and never runs in a release
+        // build.
+        //
+        // The `else` arm skips ONLY these three instrumentation walks. The
+        // per-callsite / per-binding / per-field capture in
+        // `walk_tree_for_graph` below and the core `pass5b_c_indirect`
+        // resolution pass still run in both arms, exactly as PR #351's
+        // "no Phase-A instrumentation" floor did, so the gate isolates the
+        // C-plugin walk cost and does not conflate the core resolution pass
+        // (which sqry-core would run for any plugin that emits callsites).
+        // Either arm produces the `type_permits` maps `walk_tree_for_graph`
+        // consumes, so the emitted normal-edge graph is unchanged.
+        let type_permits = if self.phase_a_enabled {
+            // Step 1: single combined pre-pass over the AST that collects both
+            // (a) every known C function name in the file (definitions +
+            // declarations), used as a predicate by `classify_address_taken_sites`,
+            // and (b) the type-permits maps (DESIGN §2.6). These were two
+            // independent full-tree walks; PERF-280 fuses them into one
+            // traversal. `type_permits` is also consumed by
+            // `walk_tree_for_graph` below.
+            let (known_fn_names, type_permits) =
+                collect_known_fns_and_type_permits(tree.root_node(), content);
 
-        // Step 2 — recursive address-taken classifier walker covering the
-        // DESIGN §2.5 pattern table (unary `&` of fn, fn-as-argument,
-        // designated/positional initializer RHS, field/subscript
-        // assignment RHS, return identifier, init_declarator RHS). Requires
-        // the full-file `known_fn_names` + `type_permits` from Step 1.
-        classify_address_taken_sites(
-            tree.root_node(),
-            content,
-            &mut helper,
-            &known_fn_names,
-            &type_permits,
-        );
+            // Step 2: recursive address-taken classifier walker covering the
+            // DESIGN §2.5 pattern table (unary `&` of fn, fn-as-argument,
+            // designated/positional initializer RHS, field/subscript
+            // assignment RHS, return identifier, init_declarator RHS). Requires
+            // the full-file `known_fn_names` + `type_permits` from Step 1.
+            classify_address_taken_sites(
+                tree.root_node(),
+                content,
+                &mut helper,
+                &known_fn_names,
+                &type_permits,
+            );
 
-        // Step 3 — per-file local scope index (DESIGN §4.1). The block-
-        // scope arena drives U12's `(*fp)(...)` / `fp(...)` resolution by
-        // mapping an identifier at a use-site byte offset to its declared
-        // type token.
-        let scope_index = build_local_scope_index(tree, content);
-        helper.set_local_scope_index(scope_index);
+            // Step 3: per-file local scope index (DESIGN §4.1). The block-
+            // scope arena drives U12's `(*fp)(...)` / `fp(...)` resolution by
+            // mapping an identifier at a use-site byte offset to its declared
+            // type token.
+            let scope_index = build_local_scope_index(tree, content);
+            helper.set_local_scope_index(scope_index);
+
+            type_permits
+        } else {
+            // Perf-gate floor arm only. Skip the three C-plugin instrumentation
+            // walks: the known-function-names leg (build only `type_permits`),
+            // address-taken classification, and the local scope index. The
+            // callsite / binding / field-signature capture and the core pass5b
+            // resolution still run below, so this measures the instrumentation
+            // walks' marginal cost in isolation (PR #351's floor method).
+            collect_type_permits_only(tree.root_node(), content)
+        };
 
         // Two-pass approach for FFI call linking:
         // Pass 1: Collect FFI declarations so calls can be resolved regardless of source order
@@ -2715,19 +2782,43 @@ fn collect_known_fns_and_type_permits(
 ) -> (HashSet<String>, TypePermits) {
     let mut names: HashSet<String> = HashSet::new();
     let mut permits = TypePermits::default();
-    collect_known_fns_and_type_permits_recursive(root, content, &mut names, &mut permits);
+    collect_known_fns_and_type_permits_recursive(root, content, &mut names, &mut permits, true);
     (names, permits)
 }
 
+/// Perf-gate baseline variant: build only the [`TypePermits`] maps that
+/// `walk_tree_for_graph` consumes, skipping the Phase A known-function-names
+/// leg. Shares the exact same recursion as
+/// [`collect_known_fns_and_type_permits`] with the name-collection sites
+/// gated off, so the `type_permits` output is byte-identical to the
+/// production walk while the address-taken predicate work is elided.
+///
+/// Only reachable through the test/bench-only
+/// `CGraphBuilder::without_phase_a` path (see `build_graph`); production
+/// never calls it.
+fn collect_type_permits_only(root: Node<'_>, content: &[u8]) -> TypePermits {
+    let mut names: HashSet<String> = HashSet::new();
+    let mut permits = TypePermits::default();
+    collect_known_fns_and_type_permits_recursive(root, content, &mut names, &mut permits, false);
+    permits
+}
+
+/// Shared recursion behind [`collect_known_fns_and_type_permits`] and
+/// [`collect_type_permits_only`]. `collect_names` gates only the Phase A
+/// known-function-names inserts; the type-permits legs run unconditionally
+/// so both callers observe identical `TypePermits`.
 fn collect_known_fns_and_type_permits_recursive(
     node: Node<'_>,
     content: &[u8],
     names: &mut HashSet<String>,
     permits: &mut TypePermits,
+    collect_names: bool,
 ) {
     match node.kind() {
         "function_definition" => {
-            if let Some(name) = extract_function_name_from_definition(node, content) {
+            if collect_names
+                && let Some(name) = extract_function_name_from_definition(node, content)
+            {
                 names.insert(name);
             }
         }
@@ -2753,8 +2844,10 @@ fn collect_known_fns_and_type_permits_recursive(
             // function_declarator at some depth but is gated by a
             // `pointer_declarator` parent — those are NOT function
             // declarations and must not enter the known-fn set.
-            for proto_name in extract_function_prototype_names(node, content) {
-                names.insert(proto_name);
+            if collect_names {
+                for proto_name in extract_function_prototype_names(node, content) {
+                    names.insert(proto_name);
+                }
             }
             // Type-permits leg: struct-typed receivers + fnptr arrays.
             record_declaration(node, content, permits);
@@ -2771,7 +2864,7 @@ fn collect_known_fns_and_type_permits_recursive(
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_known_fns_and_type_permits_recursive(child, content, names, permits);
+        collect_known_fns_and_type_permits_recursive(child, content, names, permits, collect_names);
     }
 }
 
@@ -3477,5 +3570,114 @@ mod shape_tests {
         assert_eq!(shape.arity_positional, 2, "two positional params");
         assert!(shape.has_varargs, "variadic tail detected");
         assert!(shape.has_return_annotation, "C return type slot present");
+    }
+}
+
+#[cfg(test)]
+mod phase_a_toggle_tests {
+    //! Correctness guard for the test/bench-only Phase A instrumentation toggle
+    //! used by `scripts/measure/check_phase_a_perf_gate.sh`. Proves the toggle
+    //! is production-safe and matches PR #351's floor: it skips only the three
+    //! C-plugin instrumentation walks (here observable via the missing
+    //! per-file local scope index), while the callsite capture and the core
+    //! pass5b pass keep running, and the normal-edge graph is unchanged.
+
+    use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
+    use sqry_core::graph::unified::materialize::find_nodes_by_name;
+    use sqry_core::plugin::PluginManager;
+
+    // A minimal translation unit with an address-taken function (`.f =
+    // handler`) and an indirect callsite (`o->f(x)`), so Phase A has both a
+    // binding and a pending callsite to capture, and the scope-index walk has a
+    // function body to index.
+    const FIXTURE: &str = r#"
+struct ops { int (*f)(int x); };
+int handler(int x) { return x + 1; }
+static struct ops the_ops = { .f = handler };
+int caller(struct ops *o, int x) {
+    return o->f(x);
+}
+"#;
+
+    fn build(phase_a: bool) -> sqry_core::graph::unified::concurrent::CodeGraph {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::write(dir.path().join("ops.c"), FIXTURE).expect("write fixture");
+
+        let mut plugins = PluginManager::new();
+        let plugin = if phase_a {
+            crate::CPlugin::new()
+        } else {
+            crate::CPlugin::without_phase_a()
+        };
+        plugins.register_builtin(Box::new(plugin));
+
+        build_unified_graph(dir.path(), &plugins, &BuildConfig::default())
+            .expect("build_unified_graph must succeed")
+    }
+
+    #[test]
+    fn phase_a_on_records_local_scope_index() {
+        let graph = build(true);
+        let tables = graph
+            .c_indirect_tables()
+            .expect("Phase A ON must populate the C indirect side tables");
+        assert!(
+            !tables.pending_callsites.is_empty(),
+            "the `o->f(x)` indirect callsite must be captured with Phase A on",
+        );
+        assert!(
+            !tables.local_scope_indices.is_empty(),
+            "the `build_local_scope_index` walk must record a per-file scope \
+             index with Phase A on",
+        );
+    }
+
+    #[test]
+    fn floor_skips_instrumentation_but_keeps_capture() {
+        // The floor arm (PR #351's method) skips the three instrumentation
+        // walks but keeps the callsite capture and the core pass5b pass. So the
+        // side tables still exist and still hold the captured callsite, but the
+        // `build_local_scope_index` walk was skipped, so no per-file local scope
+        // index is recorded.
+        let graph = build(false);
+        let tables = graph
+            .c_indirect_tables()
+            .expect("the floor still captures callsites, so the tables exist");
+        assert!(
+            !tables.pending_callsites.is_empty(),
+            "callsite capture stays on in the floor arm",
+        );
+        assert!(
+            tables.local_scope_indices.is_empty(),
+            "the floor skips `build_local_scope_index`, so no scope index is \
+             recorded",
+        );
+    }
+
+    #[test]
+    fn toggle_preserves_normal_edge_graph() {
+        // The normal-edge graph (function definitions, node structure) must be
+        // identical with the instrumentation walks on and off. Only the
+        // instrumentation side data differs, which is what makes the perf-gate
+        // floor arm a faithful measurement baseline rather than a degraded one.
+        let with = build(true);
+        let without = build(false);
+
+        assert_eq!(
+            with.node_count(),
+            without.node_count(),
+            "the instrumentation walks add no nodes; node counts must match",
+        );
+
+        for name in ["handler", "caller"] {
+            assert!(
+                !find_nodes_by_name(&with.snapshot(), name).is_empty(),
+                "function `{name}` must be present with instrumentation on",
+            );
+            assert!(
+                !find_nodes_by_name(&without.snapshot(), name).is_empty(),
+                "function `{name}` must be present with instrumentation off",
+            );
+        }
     }
 }

@@ -250,13 +250,20 @@ fn add_repository(cli: &Cli, workspace: &str, repo: &str, name: Option<&String>)
     let last_indexed_at = fs::metadata(&index_path)
         .ok()
         .and_then(|meta| meta.modified().ok());
-    let repo_entry = WorkspaceRepository::new(
+    let mut repo_entry = WorkspaceRepository::new(
         repo_id.clone(),
         repo_name.clone(),
         repo_root.clone(),
         index_path,
         last_indexed_at,
     );
+    // Same cheap manifest.json read `discover_repositories` uses, so a
+    // manually-added repository has a real registration-time snapshot
+    // too, instead of leaving it `None` forever. `sqry workspace stats`
+    // re-reads the manifest live at stats-computation time, so this
+    // value is a last-known fallback, not what `stats` itself consumes.
+    repo_entry.symbol_count_at_registration =
+        WorkspaceRepository::symbol_count_from_manifest(&repo_root);
 
     let existed = registry
         .repositories
@@ -409,6 +416,7 @@ fn stats_workspace(cli: &Cli, workspace: &str) -> Result<()> {
             "symbols": {
                 "total": detailed_stats.total_symbols,
                 "avg_per_repo": detailed_stats.avg_symbols_per_repo,
+                "unknown_count_repos": detailed_stats.unknown_symbol_count_repos,
             },
             "freshness": {
                 "fresh": detailed_stats.freshness.fresh,
@@ -445,6 +453,12 @@ fn stats_workspace(cli: &Cli, workspace: &str) -> Result<()> {
             "Total symbols: {} ({:.1} avg per repo)",
             detailed_stats.total_symbols, detailed_stats.avg_symbols_per_repo
         ))?;
+        if detailed_stats.unknown_symbol_count_repos > 0 {
+            streams.write_result(&format!(
+                "  Note: {} indexed repo(s) have an unreadable manifest.json, symbol count excluded above (not counted as zero)",
+                detailed_stats.unknown_symbol_count_repos
+            ))?;
+        }
         streams.write_result("")?;
         streams.write_result("Freshness:")?;
         streams.write_result(&format!(

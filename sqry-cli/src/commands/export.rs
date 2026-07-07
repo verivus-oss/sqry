@@ -5,8 +5,15 @@
 use crate::args::Cli;
 use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
 use crate::output::OutputStreams;
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use sqry_core::graph::Language;
+use sqry_core::graph::unified::concurrent::GraphSnapshot;
+use sqry_core::graph::unified::materialize::find_nodes_by_name;
+use sqry_core::graph::unified::node::NodeId;
+use sqry_core::visualization::archify::{
+    ArchifyConfig, DEFAULT_MAX_COMPONENTS, export_archify_json,
+};
+use sqry_core::visualization::subgraph::SeededSubgraphConfig;
 use sqry_core::visualization::unified::{
     D2Config, Direction, DotConfig, EdgeFilter, JsonConfig, MermaidConfig, UnifiedD2Exporter,
     UnifiedDotExporter, UnifiedJsonExporter, UnifiedMermaidExporter,
@@ -16,23 +23,65 @@ use std::fs::File;
 use std::io::Write;
 use std::path::PathBuf;
 
+/// Parameters for the `sqry export` command.
+///
+/// Grouped into a struct so the archify-scoped seed arguments (`symbol`,
+/// `file`, `max_depth`, `max_results`) can be threaded through without a
+/// double-digit positional signature.
+pub struct ExportArgs<'a> {
+    /// Shared CLI context (config, plugin selection).
+    pub cli: &'a Cli,
+    /// Search path (defaults to the current directory).
+    pub path: Option<&'a str>,
+    /// Output format (`dot`, `d2`, `mermaid`, `json`, `archify`).
+    pub format: &'a str,
+    /// Graph layout direction (`lr` / `tb`).
+    pub direction: &'a str,
+    /// Comma-separated language filter.
+    pub filter_lang: Option<&'a str>,
+    /// Comma-separated edge-kind filter.
+    pub filter_edge: Option<&'a str>,
+    /// Highlight cross-language edges.
+    pub highlight_cross: bool,
+    /// Include node details (signatures, docs).
+    pub show_details: bool,
+    /// Show edge labels.
+    pub show_labels: bool,
+    /// Output file (default: stdout).
+    pub output_file: Option<&'a str>,
+    /// Archify seed symbol name.
+    pub symbol: Option<&'a str>,
+    /// Archify seed file path.
+    pub file: Option<&'a str>,
+    /// Archify BFS depth (default 2, cap 5).
+    pub max_depth: Option<usize>,
+    /// Archify node-visit cap (default 1000).
+    pub max_results: Option<usize>,
+}
+
 /// Run the export command.
 ///
 /// # Errors
-/// Returns an error if the graph cannot be loaded or exported.
-#[allow(clippy::too_many_arguments)]
-pub fn run_export(
-    cli: &Cli,
-    path: Option<&str>,
-    format: &str,
-    direction: &str,
-    filter_lang: Option<&str>,
-    filter_edge: Option<&str>,
-    highlight_cross: bool,
-    show_details: bool,
-    show_labels: bool,
-    output_file: Option<&str>,
-) -> Result<()> {
+/// Returns an error if the graph cannot be loaded or exported, or if the
+/// archify format is requested without a seed (`--symbol` / `--file`).
+pub fn run_export(args: ExportArgs<'_>) -> Result<()> {
+    let ExportArgs {
+        cli,
+        path,
+        format,
+        direction,
+        filter_lang,
+        filter_edge,
+        highlight_cross,
+        show_details,
+        show_labels,
+        output_file,
+        symbol,
+        file,
+        max_depth,
+        max_results,
+    } = args;
+
     let mut streams = OutputStreams::new();
 
     // Find workspace root
@@ -47,6 +96,12 @@ pub fn run_export(
         .context("Failed to load unified graph. Run 'sqry index' first.")?;
 
     let snapshot = graph.snapshot();
+
+    // Archify runs a dedicated seeded path with its own edge retention.
+    if format.eq_ignore_ascii_case("archify") {
+        let output = render_archify(&snapshot, &root, symbol, file, max_depth, max_results)?;
+        return write_export_output(&mut streams, &output, output_file);
+    }
 
     // Parse direction
     let dir = match direction.to_lowercase().as_str() {
@@ -125,12 +180,20 @@ pub fn run_export(
         }
         _ => {
             return Err(anyhow::anyhow!(
-                "Unknown format: {format}. Use: dot, d2, mermaid, json"
+                "Unknown format: {format}. Use: dot, d2, mermaid, json, archify"
             ));
         }
     };
 
-    // Write output
+    write_export_output(&mut streams, &output, output_file)
+}
+
+/// Write export output to a file or stdout.
+fn write_export_output(
+    streams: &mut OutputStreams,
+    output: &str,
+    output_file: Option<&str>,
+) -> Result<()> {
     if let Some(file_path) = output_file {
         let mut file = File::create(file_path)
             .with_context(|| format!("Failed to create output file: {file_path}"))?;
@@ -138,10 +201,113 @@ pub fn run_export(
             .context("Failed to write output")?;
         streams.write_diagnostic(&format!("Exported to {file_path}"))?;
     } else {
-        streams.write_result(&output)?;
+        streams.write_result(output)?;
+    }
+    Ok(())
+}
+
+/// Render the Archify architecture JSON for a seeded subgraph.
+///
+/// v1 requires an explicit seed (`--symbol` or `--file`): there is no implicit
+/// whole-repository auto-seed, which keeps the export deterministic and
+/// reviewable. Seed resolution happens here at the CLI layer (it hands concrete
+/// `NodeId`s to the entry-point-agnostic core builder), matching the crate
+/// layering: entry-point detection is a `sqry-db` concern and stays out of the
+/// core traversal.
+fn render_archify(
+    snapshot: &GraphSnapshot,
+    root: &std::path::Path,
+    symbol: Option<&str>,
+    file: Option<&str>,
+    max_depth: Option<usize>,
+    max_results: Option<usize>,
+) -> Result<String> {
+    let mut seeds: Vec<NodeId> = Vec::new();
+    if let Some(name) = symbol {
+        seeds.extend(find_nodes_by_name(snapshot, name));
+        if seeds.is_empty() {
+            bail!(
+                "Archify seed symbol '{name}' not found. Run 'sqry index' first, or check the name."
+            );
+        }
+    }
+    if let Some(file_path) = file {
+        let file_seeds = resolve_file_seeds(snapshot, root, file_path);
+        if file_seeds.is_empty() {
+            bail!(
+                "Archify seed file '{file_path}' has no indexed symbols (unknown or empty file)."
+            );
+        }
+        seeds.extend(file_seeds);
     }
 
-    Ok(())
+    if seeds.is_empty() {
+        bail!(
+            "Archify export requires an explicit seed. Pass --symbol <name> or --file <path>. \
+             v1 does not auto-seed the whole repository."
+        );
+    }
+
+    let subgraph_config = SeededSubgraphConfig {
+        max_depth: max_depth.unwrap_or(sqry_core::visualization::subgraph::DEFAULT_MAX_DEPTH),
+        max_results: max_results.unwrap_or(sqry_core::visualization::subgraph::DEFAULT_MAX_RESULTS),
+        languages: Vec::new(),
+    }
+    .normalized();
+
+    let seed_label = match (symbol, file) {
+        (Some(s), _) => s.to_string(),
+        (None, Some(f)) => f.to_string(),
+        _ => String::new(),
+    };
+    let archify_config = ArchifyConfig {
+        seed_label,
+        title: String::new(),
+        max_depth: subgraph_config.max_depth,
+        max_components: DEFAULT_MAX_COMPONENTS,
+    };
+
+    export_archify_json(snapshot, &seeds, &subgraph_config, &archify_config)
+        .context("Failed to build Archify architecture JSON")
+}
+
+/// Resolve every indexed symbol defined in `file_path` to a seed `NodeId`.
+///
+/// Matches on the graph's workspace-relative file path (forward-slashed):
+/// exact match, or the node path ending in the requested suffix, so both
+/// `src/api.rs` and `api.rs` resolve intuitively.
+fn resolve_file_seeds(
+    snapshot: &GraphSnapshot,
+    root: &std::path::Path,
+    file_path: &str,
+) -> Vec<NodeId> {
+    let normalized = normalize_seed_path(root, file_path);
+    let files = snapshot.files();
+    let mut seeds = Vec::new();
+    for (node_id, entry) in snapshot.iter_nodes() {
+        if entry.is_unified_loser() {
+            continue;
+        }
+        let Some(node_file) = files.resolve(entry.file) else {
+            continue;
+        };
+        let node_path = node_file.to_string_lossy().replace('\\', "/");
+        if node_path == normalized
+            || node_path.ends_with(&format!("/{normalized}"))
+            || node_path.ends_with(&format!("/{file_path}"))
+            || node_path == file_path
+        {
+            seeds.push(node_id);
+        }
+    }
+    seeds
+}
+
+/// Normalize a seed file path to the graph's workspace-relative convention.
+fn normalize_seed_path(root: &std::path::Path, file_path: &str) -> String {
+    let raw = std::path::Path::new(file_path);
+    let relative = raw.strip_prefix(root).unwrap_or(raw);
+    relative.to_string_lossy().replace('\\', "/")
 }
 
 /// Parse a language string to Language enum

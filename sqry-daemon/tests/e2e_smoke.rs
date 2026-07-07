@@ -408,9 +408,11 @@ async fn smoke_detach_bind_version_sigterm() {
     let tmp = tempfile::TempDir::new().expect("create tempdir for e2e smoke detach test");
     let socket_path = tmp.path().join("sqryd-e2e-detach.sock");
     let config_path = tmp.path().join("daemon.toml");
-    // The pidfile is written to <XDG_RUNTIME_DIR>/sqry/sqryd.pid
-    // (runtime_dir() appends "sqry" to XDG_RUNTIME_DIR per config.rs).
-    let pidfile_path = tmp.path().join("sqry").join("sqryd.pid");
+    // Because a custom socket path is configured, the pidfile co-locates
+    // beside the socket using the socket's file stem (issue #519 part b):
+    // `sqryd-e2e-detach.sock` yields `sqryd-e2e-detach.pid` in the same dir,
+    // not the default `<XDG_RUNTIME_DIR>/sqry/sqryd.pid`.
+    let pidfile_path = tmp.path().join("sqryd-e2e-detach.pid");
 
     write_daemon_config(&config_path, &socket_path);
 

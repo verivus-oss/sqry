@@ -150,11 +150,12 @@ pub mod tool_validation {
 /// semantics established by DB14 + DB15 + DB16 + DB17.
 pub mod tool_args {
     pub use crate::tools::{
-        ChangeType, ComplexityMetricsArgs, CycleType, DependencyImpactArgs, DirectCalleesArgs,
-        DirectCallersArgs, ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, GitVersionRef,
-        IsNodeInCycleArgs, PaginationArgs, RelationQueryArgs, RelationType, SearchFilters,
-        SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs,
-        SqryQueryParams, SubgraphArgs, TracePathArgs, UnusedScope, WorkspaceStatusArgs,
+        CallHierarchyArgs, CallHierarchyDirection, ChangeType, ComplexityMetricsArgs, CycleType,
+        DependencyImpactArgs, DirectCalleesArgs, DirectCallersArgs, ExportGraphArgs,
+        FindCyclesArgs, FindUnusedArgs, GetDocumentSymbolsArgs, GitVersionRef, IsNodeInCycleArgs,
+        PaginationArgs, RelationQueryArgs, RelationType, SearchFilters, SemanticDiffArgs,
+        SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs, SqryQueryParams,
+        SubgraphArgs, TracePathArgs, UnusedScope, WorkspaceStatusArgs,
     };
     pub type SemanticSearchRevisionArgs = crate::tools::validation::SemanticSearchRevisionArgs;
 }
@@ -166,10 +167,11 @@ pub mod tool_args {
 /// envelope.
 pub mod tool_handlers {
     pub use crate::execution::{
-        execute_complexity_metrics, execute_dependency_impact, execute_direct_callees,
-        execute_direct_callers, execute_export_graph, execute_find_cycles, execute_find_unused,
-        execute_get_dependencies, execute_is_node_in_cycle, execute_relation_query,
-        execute_semantic_diff, execute_sqry_query, execute_subgraph, execute_trace_path,
+        execute_call_hierarchy, execute_complexity_metrics, execute_dependency_impact,
+        execute_direct_callees, execute_direct_callers, execute_export_graph, execute_find_cycles,
+        execute_find_unused, execute_get_dependencies, execute_get_document_symbols,
+        execute_is_node_in_cycle, execute_relation_query, execute_semantic_diff,
+        execute_sqry_query, execute_subgraph, execute_trace_path,
     };
     pub use crate::tools::execute_workspace_status;
 }

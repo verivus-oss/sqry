@@ -236,20 +236,6 @@ pub(crate) fn resolve_path_for_acquisition(raw: &Path) -> Result<PathBuf, Daemon
     resolve_path(raw)
 }
 
-/// SGA04 building block — construct a daemon-side
-/// [`DaemonGraphProvider`] for the supplied manager + builder pair.
-///
-/// SGA05 routes the JSON-RPC `tool_dispatch::classify_and_build`
-/// closure path and the daemon MCP host's `call_tool` graph-backed
-/// arms through [`acquire_and_execute`], which builds a provider
-/// per-request via this helper.
-pub(crate) fn daemon_graph_provider(
-    manager: Arc<WorkspaceManager>,
-    builder: Arc<dyn WorkspaceBuilder>,
-) -> DaemonGraphProvider {
-    DaemonGraphProvider::new(manager, builder)
-}
-
 fn resolve_path(raw: &Path) -> Result<PathBuf, DaemonError> {
     let absolutised =
         absolutize_without_resolution(raw).map_err(|e| DaemonError::InvalidArgument {
@@ -573,10 +559,36 @@ where
     // `CpuExecutor::run`, so the central path and the revision bypasses share
     // one bridge and one fairness domain.
     let hook_path = canonical_root.to_path_buf();
+
+    // Issue #469 U04: reconstruct the workspace `LogicalWorkspace` from
+    // the canonical root the daemon holds (the IPC load-layer wire form
+    // carries `workspace_id` + source roots, not exclusions), reusing the
+    // standalone server's on-disk discovery so the daemon and standalone
+    // paths resolve identical exclusion sets. The value is bound via
+    // `with_workspace_override` INSIDE the pooled `CpuExecutor` closure,
+    // before `run` (which drives `dispatch_by_name`) executes, so
+    // `current_logical_workspace()` returns it inside the daemon tool
+    // body. Both enforcement surfaces (`canonicalize_in_workspace_enforced`
+    // and the `workspace_scope` entrypoints) then reject excluded paths in
+    // daemon-hosted mode with no per-tool change. When no `.sqry-workspace`
+    // registry is present the reconstruction is a single-root workspace
+    // with empty exclusions, so enforcement is a no-op and behaviour is
+    // byte-identical to the pre-U04 unbound daemon path.
+    let bound_logical =
+        sqry_mcp::daemon_adapter::resolve_logical_workspace_for_root(canonical_root);
+    let bind_root = canonical_root.to_path_buf();
+
     cpu_executor
         .run(tool_timeout, canonical_root, move |cancel| {
             thread_start_hook::notify(&hook_path);
-            run(&wctx, cancel)
+            // Bind the reconstructed workspace on this pooled thread's
+            // thread-local for the duration of the tool body (U04). The
+            // guard restores the previous binding when the closure returns.
+            sqry_mcp::daemon_adapter::with_workspace_override(
+                Some(bind_root.as_path()),
+                bound_logical,
+                || run(&wctx, cancel),
+            )
         })
         .await
 }

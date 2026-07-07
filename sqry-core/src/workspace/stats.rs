@@ -1,4 +1,21 @@
 //! Workspace statistics and staleness tracking.
+//!
+//! # Live symbol counts (issue #515 staleness fix)
+//!
+//! [`DetailedWorkspaceStats::from_registry`] (the path `sqry workspace
+//! stats` runs) reads each indexed member's symbol count **live** from
+//! its `.sqry/graph/manifest.json` at stats-computation time, via
+//! [`WorkspaceRepository::symbol_count_from_manifest`]. It deliberately
+//! does not use the registry's cached
+//! [`WorkspaceRepository::symbol_count_at_registration`] field, because
+//! that value is only refreshed at registration time
+//! (`discover_repositories` / `sqry workspace add`) and goes stale the
+//! moment a member is reindexed directly (`sqry index --force`) without
+//! a matching `workspace remove` + `workspace add` round-trip. `sqry
+//! workspace query` already reads member graphs live via
+//! `SessionManager`; `stats` now matches that freshness contract instead
+//! of trusting a point-in-time snapshot that a reindex can silently
+//! invalidate.
 
 use std::time::{Duration, SystemTime};
 
@@ -27,12 +44,23 @@ pub struct DetailedWorkspaceStats {
     pub indexed_repos: usize,
     /// Number of repositories that have never been indexed.
     pub unindexed_repos: usize,
-    /// Total symbol count across all indexed repositories.
+    /// Total symbol count across all indexed repositories whose
+    /// `manifest.json` sidecar could be read. Repositories counted in
+    /// `unknown_symbol_count_repos` do not contribute here.
     pub total_symbols: u64,
     /// Freshness buckets categorizing repositories by age.
     pub freshness: FreshnessBuckets,
-    /// Average symbols per indexed repository.
+    /// Average symbols per repository with a known symbol count
+    /// (`total_symbols` divided by the repos that contributed to it, not
+    /// by `indexed_repos`, so an unreadable manifest cannot silently
+    /// drag the average down).
     pub avg_symbols_per_repo: f64,
+    /// Indexed repositories (`last_indexed_at.is_some()`) whose
+    /// `.sqry/graph/manifest.json` could not be read or parsed, so their
+    /// symbol count is unknown rather than zero. Surfaced separately so
+    /// `sqry workspace stats` can report them instead of silently
+    /// folding them into `total_symbols` as zero contributions.
+    pub unknown_symbol_count_repos: usize,
 }
 
 /// Freshness buckets categorizing repositories by last indexed time.
@@ -104,8 +132,38 @@ impl FreshnessBuckets {
 
 impl DetailedWorkspaceStats {
     /// Compute detailed statistics from a workspace registry.
+    ///
+    /// Reads every indexed member's symbol count **live** from its
+    /// `.sqry/graph/manifest.json` sidecar (via
+    /// [`WorkspaceRepository::symbol_count_from_manifest`]), not from the
+    /// registry's cached `symbol_count_at_registration` field. See the
+    /// module-level docs for why: this is the fix for issue #515's
+    /// staleness gap (stats reporting a stale count after a direct `sqry
+    /// index --force` reindex of a member).
     #[must_use]
     pub fn from_registry(registry: &WorkspaceRegistry) -> Self {
+        Self::from_registry_with_resolver(registry, |repo| {
+            WorkspaceRepository::symbol_count_from_manifest(&repo.root)
+        })
+    }
+
+    /// Compute detailed statistics from a workspace registry using a
+    /// caller-supplied symbol-count resolver instead of always reading
+    /// `.sqry/graph/manifest.json` from disk.
+    ///
+    /// [`Self::from_registry`] is the production entry point (used by
+    /// `sqry workspace stats`) and always resolves live from each
+    /// member's manifest. This variant exists so the aggregation logic
+    /// (freshness split, `total_symbols` sum, `unknown_symbol_count_repos`
+    /// bucketing, `avg_symbols_per_repo` denominator) stays unit-testable
+    /// without needing real manifest fixtures on disk for every test:
+    /// callers can inject a resolver that returns canned known/unknown
+    /// counts per repository.
+    #[must_use]
+    pub fn from_registry_with_resolver(
+        registry: &WorkspaceRegistry,
+        resolve_symbol_count: impl Fn(&WorkspaceRepository) -> Option<u64>,
+    ) -> Self {
         let total_repos = registry.repositories.len();
         let indexed_repos = registry
             .repositories
@@ -114,14 +172,29 @@ impl DetailedWorkspaceStats {
             .count();
         let unindexed_repos = total_repos - indexed_repos;
 
-        let total_symbols: u64 = registry
-            .repositories
-            .iter()
-            .filter_map(|r| r.symbol_count)
-            .sum();
+        // Split indexed repos into "symbol count known" (manifest.json
+        // read cleanly) versus "unknown" (manifest missing/corrupt).
+        // Repositories that were never indexed at all contribute to
+        // neither bucket; they are already accounted for by
+        // `unindexed_repos` / `freshness.never_indexed`.
+        let mut known_symbol_count_repos = 0usize;
+        let mut unknown_symbol_count_repos = 0usize;
+        let mut total_symbols: u64 = 0;
+        for repo in &registry.repositories {
+            if repo.last_indexed_at.is_none() {
+                continue;
+            }
+            match resolve_symbol_count(repo) {
+                Some(count) => {
+                    total_symbols += count;
+                    known_symbol_count_repos += 1;
+                }
+                None => unknown_symbol_count_repos += 1,
+            }
+        }
 
-        let avg_symbols_per_repo = if indexed_repos > 0 {
-            u64_to_f64(total_symbols) / usize_to_f64(indexed_repos)
+        let avg_symbols_per_repo = if known_symbol_count_repos > 0 {
+            u64_to_f64(total_symbols) / usize_to_f64(known_symbol_count_repos)
         } else {
             0.0
         };
@@ -135,6 +208,7 @@ impl DetailedWorkspaceStats {
             total_symbols,
             freshness,
             avg_symbols_per_repo,
+            unknown_symbol_count_repos,
         }
     }
 
@@ -210,8 +284,10 @@ impl DetailedWorkspaceStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::graph::unified::persistence::{BuildProvenance, Manifest};
     use crate::workspace::WorkspaceRepoId;
     use std::path::PathBuf;
+    use tempfile::tempdir;
 
     fn create_test_repo(name: &str, indexed_ago: Option<Duration>) -> WorkspaceRepository {
         let last_indexed_at = indexed_ago.map(|duration| SystemTime::now() - duration);
@@ -221,13 +297,23 @@ mod tests {
             root: PathBuf::from(format!("/workspace/{name}")),
             index_path: PathBuf::from(format!("/workspace/{name}/.sqry-index")),
             last_indexed_at,
-            symbol_count: if indexed_ago.is_some() {
+            symbol_count_at_registration: if indexed_ago.is_some() {
                 Some(100)
             } else {
                 None
             },
             primary_language: Some("rust".to_string()),
         }
+    }
+
+    /// Resolver mirroring the pre-#515-staleness-fix behavior: reads the
+    /// registration-time snapshot field directly, with no filesystem
+    /// access. Used by tests that only exercise the aggregation logic
+    /// (freshness split, `total_symbols` sum, `unknown_symbol_count_repos`
+    /// bucketing, `avg_symbols_per_repo` denominator) and don't need a
+    /// real `.sqry/graph/manifest.json` fixture on disk.
+    fn resolve_from_registration_snapshot(repo: &WorkspaceRepository) -> Option<u64> {
+        repo.symbol_count_at_registration
     }
 
     #[test]
@@ -318,5 +404,156 @@ mod tests {
 
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].name, "stale");
+    }
+
+    /// Issue #515 edge case: an indexed repo whose resolved symbol count
+    /// is `None` (manifest missing/corrupt) must be excluded from
+    /// `total_symbols` and the `avg_symbols_per_repo` denominator, and
+    /// reported via `unknown_symbol_count_repos`, rather than silently
+    /// treated as a zero-symbol repo that drags the average down.
+    ///
+    /// Uses [`from_registry_with_resolver`] with
+    /// [`resolve_from_registration_snapshot`] so it exercises the
+    /// aggregation logic in isolation, without needing real
+    /// `.sqry/graph/manifest.json` fixtures on disk (that live-read path
+    /// is covered separately by
+    /// `test_from_registry_reads_symbol_count_live_not_cached` below).
+    #[test]
+    fn test_unknown_symbol_count_repo_excluded_from_average() {
+        let mut registry = WorkspaceRegistry::new(Some("Test".into()));
+
+        // Two indexed repos with known counts.
+        registry
+            .upsert_repo(create_test_repo("known-a", Some(Duration::from_secs(60))))
+            .unwrap();
+        registry
+            .upsert_repo(create_test_repo("known-b", Some(Duration::from_secs(60))))
+            .unwrap();
+
+        // One indexed repo whose manifest could not be read: last_indexed_at
+        // is set (mtime of the manifest file was still readable) but the
+        // resolved symbol count is None.
+        let mut unknown_repo = create_test_repo("unknown", Some(Duration::from_secs(60)));
+        unknown_repo.symbol_count_at_registration = None;
+        registry.upsert_repo(unknown_repo).unwrap();
+
+        // One never-indexed repo: must not be double-counted into
+        // unknown_symbol_count_repos, it already has its own bucket.
+        registry
+            .upsert_repo(create_test_repo("never", None))
+            .unwrap();
+
+        let stats = DetailedWorkspaceStats::from_registry_with_resolver(
+            &registry,
+            resolve_from_registration_snapshot,
+        );
+
+        assert_eq!(stats.total_repos, 4);
+        assert_eq!(stats.indexed_repos, 3);
+        assert_eq!(stats.unindexed_repos, 1);
+        assert_eq!(
+            stats.total_symbols, 200,
+            "total_symbols must sum only the repos with a known count (100 + 100)"
+        );
+        assert_eq!(
+            stats.unknown_symbol_count_repos, 1,
+            "the corrupt-manifest repo must be counted separately, not folded into total_symbols as 0"
+        );
+        assert!(
+            (stats.avg_symbols_per_repo - 100.0).abs() < f64::EPSILON,
+            "average must divide by the 2 repos with a known count (200 / 2 = 100), \
+             not by all 3 indexed repos (which would wrongly yield 66.67): got {}",
+            stats.avg_symbols_per_repo
+        );
+    }
+
+    /// Issue #515 staleness regression (the cross-LLM gate's blocker on
+    /// the original fix): `DetailedWorkspaceStats::from_registry` must
+    /// read each member's symbol count *live* from its
+    /// `.sqry/graph/manifest.json` at stats-computation time, not from
+    /// the registry's `symbol_count_at_registration` snapshot.
+    ///
+    /// Before this fix, `from_registry` read
+    /// `WorkspaceRepository::symbol_count` directly (the same field this
+    /// test renamed to `symbol_count_at_registration`), a value only
+    /// refreshed by `discover_repositories` / `sqry workspace add`. A
+    /// direct `sqry index --force` reindex of a member changes
+    /// `.sqry/graph/manifest.json`'s `node_count` without touching the
+    /// workspace registry at all, so `stats` reported the old count
+    /// forever until the member was removed and re-added, even though
+    /// `sqry workspace query` (which loads member graphs live via
+    /// `SessionManager`) already reflected the new one.
+    ///
+    /// This test reindexes the manifest between two `from_registry` calls
+    /// with no registry mutation in between (mirroring the exact
+    /// reproduction the gate used: 8 -> 18 nodes without `workspace add`
+    /// / `remove`) and asserts the second call's `total_symbols` tracks
+    /// the new manifest, not the untouched registration-time snapshot.
+    /// This fails against the pre-fix code (which would still report 8).
+    #[test]
+    fn test_from_registry_reads_symbol_count_live_not_cached() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+
+        let repo_dir = root.join("member");
+        let graph_dir = repo_dir.join(".sqry/graph");
+        std::fs::create_dir_all(&graph_dir).unwrap();
+
+        let write_manifest = |node_count: usize| {
+            let manifest = Manifest::new(
+                repo_dir.display().to_string(),
+                node_count,
+                node_count * 2,
+                "test-sha256",
+                BuildProvenance::new("test", "test"),
+            );
+            manifest.save(graph_dir.join("manifest.json")).unwrap();
+        };
+
+        // Initial index: 8 symbols.
+        write_manifest(8);
+
+        let mut registry = WorkspaceRegistry::new(Some("Test".into()));
+        let mut repo = WorkspaceRepository::new(
+            WorkspaceRepoId::new("member"),
+            "member".to_string(),
+            repo_dir.clone(),
+            graph_dir.join("manifest.json"),
+            Some(SystemTime::now()),
+        );
+        // Registration-time snapshot matches the initial manifest, then
+        // is deliberately never touched again for the rest of the test
+        // (no `discover_repositories` / `workspace add` re-run), exactly
+        // like a real `sqry index --force` reindex that never goes
+        // through `workspace add`/`remove`.
+        repo.symbol_count_at_registration = Some(8);
+        registry.upsert_repo(repo).unwrap();
+
+        let stats_before = DetailedWorkspaceStats::from_registry(&registry);
+        assert_eq!(
+            stats_before.total_symbols, 8,
+            "sanity check: initial stats must match the initial manifest node_count"
+        );
+
+        // Reindex the member directly: the manifest's node_count changes
+        // to 18, but nothing touches the workspace registry.
+        write_manifest(18);
+
+        let stats_after = DetailedWorkspaceStats::from_registry(&registry);
+        assert_eq!(
+            stats_after.total_symbols, 18,
+            "stats must reflect the reindexed manifest's node_count (18) even though \
+             the registry's symbol_count_at_registration snapshot is still stuck at 8; \
+             this is the issue #515 staleness gap the gate flagged"
+        );
+        assert_eq!(
+            stats_after.unknown_symbol_count_repos, 0,
+            "the reindexed manifest is still readable, so the count stays known"
+        );
+        assert!(
+            (stats_after.avg_symbols_per_repo - 18.0).abs() < f64::EPSILON,
+            "avg must also reflect the live count: got {}",
+            stats_after.avg_symbols_per_repo
+        );
     }
 }

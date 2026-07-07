@@ -134,7 +134,10 @@ impl DaemonGraphProvider {
     /// Tag the provider with a fixed tool name for diagnostics. The
     /// resulting [`GraphAcquisitionMetadata::tool_name`] field is
     /// surfaced in logs and the canonical 4-key error envelope.
-    #[allow(dead_code)] // SGA05 wires the per-tool tag.
+    ///
+    /// SGA05 wired this per-tool tag: `tool_core::acquire_and_execute`
+    /// calls it for every daemon-hosted read-only dispatch, so the
+    /// `dead_code` allow that guarded the pre-wiring gap is gone.
     pub(crate) fn with_tool_name(mut self, tool_name: &'static str) -> Self {
         self.tool_name = Some(tool_name);
         self
@@ -155,22 +158,25 @@ impl DaemonGraphProvider {
     fn acquisition_from_parts(
         &self,
         graph: Arc<sqry_core::graph::CodeGraph>,
-        canonical_root: PathBuf,
+        workspace_root: PathBuf,
+        requested_canonical: &std::path::Path,
         request: &GraphAcquisitionRequest,
         freshness: GraphFreshness,
         source: AcquisitionSource,
     ) -> GraphAcquisition {
         // SGA02 contract: `query_scope` is `None` when the request
-        // targeted the workspace root. The daemon provider canonicalises
-        // to the workspace root itself, so we set the scope based on
-        // whether the canonical path differs from the request.
-        let (query_scope, is_file_scope) = scope_for_request(request, &canonical_root);
+        // targeted the workspace root, and `Some(subtree)` when the
+        // request targeted a subdirectory of the owning workspace
+        // (#394 Part 1b). The subtree filter itself is applied by the
+        // shared inner tool body via `subtree_within`; `query_scope`
+        // records the honest scope for diagnostics.
+        let (query_scope, is_file_scope) = scope_for_request(requested_canonical, &workspace_root);
         // The tool name reaches the metadata via the request OR the
         // provider tag — request wins so per-call diagnostics dominate.
         let tool_name = request.tool_name.or(self.tool_name);
         GraphAcquisition {
             graph,
-            workspace_root: canonical_root.clone(),
+            workspace_root: workspace_root.clone(),
             query_scope,
             is_file_scope,
             freshness,
@@ -178,7 +184,7 @@ impl DaemonGraphProvider {
                 snapshot_sha256: None,
                 manifest_built_at: None,
                 snapshot_format_version: None,
-                source_root: canonical_root,
+                source_root: workspace_root,
                 // The daemon path does not validate manifest plugin
                 // selection here — `WorkspaceManager` already loaded the
                 // graph via the configured plugin manager. Surfacing
@@ -247,8 +253,30 @@ impl GraphAcquirer for DaemonGraphProvider {
             });
         }
 
+        // ----- Step 2b: owning-workspace resolution (#394 Part 1b) ----
+        //
+        // The requested path may name a SUBDIRECTORY of a loaded
+        // workspace rather than the workspace root itself. Classifying
+        // the subtree path directly would fail (it is not a registered
+        // `WorkspaceKey`), so resolve it to the longest registered
+        // workspace root that contains it and classify against THAT.
+        // The shared inner tool body then derives the subtree from
+        // `subtree_within(&args.path, &ctx.workspace_root)` and scopes
+        // results (standalone parity, Slice B).
+        //
+        // When the requested path IS a registered workspace root, the
+        // longest ancestor is the root itself, so `effective_root ==
+        // canonical_root` and the exact-root path stays byte-identical.
+        // When no registered root contains it, resolution returns `None`
+        // and we keep `canonical_root`, preserving the existing
+        // `NotReady` / `Evicted` "not loaded" error for unknown paths.
+        let effective_root = self
+            .manager
+            .find_owning_workspace_root(&canonical_root)
+            .unwrap_or_else(|| canonical_root.clone());
+
         // ----- Step 3: classify + map verdict ------------------------
-        let key = Self::key_for(&canonical_root);
+        let key = Self::key_for(&effective_root);
         let now = SystemTime::now();
         match self.manager.classify_for_serve(&key, now) {
             Ok(ServeVerdict::Fresh { graph, state }) => {
@@ -267,7 +295,8 @@ impl GraphAcquirer for DaemonGraphProvider {
                 let freshness = GraphFreshness::Fresh { lifecycle_label };
                 Ok(self.acquisition_from_parts(
                     graph,
-                    canonical_root,
+                    effective_root,
+                    &canonical_root,
                     &request,
                     freshness,
                     AcquisitionSource::DaemonReadOnly,
@@ -286,19 +315,24 @@ impl GraphAcquirer for DaemonGraphProvider {
                 };
                 Ok(self.acquisition_from_parts(
                     graph,
-                    canonical_root,
+                    effective_root,
+                    &canonical_root,
                     &request,
                     freshness,
                     AcquisitionSource::DaemonReadOnly,
                 ))
             }
             Ok(ServeVerdict::NotReady { state }) => Err(GraphAcquisitionError::NotReady {
-                workspace_root: canonical_root,
+                workspace_root: effective_root,
                 lifecycle: format!("{state:?}"),
             }),
-            Err(daemon_err) => {
-                self.handle_classify_error(&request, &key, canonical_root, daemon_err)
-            }
+            Err(daemon_err) => self.handle_classify_error(
+                &request,
+                &key,
+                effective_root,
+                &canonical_root,
+                daemon_err,
+            ),
         }
     }
 }
@@ -311,7 +345,14 @@ impl DaemonGraphProvider {
         &self,
         request: &GraphAcquisitionRequest,
         key: &WorkspaceKey,
-        canonical_root: PathBuf,
+        // The owning workspace root classification ran against (#394
+        // Part 1b): equal to the canonical requested path for an
+        // exact-root or unknown-path request, or the ancestor workspace
+        // root for a subtree request.
+        effective_root: PathBuf,
+        // The canonical requested path (may be a subtree of
+        // `effective_root`); used for the acquisition `query_scope`.
+        requested_canonical: &std::path::Path,
         daemon_err: DaemonError,
     ) -> Result<GraphAcquisition, GraphAcquisitionError> {
         match daemon_err {
@@ -341,14 +382,15 @@ impl DaemonGraphProvider {
                         };
                         Ok(self.acquisition_from_parts(
                             graph,
-                            canonical_root,
+                            effective_root,
+                            requested_canonical,
                             request,
                             freshness,
                             AcquisitionSource::DaemonReloaded,
                         ))
                     }
                     Err(reload_err) => Err(GraphAcquisitionError::Evicted {
-                        workspace_root: canonical_root,
+                        workspace_root: effective_root,
                         original_lifecycle,
                         reload_failure: Some(format!(
                             "evicted({original_detail}); reload: {reload_err}"
@@ -363,17 +405,17 @@ impl DaemonGraphProvider {
                 last_good_at: _,
                 last_error: _,
             } => Err(GraphAcquisitionError::StaleExpired {
-                workspace_root: canonical_root,
+                workspace_root: effective_root,
                 age_hours: Some(u64_hours_to_f64(age_hours)),
             }),
             DaemonError::WorkspaceBuildFailed { root: _, reason } => {
                 Err(GraphAcquisitionError::BuildFailed {
-                    workspace_root: canonical_root,
+                    workspace_root: effective_root,
                     reason,
                 })
             }
             DaemonError::WorkspaceNotLoaded { root: _ } => Err(GraphAcquisitionError::NoGraph {
-                workspace_root: canonical_root,
+                workspace_root: effective_root,
             }),
             other => Err(GraphAcquisitionError::Internal {
                 reason: format!("daemon classify_for_serve returned unexpected error: {other}"),
@@ -400,15 +442,26 @@ fn rfc3339_utc(t: SystemTime) -> String {
 }
 
 /// Decide the [`GraphAcquisition::query_scope`] / `is_file_scope`
-/// pair. The daemon canonicalises every accepted path to a workspace
-/// root (see [`crate::ipc::path_policy`]), so the scope is always
-/// `None` here — the field is reserved for filesystem-provider sub-
-/// directory / file scopes.
+/// pair for a request against a resolved workspace root.
+///
+/// `requested_canonical` is the canonical path the caller asked for;
+/// `workspace_root` is the owning workspace root classification ran
+/// against. When the two are equal (an exact-root or unknown-path
+/// request) the scope is `None`. When the request targeted a
+/// subdirectory of the owning workspace (#394 Part 1b), the subtree
+/// directory is recorded as `query_scope` for diagnostics; the daemon
+/// always canonicalises to a directory, so `is_file_scope` is `false`.
+/// The subtree FILTER is applied downstream by the shared inner tool
+/// body (`subtree_within` + `path_in_subtree`), not here.
 fn scope_for_request(
-    _request: &GraphAcquisitionRequest,
-    _canonical_root: &std::path::Path,
+    requested_canonical: &std::path::Path,
+    workspace_root: &std::path::Path,
 ) -> (Option<PathBuf>, bool) {
-    (None, false)
+    if requested_canonical == workspace_root {
+        (None, false)
+    } else {
+        (Some(requested_canonical.to_path_buf()), false)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +621,79 @@ mod tests {
         );
         assert_eq!(acq.workspace_root, root);
         assert_eq!(acq.metadata.tool_name, Some("sga04_test"));
+    }
+
+    // -----------------------------------------------------------------
+    // Test 1b (#394) - a subtree path resolves to its owning workspace
+    // -----------------------------------------------------------------
+    #[test]
+    fn daemon_provider_subtree_path_resolves_to_owning_workspace() {
+        let tmp = TempDir::new().unwrap();
+        let root = canonicalize_path(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("rust").join("kernel")).unwrap();
+        let subdir = canonicalize_path(&root.join("rust")).unwrap();
+
+        let manager = make_manager();
+        let key = WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
+        manager.insert_workspace_in_state_for_test(key, WorkspaceState::Loaded);
+
+        let provider = DaemonGraphProvider::new(
+            Arc::clone(&manager),
+            Arc::new(InMemoryBuilder) as Arc<dyn WorkspaceBuilder>,
+        );
+
+        // Requesting the SUBTREE must not fail classification: the acquirer
+        // resolves it to the owning workspace root and serves the loaded graph.
+        let acq = provider
+            .acquire(make_request(
+                subdir.clone(),
+                AcquisitionOperation::ReadOnlyQuery,
+            ))
+            .expect("subtree path must resolve to the owning loaded workspace");
+
+        // Classified against the owning root, NOT the subtree path.
+        assert_eq!(acq.workspace_root, root);
+        assert!(matches!(acq.freshness, GraphFreshness::Fresh { .. }));
+        // The requested subtree is recorded as the query scope.
+        assert_eq!(acq.query_scope.as_deref(), Some(subdir.as_path()));
+        assert!(!acq.is_file_scope);
+    }
+
+    // -----------------------------------------------------------------
+    // Test 1c (#394) - a path under no loaded workspace still errors
+    // -----------------------------------------------------------------
+    #[test]
+    fn daemon_provider_subtree_path_under_no_workspace_errors() {
+        let tmp = TempDir::new().unwrap();
+        let root = canonicalize_path(tmp.path()).unwrap();
+        std::fs::create_dir_all(root.join("orphan")).unwrap();
+        let orphan = canonicalize_path(&root.join("orphan")).unwrap();
+
+        // No workspace registered -> owning resolution returns None -> the
+        // classification runs against the orphan path (unknown key ->
+        // WorkspaceEvicted) and the reload-fails builder surfaces Evicted.
+        let manager = make_manager();
+        let builder = ReloadFailsBuilder::new();
+        let provider = DaemonGraphProvider::new(
+            Arc::clone(&manager),
+            Arc::clone(&builder) as Arc<dyn WorkspaceBuilder>,
+        );
+
+        let err = provider
+            .acquire(make_request(
+                orphan.clone(),
+                AcquisitionOperation::ReadOnlyQuery,
+            ))
+            .expect_err("a path under no loaded workspace must error clearly");
+        match err {
+            GraphAcquisitionError::Evicted { workspace_root, .. } => {
+                assert_eq!(
+                    workspace_root, orphan,
+                    "the error must reference the unresolved requested path"
+                );
+            }
+            other => panic!("expected Evicted for a path under no workspace, got {other:?}"),
+        }
     }
 
     // -----------------------------------------------------------------

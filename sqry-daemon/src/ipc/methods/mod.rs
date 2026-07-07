@@ -75,7 +75,6 @@ pub(crate) struct HandlerContext {
     /// Shared query executor used by Task 7's tool-dispatch handlers.
     /// Task 4's `WorkspaceContext` captures a clone of this `Arc` and hands it
     /// to the `inner::execute_*` functions in `sqry-mcp::daemon_adapter`.
-    #[allow(dead_code)] // consumed by Phase 8b Task 7's tool-dispatch handlers
     pub tool_executor: Arc<QueryExecutor>,
     /// issue #503 Phase 2: dedicated bounded CPU executor. The revision
     /// read-path handlers submit their `spawn_blocking`-shaped work through
@@ -186,7 +185,6 @@ pub enum MethodError {
     /// has already accepted the request. Phase 8b/8c surface this
     /// when tool-method params fail cross-field validation.
     #[error("invalid request: {0}")]
-    #[allow(dead_code)] // consumed by Phase 8b
     InvalidRequest(String),
 
     /// Daemon-specific error. Code derived from

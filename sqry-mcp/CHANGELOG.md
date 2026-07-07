@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [28.0.0](https://github.com/verivus-oss/sqry/compare/v27.0.8...v28.0.0) - 2026-07-07
+
+### Added
+
+- *(export)* Archify architecture-JSON export (--format archify) ([#532](https://github.com/verivus-oss/sqry/pull/532))
+- *(daemon)* resolve subtree tool paths to owning workspace (#394 Part 1b) ([#527](https://github.com/verivus-oss/sqry/pull/527))
+
+### Documentation
+
+- *(release)* batched-release model + vet-drift/concurrency/runner recovery
+
+### Fixed
+
+- *(mcp)* enforce logical-workspace path exclusions at tool resolution ([#483](https://github.com/verivus-oss/sqry/pull/483))
+- *(cli)* make CLI flags order-independent and give update --stats real output ([#524](https://github.com/verivus-oss/sqry/pull/524))
 ## [27.0.8](https://github.com/verivus-oss/sqry/compare/v27.0.7...v27.0.8) - 2026-07-05
 
 ### Other

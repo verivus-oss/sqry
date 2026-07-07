@@ -34,6 +34,22 @@ impl CPlugin {
             graph_builder: relations::CGraphBuilder::default(),
         }
     }
+
+    /// Test/bench-only constructor whose graph builder skips the three Phase A
+    /// C-plugin instrumentation walks (the callsite capture and the core
+    /// pass5b resolution still run). See
+    /// [`relations::CGraphBuilder::without_phase_a`]. Gated behind
+    /// `cfg(any(test, feature = "phase-a-toggle"))` so release builds cannot
+    /// construct it; used only by `scripts/measure/check_phase_a_perf_gate.sh`
+    /// to measure the marginal build-time cost of the instrumentation walks at
+    /// a single commit.
+    #[cfg(any(test, feature = "phase-a-toggle"))]
+    #[must_use]
+    pub fn without_phase_a() -> Self {
+        Self {
+            graph_builder: relations::CGraphBuilder::without_phase_a(),
+        }
+    }
 }
 
 impl Default for CPlugin {

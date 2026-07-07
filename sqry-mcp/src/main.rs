@@ -8,7 +8,10 @@ static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 // is the companion module holding the wire-schema → *Args converters
 // that both the rmcp path (server.rs) and the daemon path
 // (daemon_adapter::dispatch) delegate through.
-#[allow(dead_code)]
+// `unused_imports` covers the `pub use` re-exports (issue #469 U04:
+// `with_workspace_override`, `resolve_logical_workspace_for_root`) that
+// only the sqry-daemon crate consumes through the library target.
+#[allow(dead_code, unused_imports)]
 mod daemon_adapter;
 // Phase 8c U12 — daemon shim-mode helpers (exposed from the lib target too
 // so integration tests can call resolve_daemon_socket directly).
@@ -187,12 +190,41 @@ pub(crate) fn parse_cli_action(args: &[String]) -> CliAction {
         return CliAction::None;
     }
 
-    // Check the first argument for single-flag commands.
-    match tail[0] {
-        "-h" | "--help" => return CliAction::Help,
-        "-V" | "--version" => return CliAction::Version,
-        "--list-tools" => return CliAction::ListTools,
-        _ => {}
+    // Terminal info actions (`--help`, `--version`, `--list-tools`) take
+    // priority regardless of position. Historically only `tail[0]` was checked,
+    // so `sqry-mcp --no-daemon --list-tools` (and `--daemon --list-tools`) was
+    // rejected with "Unknown argument: --list-tools" even though the flag works
+    // when it comes first (#518). Scan the whole tail so these flags are
+    // order-independent, matching how `--daemon` / `--daemon-socket` already
+    // parse. The value that follows `--daemon-socket` is skipped so a socket
+    // path that happens to spell one of these flags is not misread as a flag.
+    {
+        let mut saw_help = false;
+        let mut saw_version = false;
+        let mut saw_list_tools = false;
+        let mut idx = 0;
+        while idx < tail.len() {
+            match tail[idx] {
+                "-h" | "--help" => saw_help = true,
+                "-V" | "--version" => saw_version = true,
+                "--list-tools" => saw_list_tools = true,
+                // `--daemon-socket <PATH>` consumes the next token as its value.
+                "--daemon-socket" => idx += 1,
+                _ => {}
+            }
+            idx += 1;
+        }
+        // Precedence mirrors the historical first-token order: help, then
+        // version, then list-tools.
+        if saw_help {
+            return CliAction::Help;
+        }
+        if saw_version {
+            return CliAction::Version;
+        }
+        if saw_list_tools {
+            return CliAction::ListTools;
+        }
     }
 
     // `--no-daemon` is mutually exclusive with `--daemon` / `--daemon-socket`.
@@ -680,6 +712,88 @@ mod tests {
                 assert_eq!(msg, "--bogus");
             }
             other => panic!("expected Unknown, got: {other:?}"),
+        }
+    }
+
+    /// #518: `--list-tools` after `--no-daemon` must be honoured. Before the
+    /// fix the `--no-daemon` branch rejected any other token, so this was
+    /// reported as `Unknown("--list-tools")`.
+    #[test]
+    fn parse_list_tools_after_no_daemon() {
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "--no-daemon", "--list-tools"])),
+            CliAction::ListTools
+        ));
+    }
+
+    /// #518: `--list-tools` after `--daemon` must be honoured. Before the fix
+    /// the daemon-flag parser reported it as an unknown trailing token.
+    #[test]
+    fn parse_list_tools_after_daemon() {
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "--daemon", "--list-tools"])),
+            CliAction::ListTools
+        ));
+    }
+
+    /// #518: `--list-tools` before `--no-daemon` must keep working (the flag is
+    /// order-independent in both directions).
+    #[test]
+    fn parse_list_tools_before_no_daemon() {
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "--list-tools", "--no-daemon"])),
+            CliAction::ListTools
+        ));
+    }
+
+    /// #518: `--help` / `--version` are likewise position-independent and
+    /// outrank the daemon flags.
+    #[test]
+    fn parse_help_and_version_are_position_independent() {
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "--daemon", "--help"])),
+            CliAction::Help
+        ));
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "--no-daemon", "--version"])),
+            CliAction::Version
+        ));
+    }
+
+    /// #518: help outranks list-tools when both appear, matching the historical
+    /// first-token precedence (help, then version, then list-tools).
+    #[test]
+    fn parse_help_outranks_list_tools() {
+        assert!(matches!(
+            parse_cli_action(&args(&["sqry-mcp", "--list-tools", "--help"])),
+            CliAction::Help
+        ));
+    }
+
+    /// #518: a token spelling `--list-tools` that appears as the value of
+    /// `--daemon-socket` must NOT be hijacked into the list-tools action by the
+    /// whole-tail scan (the scan skips the token following `--daemon-socket`).
+    /// The daemon-flag parser then rejects the flag-like socket path, which is
+    /// the correct outcome; the point locked here is that we never silently
+    /// list tools instead of honouring the socket argument.
+    #[test]
+    fn parse_daemon_socket_value_spelling_a_flag_is_not_a_list_tools_action() {
+        let a = parse_cli_action(&args(&[
+            "sqry-mcp",
+            "--daemon",
+            "--daemon-socket",
+            "--list-tools",
+        ]));
+        assert!(
+            !matches!(a, CliAction::ListTools),
+            "the scan must not treat a --daemon-socket value as the list-tools action; got: {a:?}"
+        );
+        match a {
+            CliAction::Unknown(msg) => assert!(
+                msg.contains("--daemon-socket"),
+                "expected a socket-path diagnostic, got: {msg}"
+            ),
+            other => panic!("expected Unknown socket-path diagnostic, got: {other:?}"),
         }
     }
 }

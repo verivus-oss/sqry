@@ -72,6 +72,7 @@ pub fn execute(
                     Some(&classpath_opts),
                     &mut classpath_cache,
                     &[],
+                    cli.json,
                 )?;
             }
             #[cfg(not(feature = "jvm-classpath"))]
@@ -84,6 +85,7 @@ pub fn execute(
                     progress,
                     Some(&classpath_opts),
                     None,
+                    cli.json,
                 )?;
             }
         } else {
@@ -140,6 +142,7 @@ pub fn execute(
             Some(&classpath_opts),
             &mut classpath_cache,
             &changes,
+            cli.json,
         );
         #[cfg(not(feature = "jvm-classpath"))]
         let build_result = build_and_persist_with_optional_classpath(
@@ -150,6 +153,7 @@ pub fn execute(
             progress.clone(),
             Some(&classpath_opts),
             None,
+            cli.json,
         );
         match build_result {
             Ok(_build_result) => {
@@ -217,6 +221,7 @@ fn classpath_inputs_changed(
 }
 
 #[cfg(feature = "jvm-classpath")]
+#[allow(clippy::too_many_arguments)]
 fn build_and_persist_watch_iteration(
     root_path: &std::path::Path,
     resolved_plugins: &crate::plugin_defaults::ResolvedPluginManager,
@@ -226,12 +231,13 @@ fn build_and_persist_watch_iteration(
     classpath_opts: Option<&ClasspathCliOptions<'_>>,
     classpath_cache: &mut Option<sqry_classpath::pipeline::ClasspathPipelineResult>,
     changes: &[FileChange],
+    json_output: bool,
 ) -> Result<sqry_core::graph::unified::build::BuildResult> {
     if let Some(classpath_opts) = classpath_opts.filter(|opts| opts.enabled) {
         let should_refresh = classpath_cache.is_none()
             || classpath_inputs_changed(root_path, changes, classpath_opts);
         if should_refresh {
-            *classpath_cache = run_classpath_pipeline_only(root_path, classpath_opts)?;
+            *classpath_cache = run_classpath_pipeline_only(root_path, classpath_opts, json_output)?;
         }
 
         let (mut graph, effective_threads) =
@@ -243,7 +249,7 @@ fn build_and_persist_watch_iteration(
             )?;
 
         if let Some(classpath_result) = classpath_cache.as_ref() {
-            inject_classpath_into_graph(&mut graph, classpath_result)?;
+            inject_classpath_into_graph(&mut graph, classpath_result, json_output)?;
         }
 
         let (_graph, build_result) = sqry_core::graph::unified::build::persist_and_analyze_graph(
@@ -267,6 +273,7 @@ fn build_and_persist_watch_iteration(
         progress,
         None,
         None,
+        json_output,
     )
 }
 

@@ -610,8 +610,11 @@ fn daemon_start_stop_round_trip() {
     let tmp = tempfile::TempDir::new().expect("create tempdir");
     let socket_path = tmp.path().join("sqryd-round-trip.sock");
     let config_path = tmp.path().join("daemon.toml");
-    // The pidfile is written to <XDG_RUNTIME_DIR>/sqry/sqryd.pid.
-    let pidfile_path = tmp.path().join("sqry").join("sqryd.pid");
+    // With a custom socket configured, the pidfile co-locates beside the
+    // socket using its file stem (issue #519 part b): `sqryd-round-trip.sock`
+    // yields `sqryd-round-trip.pid` in the same dir, not the default
+    // `<XDG_RUNTIME_DIR>/sqry/sqryd.pid`.
+    let pidfile_path = tmp.path().join("sqryd-round-trip.pid");
 
     write_daemon_config(&config_path, &socket_path, tmp.path());
 

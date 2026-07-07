@@ -15,8 +15,6 @@ use std::collections::HashSet;
 use std::env;
 use std::path::{Path, PathBuf};
 
-use crate::engine::WorkspacePathError;
-
 //=============================================================================
 // Discovery Cache
 //=============================================================================
@@ -144,49 +142,6 @@ fn is_case_sensitive_macos(path: &str) -> Result<bool> {
         0 => Ok(false), // Case-insensitive
         _ => Ok(true),  // Case-sensitive
     }
-}
-
-/// Resolve a request-supplied path against a [`LogicalWorkspace`],
-/// rejecting excluded paths **before** the workspace-bound check.
-///
-/// Implements `STEP_7` acceptance criterion 9 at the path-resolver layer:
-/// when the workspace classifies the input (or any ancestor) as
-/// [`Classification::Excluded`], the resolver returns
-/// [`WorkspacePathError::Excluded`] without attempting workspace
-/// containment. This mirrors the semantics of
-/// [`crate::engine::canonicalize_in_workspace_with_logical`] but is
-/// exposed at the resolver surface so callers that don't already hold
-/// an `Engine` can validate paths uniformly.
-///
-/// Tagged `#[allow(dead_code)]` because production tool callers route
-/// through the `Engine` directly today; the resolver-level wrapper is
-/// exposed for tests + future per-tool exclusion checks.
-///
-/// # Errors
-///
-/// Returns [`WorkspacePathError::Excluded`] for excluded paths,
-/// [`WorkspacePathError::OutsideWorkspace`] for paths outside any
-/// configured source root, and [`WorkspacePathError::Canonicalize`]
-/// for filesystem failures.
-#[allow(dead_code)]
-pub fn resolve_path_in_logical_workspace(
-    path_str: &str,
-    workspace: &sqry_core::workspace::LogicalWorkspace,
-) -> Result<PathBuf, WorkspacePathError> {
-    // Anchor against the first source root by convention. Multi-source-root
-    // workspaces use `canonicalize_in_workspace_with_logical` directly with
-    // an explicit workspace_root chosen by the caller; this helper covers
-    // the common single-source-root case for simple validators.
-    let workspace_root = workspace
-        .source_roots()
-        .first()
-        .map_or_else(PathBuf::new, |r| r.path.clone());
-
-    crate::engine::canonicalize_in_workspace_with_logical(
-        path_str,
-        &workspace_root,
-        Some(workspace),
-    )
 }
 
 /// Resolve a workspace path with caching.

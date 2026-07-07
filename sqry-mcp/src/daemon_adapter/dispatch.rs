@@ -166,7 +166,7 @@ pub fn dispatch_by_name(
         "complexity_metrics" => {
             let args = params_to_complexity_metrics_args(args_value.clone())
                 .map_err(anyhow::Error::from)?;
-            let exec = execute_complexity_metrics_for_daemon(wctx, &args);
+            let exec = execute_complexity_metrics_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "semantic_diff" => {

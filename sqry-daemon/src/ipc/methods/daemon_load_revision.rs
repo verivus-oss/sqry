@@ -26,6 +26,7 @@ use crate::{
     },
 };
 
+use super::super::protocol::{ResponseEnvelope, ResponseMeta};
 use super::{HandlerContext, MethodError};
 
 /// Handle `daemon/loadRevision`.
@@ -50,7 +51,11 @@ pub(crate) async fn handle_load(ctx: &HandlerContext, params: Value) -> Result<V
         resolved: status.resolved.clone(),
         status,
     };
-    serde_json::to_value(result).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
+    let envelope = ResponseEnvelope {
+        result,
+        meta: ResponseMeta::management(ctx.daemon_version),
+    };
+    serde_json::to_value(&envelope).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
 }
 
 /// Handle `daemon/unloadRevision`.
@@ -63,7 +68,11 @@ pub(crate) fn handle_unload(ctx: &HandlerContext, params: Value) -> Result<Value
         revision_id: req.revision_id,
         unloaded,
     };
-    serde_json::to_value(result).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
+    let envelope = ResponseEnvelope {
+        result,
+        meta: ResponseMeta::management(ctx.daemon_version),
+    };
+    serde_json::to_value(&envelope).map_err(|err| MethodError::Internal(anyhow::Error::new(err)))
 }
 
 pub(crate) fn resolve_query_target(

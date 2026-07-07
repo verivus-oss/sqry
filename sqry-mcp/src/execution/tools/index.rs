@@ -12,7 +12,7 @@ use sqry_core::graph::unified::build::BuildConfig;
 use sqry_core::graph::unified::persistence::{GraphStorage, Manifest, load_header_from_path};
 use sqry_plugin_registry::create_plugin_manager;
 
-use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
+use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace};
 use crate::tools::{GetIndexStatusArgs, RebuildIndexArgs};
 
 use crate::execution::types::{IndexStatusData, RebuildIndexData, ToolExecution};
@@ -25,13 +25,11 @@ use crate::execution::utils::duration_to_ms;
 ///
 /// If path is "." (default), returns None to trigger discovery.
 /// Otherwise returns Some(path) for explicit workspace resolution.
-fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
+fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
     // Issue #394: resolve a subdirectory `path` to its owning workspace instead
     // of failing as if it were a workspace root. Subtree scoping for list/scan
     // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector(path)
-        .ok()
-        .flatten()
+    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
 }
 /// Execute the `get_index_status` tool.
 ///
@@ -41,10 +39,10 @@ fn resolve_workspace_path(path: &str) -> Option<PathBuf> {
 /// status aggregation fails.
 pub fn execute_index_status(args: &GetIndexStatusArgs) -> Result<ToolExecution<IndexStatusData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let target = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let target = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     let mut candidate_roots = Vec::new();
     if target.is_dir() {
@@ -156,10 +154,10 @@ pub fn execute_index_status(args: &GetIndexStatusArgs) -> Result<ToolExecution<I
 #[allow(clippy::too_many_lines)]
 pub fn execute_rebuild_index(args: &RebuildIndexArgs) -> Result<ToolExecution<RebuildIndexData>> {
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path);
+    let workspace_path = resolve_workspace_path(&args.path)?;
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
-    let target = canonicalize_in_workspace(&args.path, &workspace_root)?;
+    let target = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
 
     // Determine the root directory for indexing
     let root_path = if target.is_dir() {

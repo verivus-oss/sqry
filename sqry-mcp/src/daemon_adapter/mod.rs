@@ -33,6 +33,26 @@
 /// See [`dispatch::dispatch_by_name`].
 pub mod dispatch;
 
+/// Per-request thread-local workspace-override binder (issue #469 U04).
+///
+/// The sqryd daemon binds the reconstructed [`sqry_core::workspace::LogicalWorkspace`]
+/// on its blocking tool thread through this seam so
+/// `canonicalize_in_workspace_enforced` and the `workspace_scope`
+/// entrypoints see the same per-request exclusions in daemon-hosted mode
+/// that the standalone `SqryServer` binds. The reading side
+/// (`current_logical_workspace`) stays crate-internal to the enforced
+/// canonicalization entry, so the daemon only needs the write seam.
+pub use crate::workspace_session::with_workspace_override;
+
+/// On-disk `LogicalWorkspace` reconstruction seam (issue #469 U04).
+///
+/// Reads `<workspace_root>/.sqry-workspace` when present (carrying the
+/// exclusion set), otherwise falls back to a single-root workspace. The
+/// daemon re-runs this discovery per read-only tool dispatch to
+/// reconstruct the workspace it holds only by root, keeping its
+/// exclusion resolution byte-identical to the standalone server's.
+pub use crate::workspace_session::resolve_logical_workspace_for_root;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -44,7 +64,7 @@ use serde::Serialize;
 use sqry_core::graph::unified::concurrent::CodeGraph;
 use sqry_core::query::executor::QueryExecutor;
 
-use crate::engine::canonicalize_in_workspace;
+use crate::engine::canonicalize_in_workspace_enforced;
 use crate::execution::ToolExecution;
 use crate::execution::types::{
     ComplexityMetricsData, DependencyGraphData, DependencyImpactData, DirectCalleesData,
@@ -121,7 +141,7 @@ pub fn execute_semantic_search_for_daemon(
     args: &SemanticSearchArgs,
     cancel: &sqry_core::query::cancellation::CancellationToken,
 ) -> Result<ToolExecution<SemanticSearchData>> {
-    let search_root = canonicalize_in_workspace(&args.path, &ctx.workspace_root)?;
+    let search_root = canonicalize_in_workspace_enforced(&args.path, &ctx.workspace_root)?;
     let start = Instant::now();
     search_inner::execute_semantic_search(ctx, args, &search_root, start, cancel)
 }
@@ -262,11 +282,14 @@ pub fn execute_export_graph_for_daemon(
 
 /// Daemon-path wrapper for `complexity_metrics`.
 ///
-#[must_use]
+/// # Errors
+///
+/// Returns an error if the requested subtree `path` is excluded by the logical
+/// workspace policy (issue #469 Surface 2).
 pub fn execute_complexity_metrics_for_daemon(
     ctx: &WorkspaceContext,
     args: &ComplexityMetricsArgs,
-) -> ToolExecution<ComplexityMetricsData> {
+) -> Result<ToolExecution<ComplexityMetricsData>> {
     let start = Instant::now();
     introspection_inner::execute_complexity_metrics(ctx, args, start)
 }

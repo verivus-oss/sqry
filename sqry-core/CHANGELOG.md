@@ -6,6 +6,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [28.0.0](https://github.com/verivus-oss/sqry/compare/v27.0.8...v28.0.0) - 2026-07-07
+
+### Added
+
+- *(export)* Archify architecture-JSON export (--format archify) ([#532](https://github.com/verivus-oss/sqry/pull/532))
+- *(daemon)* resolve subtree tool paths to owning workspace (#394 Part 1b) ([#527](https://github.com/verivus-oss/sqry/pull/527))
+
+### Documentation
+
+- *(release)* batched-release model + vet-drift/concurrency/runner recovery
+
+### Fixed
+
+- *(workspace)* workspace stats reports 0 symbols for indexed members ([#515](https://github.com/verivus-oss/sqry/pull/515)) ([#535](https://github.com/verivus-oss/sqry/pull/535))
+- *(cli)* unify ambiguous-symbol disambiguation across explain/visualize/alias ([#528](https://github.com/verivus-oss/sqry/pull/528))
+- *(query)* make file: a true alias of path: in sqry query ([#522](https://github.com/verivus-oss/sqry/pull/522))
 ## [26.0.0](https://github.com/verivus-oss/sqry/compare/v25.0.2...v26.0.0) - 2026-07-01
 
 ### Fixed

@@ -14,7 +14,7 @@ use sqry_db::planner::ir::{PlanNode, Predicate};
 use sqry_db::planner::{execute_plan, parse_query};
 use sqry_db::queries::dispatch::make_query_db_cold;
 
-use crate::engine::{canonicalize_in_workspace, engine_for_workspace};
+use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace};
 use crate::execution::types::{ReindexRequiredData, SqryQueryData, SqryQueryHit, ToolExecution};
 use crate::execution::utils::duration_to_ms;
 use crate::tools::SqryQueryParams;
@@ -80,7 +80,7 @@ pub fn execute_sqry_query(params: &SqryQueryParams) -> Result<ToolExecution<Sqry
     let engine = engine_for_workspace(workspace_path.as_ref())?;
     let workspace_root = engine.workspace_root().to_path_buf();
     // Guard against path traversal — same pattern other tools use.
-    let _ = canonicalize_in_workspace(&params.path, &workspace_root)?;
+    let _ = canonicalize_in_workspace_enforced(&params.path, &workspace_root)?;
 
     let graph = engine
         .ensure_graph()

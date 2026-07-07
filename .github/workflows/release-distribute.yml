@@ -234,7 +234,7 @@ jobs:
         uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
         with:
           toolchain: "1.94.1"
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-gnu
+          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu,x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,x86_64-apple-darwin,aarch64-apple-darwin,x86_64-pc-windows-gnu
 
       - name: Verify Rust toolchain
         run: rustc --version | grep -q '^rustc 1.94.1'
@@ -245,11 +245,13 @@ jobs:
           rustup target add \
             x86_64-unknown-linux-gnu \
             aarch64-unknown-linux-gnu \
+            x86_64-unknown-linux-musl \
+            aarch64-unknown-linux-musl \
             x86_64-apple-darwin \
             aarch64-apple-darwin \
             x86_64-pc-windows-gnu
           rustup target list --installed | sort
-          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-gnu; do
+          for target in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu x86_64-unknown-linux-musl aarch64-unknown-linux-musl x86_64-apple-darwin aarch64-apple-darwin x86_64-pc-windows-gnu; do
             if ! rustup target list --installed | grep -Fx "$target" >/dev/null; then
               echo "FATAL: Rust stdlib target missing after installation: $target" >&2
               exit 1
@@ -341,6 +343,8 @@ jobs:
           TARGETS=(
             "x86_64-unknown-linux-gnu"
             "aarch64-unknown-linux-gnu"
+            "x86_64-unknown-linux-musl"
+            "aarch64-unknown-linux-musl"
             "x86_64-apple-darwin"
             "aarch64-apple-darwin"
             "x86_64-pc-windows-gnu"
@@ -368,6 +372,8 @@ jobs:
             case "$target" in
               x86_64-unknown-linux-gnu) SUFFIX="linux-x86_64" ;;
               aarch64-unknown-linux-gnu) SUFFIX="linux-arm64" ;;
+              x86_64-unknown-linux-musl) SUFFIX="linux-x86_64-musl" ;;
+              aarch64-unknown-linux-musl) SUFFIX="linux-arm64-musl" ;;
               x86_64-apple-darwin) SUFFIX="macos-x86_64" ;;
               aarch64-apple-darwin) SUFFIX="macos-arm64" ;;
               x86_64-pc-windows-gnu) SUFFIX="windows-x86_64" ;;
@@ -480,6 +486,55 @@ jobs:
           fi
           aarch64_loader_prefix="$(dirname "$(dirname "$aarch64_loader")")"
           QEMU_LD_PREFIX="$aarch64_loader_prefix" qemu-aarch64-static dist/sqry-linux-arm64 --version
+
+      # Static-link proof: the whole point of the musl assets (issue #395) is
+      # that they carry their own libc and run on any Linux regardless of the
+      # host glibc. Assert that property for EVERY musl binary we ship (sqry,
+      # sqry-lsp, sqry-mcp, sqryd), not just sqry, so a static-link regression
+      # in any of the four fails the release gate instead of shipping a binary
+      # that breaks on glibc-2.35.
+      - name: Smoke test Linux x86_64 musl (static)
+        run: |
+          set -euo pipefail
+          for name in sqry sqry-lsp sqry-mcp sqryd; do
+            bin="dist/${name}-linux-x86_64-musl"
+            chmod +x "$bin"
+            file_out="$(file "$bin")"
+            echo "$file_out"
+            if ! grep -q 'statically linked' <<<"$file_out"; then
+              echo "FATAL: ${bin} is not statically linked" >&2
+              exit 1
+            fi
+            ldd_out="$(ldd "$bin" 2>&1 || true)"
+            echo "$ldd_out"
+            if ! grep -q 'not a dynamic executable' <<<"$ldd_out"; then
+              echo "FATAL: ${bin} reports dynamic dependencies" >&2
+              exit 1
+            fi
+          done
+          ./dist/sqry-linux-x86_64-musl --version
+          ./dist/sqry-linux-x86_64-musl index --help >/dev/null
+
+      - name: Smoke test Linux arm64 musl (static, QEMU)
+        run: |
+          set -euo pipefail
+          command -v qemu-aarch64-static >/dev/null
+          # `file` is cross-arch, so it proves the static-link property for the
+          # arm64 binaries just as it does for x86_64.
+          for name in sqry sqry-lsp sqry-mcp sqryd; do
+            bin="dist/${name}-linux-arm64-musl"
+            chmod +x "$bin"
+            file_out="$(file "$bin")"
+            echo "$file_out"
+            if ! grep -q 'statically linked' <<<"$file_out"; then
+              echo "FATAL: ${bin} is not statically linked" >&2
+              exit 1
+            fi
+          done
+          # A static musl binary needs no glibc loader prefix under qemu.
+          for name in sqry sqry-lsp sqry-mcp sqryd; do
+            qemu-aarch64-static "dist/${name}-linux-arm64-musl" --version
+          done
 
       # Phase 6.5: VS Code extension
       - name: Verify VS Code extension assets
@@ -816,6 +871,14 @@ jobs:
           required=(
             "sqry-linux-x86_64"
             "sqry-linux-arm64"
+            "sqry-linux-x86_64-musl"
+            "sqry-lsp-linux-x86_64-musl"
+            "sqry-mcp-linux-x86_64-musl"
+            "sqryd-linux-x86_64-musl"
+            "sqry-linux-arm64-musl"
+            "sqry-lsp-linux-arm64-musl"
+            "sqry-mcp-linux-arm64-musl"
+            "sqryd-linux-arm64-musl"
             "sqry-macos-x86_64"
             "sqry-macos-arm64"
             "sqry-${VERSION}-windows-x86_64.zip"

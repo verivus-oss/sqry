@@ -1383,7 +1383,9 @@ sub another_func {
 /// arrive through `@_`), so [`signature_shape`](PerlShapeMapping::signature_shape)
 /// is honestly minimal. `die` is an ordinary function call in the grammar, so it
 /// stays in the `Call` bucket; `eval { ... }` is Perl's structural exception
-/// guard and maps to `Try`.
+/// guard and maps to `Try`. The v1.2.1 grammar refresh adds
+/// `async_block_expression` (`async { ... }`), another anonymous closure form
+/// that joins `anonymous_subroutine_expression` in the `Closure` bucket.
 pub struct PerlShapeMapping {
     cf_by_kind_id: Vec<Option<CfBucket>>,
 }
@@ -1442,7 +1444,10 @@ fn cf_bucket_for_perl_kind(name: &str) -> Option<CfBucket> {
         | "func0op_call_expression"
         | "func1op_call_expression" => CfBucket::Call,
         "assignment_expression" => CfBucket::Assign,
-        "anonymous_subroutine_expression" => CfBucket::Closure,
+        // `sub { ... }` and the modern `async { ... }` block are both anonymous
+        // closures the identifier-blind shape descriptor should recognise
+        // (tree-sitter-perl v1.2.1 introduced `async_block_expression`).
+        "anonymous_subroutine_expression" | "async_block_expression" => CfBucket::Closure,
         _ => return None,
     };
     Some(bucket)
@@ -1526,6 +1531,10 @@ mod shape_tests {
         );
         assert_eq!(
             cf_bucket_for_perl_kind("anonymous_subroutine_expression"),
+            Some(CfBucket::Closure)
+        );
+        assert_eq!(
+            cf_bucket_for_perl_kind("async_block_expression"),
             Some(CfBucket::Closure)
         );
         assert_eq!(cf_bucket_for_perl_kind("nope"), None);

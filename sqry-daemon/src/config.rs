@@ -89,6 +89,34 @@ pub const ENV_SOCKET_PATH: &str = "SQRY_DAEMON_SOCKET";
 /// Environment variable that overrides the Windows named pipe name.
 pub const ENV_PIPE_NAME: &str = "SQRY_DAEMON_PIPE";
 
+/// Maximum usable byte length of a Unix-domain-socket path.
+///
+/// Equal to the capacity of `sockaddr_un.sun_path` minus one byte reserved
+/// for the trailing NUL. The `sun_path` field is 108 bytes on
+/// Linux/Android (and Solaris/illumos) and 104 bytes on macOS and the BSDs;
+/// see [`DaemonConfig::validate_socket_path`]. Only meaningful on Unix.
+#[cfg(unix)]
+pub const MAX_UNIX_SOCKET_PATH_LEN: usize = {
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "solaris",
+        target_os = "illumos"
+    ))]
+    {
+        108 - 1
+    }
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "android",
+        target_os = "solaris",
+        target_os = "illumos"
+    )))]
+    {
+        104 - 1
+    }
+};
+
 /// Environment variable that overrides `log_level`.
 pub const ENV_LOG_LEVEL: &str = "SQRY_DAEMON_LOG_LEVEL";
 
@@ -874,17 +902,103 @@ impl DaemonConfig {
         runtime_dir().join("sqryd.sock")
     }
 
-    /// Where to write the daemon pidfile. One per user.
+    /// Where to write the daemon pidfile.
+    ///
+    /// Mirrors [`Self::socket_path`]: when a custom Unix socket path is
+    /// configured, the pidfile co-locates beside the socket (see
+    /// [`Self::socket_sibling_path`]); otherwise it lands at
+    /// `runtime_dir()/sqryd.pid`, one per user.
     #[must_use]
     pub fn pid_path(&self) -> PathBuf {
-        runtime_dir().join("sqryd.pid")
+        self.socket_sibling_path(".pid")
+            .unwrap_or_else(|| runtime_dir().join("sqryd.pid"))
     }
 
-    /// Flock target — held exclusively by the running daemon, and briefly
+    /// Flock target, held exclusively by the running daemon and briefly
     /// by clients during auto-start to avoid racing two `sqry` processes.
+    ///
+    /// Mirrors [`Self::socket_path`]: when a custom Unix socket path is
+    /// configured, the lockfile co-locates beside the socket (see
+    /// [`Self::socket_sibling_path`]) so two private-socket daemons sharing
+    /// one directory never collide on a single global `sqryd.lock`;
+    /// otherwise it lands at `runtime_dir()/sqryd.lock`.
     #[must_use]
     pub fn lock_path(&self) -> PathBuf {
-        runtime_dir().join("sqryd.lock")
+        self.socket_sibling_path(".lock")
+            .unwrap_or_else(|| runtime_dir().join("sqryd.lock"))
+    }
+
+    /// Sibling path beside a custom Unix socket, sharing the socket's file
+    /// stem and the given `suffix`.
+    ///
+    /// When a custom socket path is configured (via `socket.path` or the
+    /// `SQRY_DAEMON_SOCKET` env override, both of which land in
+    /// [`Self::socket_path`]), the pidfile and lockfile must live next to
+    /// that socket rather than at the default `runtime_dir()` location.
+    /// A socket `…/foo.sock` yields `…/foo.pid` (suffix `.pid`) and
+    /// `…/foo.lock` (suffix `.lock`), giving true per-socket isolation even
+    /// when several private sockets share one directory (issue #519 part b).
+    ///
+    /// Returns `None` when no custom socket path is set (the default
+    /// `runtime_dir()`-rooted layout is kept) or on Windows (named pipes
+    /// have no filesystem sibling; lock/pid stay under `runtime_dir()`).
+    #[must_use]
+    fn socket_sibling_path(&self, suffix: &str) -> Option<PathBuf> {
+        if cfg!(windows) {
+            return None;
+        }
+        let socket = self.socket.path.as_ref()?;
+        let parent = socket
+            .parent()
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+        let stem = socket
+            .file_stem()
+            .unwrap_or_else(|| std::ffi::OsStr::new("sqryd"));
+        let mut name = stem.to_os_string();
+        name.push(suffix);
+        Some(parent.join(name))
+    }
+
+    /// Validate that the resolved Unix socket path fits inside the
+    /// platform's `sockaddr_un.sun_path` field.
+    ///
+    /// The kernel copies the socket path into the fixed-size `sun_path`
+    /// array of `struct sockaddr_un`. That field is 108 bytes on
+    /// Linux/Android and 104 bytes on macOS and the BSDs; one byte is
+    /// reserved for the trailing NUL, so the usable path length is one
+    /// less. A path over that limit fails deep inside the `bind(2)`
+    /// syscall (`ENAMETOOLONG`/`EINVAL`), which on the detach path only
+    /// reaches the parent as a bare ready-timeout (issue #519 part a).
+    /// Pre-validating turns that into a typed, actionable error.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DaemonError::Config`] when the resolved socket path
+    /// exceeds the platform `sun_path` limit. On Windows this is a no-op
+    /// (named pipes are not filesystem sockets); it always returns `Ok`.
+    pub fn validate_socket_path(&self) -> DaemonResult<()> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt as _;
+
+            let path = self.socket_path();
+            let len = path.as_os_str().as_bytes().len();
+            let limit = MAX_UNIX_SOCKET_PATH_LEN;
+            if len > limit {
+                return Err(DaemonError::Config {
+                    path: path.clone(),
+                    source: anyhow!(
+                        "Unix socket path is {len} bytes, but this platform's \
+                         sockaddr_un.sun_path holds at most {limit} usable bytes \
+                         (108 on Linux, 104 on macOS/BSD, minus one for the NUL \
+                         terminator). Use a shorter socket path: set \
+                         SQRY_DAEMON_SOCKET (or socket.path in daemon.toml) to a \
+                         short path under $XDG_RUNTIME_DIR or $TMPDIR."
+                    ),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// Platform-specific per-user runtime directory where the socket, pidfile,
@@ -1473,6 +1587,124 @@ mod tests {
         } else if cfg!(windows) {
             let s = p.to_string_lossy();
             assert!(s.starts_with(r"\\.\pipe\"), "{s}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_and_pid_use_runtime_dir_when_no_custom_socket() {
+        // Default config: no custom socket path, so lock/pid keep the
+        // runtime-dir-rooted `sqryd.{pid,lock}` layout unchanged.
+        let cfg = DaemonConfig::default();
+        assert!(
+            cfg.pid_path().ends_with("sqryd.pid"),
+            "{:?}",
+            cfg.pid_path()
+        );
+        assert!(
+            cfg.lock_path().ends_with("sqryd.lock"),
+            "{:?}",
+            cfg.lock_path()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_and_pid_colocate_beside_custom_socket() {
+        // A custom socket `/run/user/1000/priv/foo.sock` must place its lock
+        // and pidfile in the socket's parent using the socket's file stem, so
+        // two private-socket daemons in the same directory never collide on a
+        // single global lock (issue #519 part b).
+        let cfg = DaemonConfig {
+            socket: SocketConfig {
+                path: Some(PathBuf::from("/run/user/1000/priv/foo.sock")),
+                pipe_name: None,
+            },
+            ..DaemonConfig::default()
+        };
+        assert_eq!(cfg.pid_path(), PathBuf::from("/run/user/1000/priv/foo.pid"));
+        assert_eq!(
+            cfg.lock_path(),
+            PathBuf::from("/run/user/1000/priv/foo.lock")
+        );
+
+        // A second private socket in the same directory derives a distinct
+        // lock, proving per-socket isolation within one shared directory.
+        let other = DaemonConfig {
+            socket: SocketConfig {
+                path: Some(PathBuf::from("/run/user/1000/priv/bar.sock")),
+                pipe_name: None,
+            },
+            ..DaemonConfig::default()
+        };
+        assert_ne!(cfg.lock_path(), other.lock_path());
+        assert_eq!(
+            other.lock_path(),
+            PathBuf::from("/run/user/1000/priv/bar.lock")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_socket_path_accepts_default_and_boundary_lengths() {
+        // Default (short runtime-dir) path always fits.
+        DaemonConfig::default()
+            .validate_socket_path()
+            .expect("default socket path must be within the sun_path limit");
+
+        // A path exactly at the platform limit binds (boundary case). Build a
+        // path whose byte length equals MAX_UNIX_SOCKET_PATH_LEN.
+        let dir = "/tmp/";
+        let fill = MAX_UNIX_SOCKET_PATH_LEN - dir.len();
+        let at_limit = format!("{dir}{}", "a".repeat(fill));
+        assert_eq!(at_limit.len(), MAX_UNIX_SOCKET_PATH_LEN);
+        let cfg = DaemonConfig {
+            socket: SocketConfig {
+                path: Some(PathBuf::from(&at_limit)),
+                pipe_name: None,
+            },
+            ..DaemonConfig::default()
+        };
+        cfg.validate_socket_path()
+            .expect("a path exactly at the sun_path limit must be accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_socket_path_rejects_over_long_path_with_typed_error() {
+        // One byte over the limit yields a typed Config error (not a raw bind
+        // failure / ready-timeout), and the message names both the actual
+        // length and the platform limit (issue #519 part a).
+        let over = format!("/tmp/{}.sock", "z".repeat(MAX_UNIX_SOCKET_PATH_LEN));
+        assert!(over.len() > MAX_UNIX_SOCKET_PATH_LEN);
+        let cfg = DaemonConfig {
+            socket: SocketConfig {
+                path: Some(PathBuf::from(&over)),
+                pipe_name: None,
+            },
+            ..DaemonConfig::default()
+        };
+        let err = cfg
+            .validate_socket_path()
+            .expect_err("an over-long socket path must be rejected");
+        match err {
+            DaemonError::Config { path, source } => {
+                assert_eq!(path, PathBuf::from(&over));
+                let msg = source.to_string();
+                assert!(
+                    msg.contains(&over.len().to_string()),
+                    "message must state the actual byte length: {msg}"
+                );
+                assert!(
+                    msg.contains(&MAX_UNIX_SOCKET_PATH_LEN.to_string()),
+                    "message must state the platform limit: {msg}"
+                );
+                assert!(
+                    msg.contains("SQRY_DAEMON_SOCKET"),
+                    "message must suggest a shorter path: {msg}"
+                );
+            }
+            other => panic!("expected DaemonError::Config, got {other:?}"),
         }
     }
 
