@@ -4,6 +4,12 @@ Runs the [sqry](https://sqry.dev) MCP server (`sqry-mcp`, 38 tools, stdio) in a
 container. The image installs the prebuilt release binary, so it is small and
 builds in seconds rather than compiling the Rust and tree-sitter workspace.
 
+The runtime is `distroless/cc`. The release binaries are glibc-dynamic (`ldd`:
+glibc + `libstdc++6`), with no musl/static build in the release matrix, so
+distroless/cc is the minimal base that carries exactly those libraries and
+nothing else. A `FROM scratch` image would need a static (musl) build target
+added upstream.
+
 ## Build
 
 ```bash
