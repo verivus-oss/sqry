@@ -6,6 +6,15 @@ Check [Keep a Changelog](http://keepachangelog.com/) for recommendations on how 
 
 ## [Unreleased]
 
+### Fixed
+- Download a self-contained binary per platform so the extension works on a
+  clean machine. Linux now fetches the fully static musl build (runs on any
+  distribution regardless of glibc, including musl distros like Alpine), and
+  Windows fetches the release zip and extracts sqry.exe alongside its bundled
+  runtime DLLs (libstdc++-6.dll, libgcc_s_seh-1.dll, libwinpthread-1.dll).
+  Previously the glibc Linux build and the bare Windows exe could fail the
+  `sqry --version` preflight check on a fresh machine.
+
 ## [28.0.1] - 2026-07-07
 
 ### Fixed

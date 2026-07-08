@@ -4,7 +4,7 @@ This document defines the canonical types used across all sqry interfaces (CLI, 
 All types are exported from `sqry_core::schema` and should be the single source of truth.
 Graph kinds (`NodeKind`, `EdgeKind`) are defined in `sqry-core/src/graph/unified/` and re-exported from the schema module.
 
-**Version**: 28.0.1
+**Version**: 28.0.2
 **Last Updated**: 2026-07-08
 
 ---
@@ -382,7 +382,7 @@ pub struct ProtocolRelationKind(RelationKind);
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 28.0.1 | 2026-06-25 | Document the body-shape descriptor types + snapshot V15 (`ShapeDescriptor`, `CfBucket`, `SHAPE_SCHEMA_VERSION`) |
-| 28.0.1 | 2026-03-10 | Bump schema doc version to match current sqry release |
+| 28.0.2 | 2026-06-25 | Document the body-shape descriptor types + snapshot V15 (`ShapeDescriptor`, `CfBucket`, `SHAPE_SCHEMA_VERSION`) |
+| 28.0.2 | 2026-03-10 | Bump schema doc version to match current sqry release |
 | 4.9.3 | 2026-03-03 | Align version with sqry release, verify accuracy |
 | 2.10.0 | 2026-01-18 | Initial schema module creation |

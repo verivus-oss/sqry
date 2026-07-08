@@ -179,8 +179,9 @@ describe("binaryDownloader", () => {
 
       try {
         const result = mod.detectPlatform();
-        expect(result.asset).to.equal("sqry-linux-x86_64");
+        expect(result.asset).to.equal("sqry-linux-x86_64-musl");
         expect(result.binaryName).to.equal("sqry");
+        expect(result.archive).to.equal(undefined);
       } finally {
         if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
         if (origArch) Object.defineProperty(process, "arch", origArch);
@@ -197,8 +198,9 @@ describe("binaryDownloader", () => {
 
       try {
         const result = mod.detectPlatform();
-        expect(result.asset).to.equal("sqry-windows-x86_64.exe");
+        expect(result.asset).to.equal("sqry-{version}-windows-x86_64.zip");
         expect(result.binaryName).to.equal("sqry.exe");
+        expect(result.archive).to.deep.equal({ format: "zip", memberBinary: "sqry.exe" });
       } finally {
         if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
         if (origArch) Object.defineProperty(process, "arch", origArch);
@@ -251,12 +253,57 @@ describe("binaryDownloader", () => {
 
       try {
         const result = mod.detectPlatform();
-        expect(result.asset).to.equal("sqry-linux-arm64");
+        expect(result.asset).to.equal("sqry-linux-arm64-musl");
         expect(result.binaryName).to.equal("sqry");
+        expect(result.archive).to.equal(undefined);
       } finally {
         if (origPlatform) Object.defineProperty(process, "platform", origPlatform);
         if (origArch) Object.defineProperty(process, "arch", origArch);
       }
+    });
+  });
+
+  describe("extractArchiveMembers()", () => {
+    let tmpDir: string;
+    beforeEach(() => { tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "sqry-zip-")); });
+    afterEach(() => { fs.rmSync(tmpDir, { recursive: true, force: true }); });
+
+    it("extracts the launch binary + DLLs and skips other executables", () => {
+      const { zipSync } = require("fflate");
+      const enc = (s: string) => new TextEncoder().encode(s);
+      const zipped = zipSync({
+        "sqry.exe": enc("SQRY-BINARY"),
+        "libstdc++-6.dll": enc("STDCPP"),
+        "libgcc_s_seh-1.dll": enc("GCC"),
+        "libwinpthread-1.dll": enc("PTHREAD"),
+        "sqry-mcp.exe": enc("MCP-BINARY"),   // sibling exe: must be skipped
+      });
+      const zipPath = path.join(tmpDir, "artifact.zip");
+      fs.writeFileSync(zipPath, Buffer.from(zipped));
+      const dest = path.join(tmpDir, "out");
+      fs.mkdirSync(dest);
+      const { channel } = createOutputChannel();
+
+      const mod = loadModule();
+      mod.extractArchiveMembers(zipPath, dest, "sqry.exe", channel);
+
+      const written = fs.readdirSync(dest).sort();
+      expect(written).to.deep.equal([
+        "libgcc_s_seh-1.dll", "libstdc++-6.dll", "libwinpthread-1.dll", "sqry.exe",
+      ]);
+      expect(fs.readFileSync(path.join(dest, "sqry.exe"), "utf-8")).to.equal("SQRY-BINARY");
+      expect(fs.existsSync(path.join(dest, "sqry-mcp.exe"))).to.equal(false);
+    });
+
+    it("throws when the archive lacks the expected binary", () => {
+      const { zipSync } = require("fflate");
+      const zipped = zipSync({ "libstdc++-6.dll": new TextEncoder().encode("x") });
+      const zipPath = path.join(tmpDir, "artifact.zip");
+      fs.writeFileSync(zipPath, Buffer.from(zipped));
+      const { channel } = createOutputChannel();
+      const mod = loadModule();
+      expect(() => mod.extractArchiveMembers(zipPath, tmpDir, "sqry.exe", channel))
+        .to.throw(/did not contain the expected binary/);
     });
   });
 

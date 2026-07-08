@@ -4,6 +4,7 @@ import * as https from "node:https";
 import * as path from "node:path";
 import * as url from "node:url";
 import * as vscode from "vscode";
+import { unzipSync } from "fflate";
 
 const GITHUB_RELEASE_BASE = "https://github.com/verivus-oss/sqry/releases/download";
 const OIDC_ISSUER = "https://token.actions.githubusercontent.com";
@@ -19,8 +20,23 @@ const ATTESTATION_BUNDLE_NAMES = ["release-artifacts.attestation.json"] as const
 class ReleaseAssetUnavailableError extends Error {}
 
 export interface PlatformInfo {
+  /**
+   * Release asset to download. May contain the literal `{version}` token, which
+   * the download orchestrator substitutes with the effective version (the
+   * Windows zip is named `sqry-<version>-windows-x86_64.zip`).
+   */
   asset: string;
+  /** The binary that actually gets launched (`sqry` / `sqry.exe`). */
   binaryName: string;
+  /**
+   * When set, `asset` is an archive to download+verify+extract rather than a
+   * bare binary. `memberBinary` is the launch binary inside the archive; all
+   * `.dll` members are extracted alongside it so the binary is self-contained.
+   */
+  archive?: {
+    format: "zip";
+    memberBinary: string;
+  };
 }
 
 export interface VersionInfo {
@@ -116,14 +132,24 @@ export function detectPlatform(): PlatformInfo {
   const platform = process.platform;
   const arch = process.arch;
 
+  // Linux: use the fully static musl builds so the binary runs on any distro
+  // (any glibc version, and musl distros like Alpine) without a preflight
+  // failure from a missing/incompatible libc.
   if (platform === "linux" && arch === "x64") {
-    return { asset: "sqry-linux-x86_64", binaryName: "sqry" };
+    return { asset: "sqry-linux-x86_64-musl", binaryName: "sqry" };
   }
   if (platform === "linux" && arch === "arm64") {
-    return { asset: "sqry-linux-arm64", binaryName: "sqry" };
+    return { asset: "sqry-linux-arm64-musl", binaryName: "sqry" };
   }
+  // Windows: the bare exe depends on MinGW runtime DLLs (libstdc++-6.dll,
+  // libgcc_s_seh-1.dll, libwinpthread-1.dll) that a clean machine does not
+  // have. The release zip bundles those DLLs, so download and extract it.
   if (platform === "win32" && arch === "x64") {
-    return { asset: "sqry-windows-x86_64.exe", binaryName: "sqry.exe" };
+    return {
+      asset: "sqry-{version}-windows-x86_64.zip",
+      binaryName: "sqry.exe",
+      archive: { format: "zip", memberBinary: "sqry.exe" },
+    };
   }
   if (platform === "darwin" && arch === "arm64") {
     return { asset: "sqry-macos-arm64", binaryName: "sqry" };
@@ -815,6 +841,40 @@ async function findRollbackBinary(storageUri: vscode.Uri, currentVersion: string
 }
 
 /**
+ * Extract the launch binary and its bundled runtime DLLs from a verified
+ * archive into `destDir` (flattened). Only the member binary and `.dll` files
+ * are written; the other bundled executables are skipped to save disk.
+ */
+export function extractArchiveMembers(
+  archivePath: string,
+  destDir: string,
+  memberBinary: string,
+  outputChannel: vscode.OutputChannel,
+): void {
+  const entries = unzipSync(new Uint8Array(fs.readFileSync(archivePath)));
+  let wroteBinary = false;
+  for (const [name, content] of Object.entries(entries)) {
+    if (content.length === 0) {
+      continue; // directory entry
+    }
+    const base = path.basename(name);
+    const isBinary = base === memberBinary;
+    const isDll = base.toLowerCase().endsWith(".dll");
+    if (!isBinary && !isDll) {
+      continue;
+    }
+    fs.writeFileSync(path.join(destDir, base), Buffer.from(content));
+    if (isBinary) {
+      wroteBinary = true;
+    }
+  }
+  if (!wroteBinary) {
+    throw new Error(`Archive did not contain the expected binary "${memberBinary}".`);
+  }
+  outputChannel.appendLine(`[sqry] Extracted ${memberBinary} + bundled DLLs from archive`);
+}
+
+/**
  * Main download orchestrator. Downloads, verifies, and installs the sqry binary.
  * Returns the path to the installed binary.
  */
@@ -839,7 +899,13 @@ export async function downloadBinary(
     for (const effectiveVersion of versionCandidates) {
       const versionDir = path.join(storageUri.fsPath, "bin", `v${effectiveVersion}`);
       const finalBinaryPath = path.join(versionDir, platformInfo.binaryName);
-      const tmpBinaryPath = `${finalBinaryPath}.tmp`;
+      // Resolve the asset name (the Windows zip embeds the version) and decide
+      // whether we download a bare binary or an archive to verify+extract.
+      const assetName = platformInfo.asset.replace("{version}", effectiveVersion);
+      const isArchive = platformInfo.archive !== undefined;
+      const tmpDownloadPath = isArchive
+        ? path.join(versionDir, "artifact.tmp")
+        : `${finalBinaryPath}.tmp`;
       const tmpBundlePath = path.join(versionDir, "attestation.tmp");
       const tmpChecksumPath = path.join(versionDir, "checksums.tmp");
 
@@ -869,14 +935,14 @@ export async function downloadBinary(
         outputChannel.appendLine(`[sqry] Parsed checksums from ${checksumAssetName}`);
 
         // Step 2: Parse expected hash
-        const expectedHash = parseChecksumForAsset(checksumContent, platformInfo.asset);
-        outputChannel.appendLine(`[sqry] Expected SHA256 for ${platformInfo.asset}: ${expectedHash}`);
+        const expectedHash = parseChecksumForAsset(checksumContent, assetName);
+        outputChannel.appendLine(`[sqry] Expected SHA256 for ${assetName}: ${expectedHash}`);
 
-        // Step 3: Download binary with progress
-        outputChannel.appendLine(`[sqry] Downloading binary: ${platformInfo.asset}`);
+        // Step 3: Download the asset with progress
+        outputChannel.appendLine(`[sqry] Downloading: ${assetName}`);
         await downloadWithProgress(
-          `${releaseBase}/${platformInfo.asset}`,
-          tmpBinaryPath,
+          `${releaseBase}/${assetName}`,
+          tmpDownloadPath,
           (downloaded, total) => {
             const pct = Math.round((downloaded / total) * 100);
             outputChannel.appendLine(`[sqry] Download progress: ${pct}%`);
@@ -884,12 +950,12 @@ export async function downloadBinary(
           cancellationToken,
         );
 
-        // Step 4: Verify SHA256
+        // Step 4: Verify SHA256 (of the downloaded asset: binary or archive)
         outputChannel.appendLine("[sqry] Verifying SHA256 checksum...");
         try {
-          await verifySha256(tmpBinaryPath, expectedHash);
+          await verifySha256(tmpDownloadPath, expectedHash);
         } catch (err) {
-          cleanupFile(tmpBinaryPath);
+          cleanupFile(tmpDownloadPath);
           throw err;
         }
         outputChannel.appendLine("[sqry] SHA256 checksum verified");
@@ -897,7 +963,7 @@ export async function downloadBinary(
         // Step 5: Download attestation bundle
         const bundleAssetName = await downloadReleaseAsset(
           releaseBase,
-          getBundleAssetCandidates(platformInfo.asset),
+          getBundleAssetCandidates(assetName),
           tmpBundlePath,
           outputChannel,
           "attestation bundle",
@@ -910,22 +976,39 @@ export async function downloadBinary(
         outputChannel.appendLine("[sqry] Verifying Cosign signature bundle...");
         try {
           await verifyCosignBundle(
-            tmpBinaryPath,
+            tmpDownloadPath,
             tmpBundlePath,
             effectiveVersion,
             outputChannel,
             storageUri,
-            platformInfo.asset,
+            assetName,
             expectedHash,
           );
         } catch (err) {
-          cleanupFile(tmpBinaryPath);
+          cleanupFile(tmpDownloadPath);
           cleanupFile(tmpBundlePath);
           throw err;
         }
 
-        // Step 7: Atomic rename to final paths
-        fs.renameSync(tmpBinaryPath, finalBinaryPath);
+        // Step 7: Install to final paths. For an archive, extract the launch
+        // binary + bundled DLLs; for a bare binary, atomically rename it.
+        if (isArchive && platformInfo.archive) {
+          try {
+            extractArchiveMembers(
+              tmpDownloadPath,
+              versionDir,
+              platformInfo.archive.memberBinary,
+              outputChannel,
+            );
+          } catch (err) {
+            cleanupFile(tmpDownloadPath);
+            cleanupFile(tmpBundlePath);
+            throw err;
+          }
+          cleanupFile(tmpDownloadPath);
+        } else {
+          fs.renameSync(tmpDownloadPath, finalBinaryPath);
+        }
         fs.renameSync(tmpBundlePath, finalBundlePath);
 
         // Step 8: Set executable permissions on unix
@@ -974,7 +1057,7 @@ export async function downloadBinary(
         outputChannel.appendLine(`[sqry] Binary installed successfully at ${finalBinaryPath}`);
         return finalBinaryPath;
       } catch (error) {
-        cleanupFile(tmpBinaryPath);
+        cleanupFile(tmpDownloadPath);
         cleanupFile(tmpBundlePath);
         cleanupFile(tmpChecksumPath);
 

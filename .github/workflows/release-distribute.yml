@@ -445,6 +445,66 @@ jobs:
             fi
           done
 
+      # Phase 6.1b: Developer ID sign the macOS binaries. The build runner is
+      # Linux, so we use rcodesign (apple-codesign), which produces a real
+      # Developer ID Application signature with hardened runtime without a Mac.
+      # Cert + key are pulled from Key Vault via the release SP (OIDC), so no
+      # Apple secret is stored in the public repo. Signing happens before the
+      # smoke tests, checksums, and attestation so all of them cover the signed
+      # bytes. Skips cleanly if the signing identity is not configured.
+      # NOTE: notarization is a separate follow-up (needs an App Store Connect
+      # API key for rcodesign, or notarytool on the macos-native-smoke runner
+      # with the apple-notarize-password).
+      - name: Azure login for macOS signing (release SP, OIDC)
+        id: macos-sign-login
+        if: vars.VSCE_PUBLISHER_CLIENT_ID != ''
+        continue-on-error: true
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ vars.VSCE_PUBLISHER_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Developer ID sign macOS binaries (rcodesign)
+        if: steps.macos-sign-login.outcome == 'success'
+        env:
+          KV_NAME: verivus-dev-secrets-kv
+          RCODESIGN_VERSION: "0.29.0"
+        run: |
+          set -euo pipefail
+          workdir="${RUNNER_TEMP}/macos-sign"
+          mkdir -p "$workdir"
+          trap 'rm -rf "$workdir"' EXIT
+
+          # Developer ID Application cert (DER) + private key (PEM) from Key Vault
+          az keyvault secret show --vault-name "$KV_NAME" --name apple-devid-application-cert --query value -o tsv \
+            | base64 -d | openssl x509 -inform DER -out "$workdir/cert.pem"
+          az keyvault secret show --vault-name "$KV_NAME" --name apple-devid-application-key --query value -o tsv \
+            > "$workdir/key.pem"
+          cat "$workdir/cert.pem" "$workdir/key.pem" > "$workdir/combined.pem"
+
+          # rcodesign (pinned), musl static
+          curl -fsSL -o "$workdir/rcs.tar.gz" \
+            "https://github.com/indygreg/apple-platform-rs/releases/download/apple-codesign/${RCODESIGN_VERSION}/apple-codesign-${RCODESIGN_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          tar xzf "$workdir/rcs.tar.gz" -C "$workdir"
+          rcs="$(find "$workdir" -name rcodesign -type f | head -1)"
+          chmod +x "$rcs"
+
+          signed=0
+          for bin in dist/*-macos-x86_64 dist/*-macos-arm64; do
+            [ -f "$bin" ] || continue
+            echo "Signing $bin"
+            "$rcs" sign --pem-source "$workdir/combined.pem" --code-signature-flags runtime "$bin" "$bin.signed"
+            mv "$bin.signed" "$bin"
+            "$rcs" print-signature-info "$bin" | grep -iE 'CodeSignatureFlags|team_name' | head -2 || true
+            signed=$((signed + 1))
+          done
+          echo "Developer ID signed $signed macOS binaries"
+          if [ "$signed" -eq 0 ]; then
+            echo "FATAL: no macOS binaries found to sign" >&2
+            exit 1
+          fi
+
       # Phase 6.2: Smoke tests
       - name: Smoke test Linux x86_64
         run: |
@@ -735,6 +795,51 @@ jobs:
           "$binary" --version
           "$binary" index --help >/dev/null
 
+      # Notarize the (already Developer ID signed) macOS binaries with notarytool
+      # on the GitHub-hosted macOS runner. notarytool submits to Apple's cloud
+      # notary service, which is architecture independent, so this runs ONCE on
+      # the arm64 leg and notarizes BOTH the x86_64 and arm64 binaries. Standalone
+      # Mach-O binaries cannot be stapled, so notarization registers each binary's
+      # cdhash with Apple and Gatekeeper verifies online; the uploaded bytes are
+      # unchanged. The runner is ephemeral, so the Apple ID + app-specific
+      # password + team id are fetched fresh from Key Vault via the release SP
+      # (OIDC); no Apple credential is stored in the repo. Skips if unconfigured.
+      - name: Azure login for macOS notarization (release SP, OIDC)
+        id: notarize-login
+        if: vars.VSCE_PUBLISHER_CLIENT_ID != '' && matrix.suffix == 'macos-arm64'
+        continue-on-error: true
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ vars.VSCE_PUBLISHER_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Notarize macOS binaries (notarytool)
+        if: steps.notarize-login.outcome == 'success' && matrix.suffix == 'macos-arm64'
+        shell: bash
+        env:
+          KV_NAME: verivus-dev-secrets-kv
+        run: |
+          set -euo pipefail
+          apple_id="$(az keyvault secret show --vault-name "$KV_NAME" --name apple-developer-email --query value -o tsv)"
+          apple_team="$(az keyvault secret show --vault-name "$KV_NAME" --name apple-team-id --query value -o tsv)"
+          apple_pw="$(az keyvault secret show --vault-name "$KV_NAME" --name apple-notarize-password --query value -o tsv)"
+          bins=()
+          for bin in dist/*-macos-x86_64 dist/*-macos-arm64; do
+            [ -f "$bin" ] && bins+=("$bin")
+          done
+          if [ "${#bins[@]}" -eq 0 ]; then
+            echo "FATAL: no macOS binaries found to notarize" >&2
+            exit 1
+          fi
+          zip_path="${RUNNER_TEMP}/notarize-macos.zip"
+          /usr/bin/zip -j "$zip_path" "${bins[@]}"
+          echo "Submitting ${bins[*]} to Apple notary service..."
+          xcrun notarytool submit "$zip_path" \
+            --apple-id "$apple_id" --password "$apple_pw" --team-id "$apple_team" \
+            --wait --timeout 20m
+          echo "Notarized: ${bins[*]}"
+
   publish-distribution:
     name: Publish Distribution
     needs: [build-release-artifacts, windows-native-smoke, macos-native-smoke]
@@ -917,20 +1022,33 @@ jobs:
           set -euo pipefail
           cp "${{ steps['attest-release-assets'].outputs['bundle-path'] }}" dist/release-artifacts.attestation.json
 
+      # Authenticate to the Marketplace as the sqry-vscode-publisher service
+      # principal via GitHub OIDC (workload identity federation). No PAT: the SP
+      # is a Contributor member of the 'verivus' publisher, and vsce
+      # authenticates with --azure-credential. Skips cleanly if the identity is
+      # not configured.
+      - name: Azure login for marketplace publish (service principal, OIDC)
+        id: vsce-azure-login
+        if: vars.VSCE_PUBLISHER_CLIENT_ID != ''
+        continue-on-error: true
+        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
+        with:
+          client-id: ${{ vars.VSCE_PUBLISHER_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+
       - name: Publish VS Code extension to marketplace
         id: publish-vscode
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
         run: |
           set -euo pipefail
-          if [ -z "$VSCE_PAT" ]; then
-            echo "VSCE_PAT not set — skipping marketplace publish (manual upload required)"
-            echo "status=skipped_missing_token" >> "$GITHUB_OUTPUT"
+          if [ "${{ steps.vsce-azure-login.outcome }}" != "success" ]; then
+            echo "Marketplace identity unavailable (VSCE_PUBLISHER_CLIENT_ID unset or azure/login failed), skipping marketplace publish (manual upload required)"
+            echo "status=skipped_no_identity" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           cd sqry-vscode
           npm ci
-          if ! OUTPUT=$(npx vsce publish --packagePath "../dist/sqry-vscode-${VERSION}.vsix" 2>&1); then
+          if ! OUTPUT=$(npx vsce publish --azure-credential --packagePath "../dist/sqry-vscode-${VERSION}.vsix" 2>&1); then
             if echo "$OUTPUT" | grep -qi "already exists\|version.*already"; then
               echo "VS Code extension version already published — skipping"
               echo "status=already_published" >> "$GITHUB_OUTPUT"

@@ -9,8 +9,8 @@ rust-version.workspace = true
 description = "Go language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "28.0.1", path = "../sqry-core" }
-sqry-lang-support = { version = "28.0.1", path = "../sqry-lang-support" }
+sqry-core = { version = "28.0.2", path = "../sqry-core" }
+sqry-lang-support = { version = "28.0.2", path = "../sqry-lang-support" }
 anyhow.workspace = true
 log.workspace = true
 smallvec.workspace = true
