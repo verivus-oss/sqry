@@ -451,36 +451,48 @@ jobs:
       # Cert + key are pulled from Key Vault via the release SP (OIDC), so no
       # Apple secret is stored in the public repo. Signing happens before the
       # smoke tests, checksums, and attestation so all of them cover the signed
-      # bytes. Skips cleanly if the signing identity is not configured.
-      # NOTE: notarization is a separate follow-up (needs an App Store Connect
-      # API key for rcodesign, or notarytool on the macos-native-smoke runner
-      # with the apple-notarize-password).
-      - name: Azure login for macOS signing (release SP, OIDC)
-        id: macos-sign-login
+      # bytes. Best-effort (continue-on-error): a Key Vault or signing hiccup
+      # degrades to unsigned binaries rather than blocking the release.
+      # Notarization runs later on the macos-native-smoke runner.
+      - name: Developer ID sign macOS binaries (rcodesign)
         if: vars.VSCE_PUBLISHER_CLIENT_ID != ''
         continue-on-error: true
-        uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
-        with:
-          client-id: ${{ vars.VSCE_PUBLISHER_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          allow-no-subscriptions: true
-
-      - name: Developer ID sign macOS binaries (rcodesign)
-        if: steps.macos-sign-login.outcome == 'success'
         env:
           KV_NAME: verivus-dev-secrets-kv
           RCODESIGN_VERSION: "0.29.0"
+          AZURE_CLIENT_ID: ${{ vars.VSCE_PUBLISHER_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
         run: |
           set -euo pipefail
           workdir="${RUNNER_TEMP}/macos-sign"
           mkdir -p "$workdir"
           trap 'rm -rf "$workdir"' EXIT
 
+          # Obtain a Key Vault token via GitHub OIDC federation WITHOUT the az CLI
+          # (the self-hosted Linux runner's az is unreliable). Exchange the GitHub
+          # OIDC JWT for an Entra token using the federated client-assertion flow.
+          gh_jwt="$(curl -sS "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=api://AzureADTokenExchange" \
+            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])')"
+          kv_token="$(curl -sS -X POST "https://login.microsoftonline.com/${AZURE_TENANT_ID}/oauth2/v2.0/token" \
+            -d "client_id=${AZURE_CLIENT_ID}" \
+            -d "scope=https://vault.azure.net/.default" \
+            -d "grant_type=client_credentials" \
+            -d "client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer" \
+            --data-urlencode "client_assertion=${gh_jwt}" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin).get("access_token",""))')"
+          if [ -z "$kv_token" ]; then
+            echo "WARNING: could not obtain a Key Vault token; skipping macOS signing (binaries ship unsigned)"
+            exit 0
+          fi
+
           # Developer ID Application cert (DER) + private key (PEM) from Key Vault
-          az keyvault secret show --vault-name "$KV_NAME" --name apple-devid-application-cert --query value -o tsv \
+          kv="https://${KV_NAME}.vault.azure.net/secrets"
+          curl -sS -H "Authorization: Bearer $kv_token" "${kv}/apple-devid-application-cert?api-version=7.4" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])' \
             | base64 -d | openssl x509 -inform DER -out "$workdir/cert.pem"
-          az keyvault secret show --vault-name "$KV_NAME" --name apple-devid-application-key --query value -o tsv \
-            > "$workdir/key.pem"
+          curl -sS -H "Authorization: Bearer $kv_token" "${kv}/apple-devid-application-key?api-version=7.4" \
+            | python3 -c 'import sys,json; print(json.load(sys.stdin)["value"])' > "$workdir/key.pem"
           cat "$workdir/cert.pem" "$workdir/key.pem" > "$workdir/combined.pem"
 
           # rcodesign (pinned), musl static
@@ -814,8 +826,12 @@ jobs:
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           allow-no-subscriptions: true
 
+      # Best-effort: a notary outage or a pending Apple agreement must not block
+      # the whole release (which would skip publish-distribution). The binaries
+      # are still Developer ID signed either way.
       - name: Notarize macOS binaries (notarytool)
         if: steps.notarize-login.outcome == 'success' && matrix.suffix == 'macos-arm64'
+        continue-on-error: true
         shell: bash
         env:
           KV_NAME: verivus-dev-secrets-kv
