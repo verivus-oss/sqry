@@ -30,10 +30,22 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build-release-artifacts:
-    name: Build Release Artifacts
-    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
-    timeout-minutes: 60
+  # Public CI and Stage 6 builds share the sole public workhorse2 runner.
+  # Poll on a hosted runner so the gate cannot deadlock the CI it checks.
+  check-public-ci:
+    name: Check Public CI
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      tag: ${{ steps.context.outputs.tag }}
+      version: ${{ steps.context.outputs.version }}
+      expected_sha: ${{ steps.context.outputs.expected_sha }}
+      staged_origin: ${{ steps.context.outputs.staged_origin }}
+      staged_sha: ${{ steps.context.outputs.staged_sha }}
+      expected_digest: ${{ steps.context.outputs.expected_digest }}
     env:
       TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag }}
       VERSION: ${{ github.event.client_payload.version || '' }}
@@ -41,6 +53,312 @@ jobs:
       STAGED_ORIGIN: ${{ github.event.client_payload.staged_origin || '' }}
       STAGED_SHA: ${{ github.event.client_payload.staged_sha || '' }}
       EXPECTED_DIGEST: ${{ github.event.client_payload.sanitized_tree_sha256 || '' }}
+    steps:
+      - name: Resolve inputs from ledger (manual trigger)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          [[ -n "$TAG" ]] || { echo "FATAL: tag input is required for workflow_dispatch" >&2; exit 1; }
+          ledger_dir="$RUNNER_TEMP/dispatch-ledger"
+          mkdir -p "$ledger_dir"
+          gh release download "$TAG" --repo verivus-oss/sqry --dir "$ledger_dir" --pattern 'release-ledger-*.json'
+          ledger_file=$(find "$ledger_dir" -name 'release-ledger-*.json' -type f | head -1)
+          [[ -n "$ledger_file" && -f "$ledger_file" ]] || { echo "FATAL: no release ledger found for tag $TAG" >&2; exit 1; }
+          dispatch=$(jq -r '.stages.stage_5_publish.dispatch_payload // empty' "$ledger_file")
+          [[ -n "$dispatch" && "$dispatch" != null ]] || { echo "FATAL: stage_5_publish.dispatch_payload missing from ledger for $TAG" >&2; exit 1; }
+          {
+            echo "VERSION=$(jq -r '.stages.stage_5_publish.dispatch_payload.version' "$ledger_file")"
+            echo "EXPECTED_SHA=$(jq -r '.stages.stage_5_publish.dispatch_payload.sha' "$ledger_file")"
+            echo "STAGED_ORIGIN=$(jq -r '.stages.stage_5_publish.dispatch_payload.staged_origin' "$ledger_file")"
+            echo "STAGED_SHA=$(jq -r '.stages.stage_5_publish.dispatch_payload.staged_sha' "$ledger_file")"
+            echo "EXPECTED_DIGEST=$(jq -r '.stages.stage_5_publish.dispatch_payload.sanitized_tree_sha256' "$ledger_file")"
+          } >> "$GITHUB_ENV"
+          rm -rf "$ledger_dir"
+
+      - name: Resolve and acknowledge public CI gate
+        id: context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          for field in VERSION TAG EXPECTED_SHA STAGED_ORIGIN STAGED_SHA EXPECTED_DIGEST; do
+            [[ -n "${!field}" ]] || { echo "FATAL: missing $field in Stage 6 context" >&2; exit 1; }
+          done
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "FATAL: expected public SHA is not a full lowercase Git SHA" >&2; exit 1; }
+          [[ "$STAGED_ORIGIN" == verivusai-open/sqry ]] || { echo "FATAL: invalid staged_origin" >&2; exit 1; }
+
+          ledger_dir="$RUNNER_TEMP/public-ci-gate-ledger"
+          mkdir -p "$ledger_dir"
+          gh release download "$TAG" --repo verivus-oss/sqry --dir "$ledger_dir" --pattern "release-ledger-v${VERSION}.json"
+          ledger_path="$ledger_dir/release-ledger-v${VERSION}.json"
+          [[ -f "$ledger_path" ]] || { echo "FATAL: release ledger asset missing for $TAG" >&2; exit 1; }
+          [[ "$(jq -r '.schema_version // 0' "$ledger_path")" -ge 3 ]] || { echo "FATAL: unsupported ledger schema" >&2; exit 1; }
+          [[ "$(jq -r '.version // empty' "$ledger_path")" == "$VERSION" ]] || { echo "FATAL: ledger version mismatch" >&2; exit 1; }
+          [[ "$(jq -r '.release_path // empty' "$ledger_path")" == staged ]] || { echo "FATAL: release ledger is not staged" >&2; exit 1; }
+          [[ "$(jq -r '.stages.stage_5_publish.status // empty' "$ledger_path")" == completed ]] || { echo "FATAL: Stage 5 is not completed" >&2; exit 1; }
+          [[ "$(jq -r '.stages.stage_5_publish.staged_origin // empty' "$ledger_path")" == verivusai-open/sqry ]] || { echo "FATAL: ledger staged origin mismatch" >&2; exit 1; }
+          [[ "$(jq -r '.stages.stage_5_publish.dispatch_payload.tag // empty' "$ledger_path")" == "$TAG" ]] || {
+            echo "FATAL: Stage 5 dispatch payload tag mismatch" >&2
+            exit 1
+          }
+          for field in version sha staged_origin staged_sha sanitized_tree_sha256; do
+            case "$field" in
+              version) expected="$VERSION" ;;
+              sha) expected="$EXPECTED_SHA" ;;
+              staged_origin) expected="$STAGED_ORIGIN" ;;
+              staged_sha) expected="$STAGED_SHA" ;;
+              sanitized_tree_sha256) expected="$EXPECTED_DIGEST" ;;
+            esac
+            actual=$(jq -r --arg field "$field" '.stages.stage_5_publish.dispatch_payload[$field] // empty' "$ledger_path")
+            [[ "$actual" == "$expected" ]] || { echo "FATAL: Stage 5 dispatch payload $field mismatch" >&2; exit 1; }
+          done
+          [[ "$(jq -r '.stages.stage_5_publish.public_commit_sha // empty' "$ledger_path")" == "$EXPECTED_SHA" ]] || {
+            echo "FATAL: ledger public_commit_sha mismatch" >&2
+            exit 1
+          }
+          stage6_status=$(jq -r '.stages.stage_6_distribute.status // empty' "$ledger_path")
+          case "$stage6_status" in
+            pending)
+              queued_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+              deadline_at=$(date -u -d '+30 minutes' +"%Y-%m-%dT%H:%M:%SZ")
+              gate_receipt_run_id="$GITHUB_RUN_ID"
+              gate_run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+              tmp=$(mktemp)
+              jq --arg tag "$TAG" --arg version "$VERSION" --arg expected_sha "$EXPECTED_SHA" \
+                --arg gate_run_id "$GITHUB_RUN_ID" --arg gate_run_attempt "$GITHUB_RUN_ATTEMPT" \
+                --arg gate_run_url "$gate_run_url" --arg queued_at "$queued_at" --arg deadline_at "$deadline_at" '
+                  .stages.stage_6_distribute.status = "waiting_public_ci" |
+                  .stages.stage_6_distribute.queued_at = $queued_at |
+                  .stages.stage_6_distribute.public_ci_gate = {
+                    status: "waiting", tag: $tag, version: $version, expected_sha: $expected_sha,
+                    workflow: "ci.yml", event: "push", branch: "main",
+                    stage6_run_id: $gate_run_id, stage6_run_attempt: $gate_run_attempt,
+                    stage6_run_url: $gate_run_url, queued_at: $queued_at, deadline_at: $deadline_at
+                  }
+                ' "$ledger_path" > "$tmp"
+              mv "$tmp" "$ledger_path"
+              gh release upload "$TAG" "$ledger_path" --repo verivus-oss/sqry --clobber
+              echo "Acknowledged new Stage 6 public CI gate for SHA $EXPECTED_SHA"
+              ;;
+            waiting_public_ci)
+              gate_status=$(jq -r '.stages.stage_6_distribute.public_ci_gate.status // empty' "$ledger_path")
+              gate_tag=$(jq -r '.stages.stage_6_distribute.public_ci_gate.tag // empty' "$ledger_path")
+              gate_version=$(jq -r '.stages.stage_6_distribute.public_ci_gate.version // empty' "$ledger_path")
+              gate_sha=$(jq -r '.stages.stage_6_distribute.public_ci_gate.expected_sha // empty' "$ledger_path")
+              gate_workflow=$(jq -r '.stages.stage_6_distribute.public_ci_gate.workflow // empty' "$ledger_path")
+              gate_event=$(jq -r '.stages.stage_6_distribute.public_ci_gate.event // empty' "$ledger_path")
+              gate_branch=$(jq -r '.stages.stage_6_distribute.public_ci_gate.branch // empty' "$ledger_path")
+              gate_receipt_run_id=$(jq -r '.stages.stage_6_distribute.public_ci_gate.stage6_run_id // empty' "$ledger_path")
+              gate_run_url=$(jq -r '.stages.stage_6_distribute.public_ci_gate.stage6_run_url // empty' "$ledger_path")
+              queued_at=$(jq -r '.stages.stage_6_distribute.public_ci_gate.queued_at // empty' "$ledger_path")
+              deadline_at=$(jq -r '.stages.stage_6_distribute.public_ci_gate.deadline_at // empty' "$ledger_path")
+              [[ "$gate_status" == waiting || "$gate_status" == passed ]] || {
+                echo "FATAL: existing public CI gate has invalid status '$gate_status'" >&2
+                exit 1
+              }
+              [[ "$gate_tag" == "$TAG" && "$gate_version" == "$VERSION" && "$gate_sha" == "$EXPECTED_SHA" \
+                && "$gate_workflow" == ci.yml && "$gate_event" == push && "$gate_branch" == main ]] || {
+                echo "FATAL: existing public CI gate does not match this immutable Stage 5 transaction" >&2
+                exit 1
+              }
+              [[ -n "$gate_receipt_run_id" && -n "$gate_run_url" && -n "$queued_at" && -n "$deadline_at" ]] || {
+                echo "FATAL: existing public CI gate receipt is incomplete" >&2
+                exit 1
+              }
+              if [[ "$gate_status" == passed ]]; then
+                gate_ci_run_id=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_run_id // empty' "$ledger_path")
+                gate_ci_run_url=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_run_url // empty' "$ledger_path")
+                gate_ci_status=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_status // empty' "$ledger_path")
+                gate_ci_conclusion=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_conclusion // empty' "$ledger_path")
+                [[ -n "$gate_ci_run_id" && -n "$gate_ci_run_url" && "$gate_ci_status" == completed && "$gate_ci_conclusion" == success ]] || {
+                  echo "FATAL: existing public CI gate is passed without a successful CI receipt" >&2
+                  exit 1
+                }
+              fi
+              date -u -d "$deadline_at" +%s >/dev/null || {
+                echo "FATAL: existing public CI gate deadline is invalid" >&2
+                exit 1
+              }
+              # Same-tag workflow runs are serialized by the workflow concurrency group.
+              # A matching receipt is therefore safe to observe without overwriting it.
+              echo "Reusing matching Stage 6 public CI gate receipt from run $gate_receipt_run_id"
+              ;;
+            *)
+              echo "FATAL: Stage 6 is '$stage6_status', required pending or matching waiting_public_ci" >&2
+              exit 1
+              ;;
+          esac
+          for field in tag version expected_sha staged_origin staged_sha expected_digest; do
+            case "$field" in
+              tag) value="$TAG" ;;
+              version) value="$VERSION" ;;
+              expected_sha) value="$EXPECTED_SHA" ;;
+              staged_origin) value="$STAGED_ORIGIN" ;;
+              staged_sha) value="$STAGED_SHA" ;;
+              expected_digest) value="$EXPECTED_DIGEST" ;;
+            esac
+            echo "$field=$value" >> "$GITHUB_OUTPUT"
+          done
+          echo "ledger_path=$ledger_path" >> "$GITHUB_OUTPUT"
+          echo "gate_receipt_run_id=$gate_receipt_run_id" >> "$GITHUB_OUTPUT"
+          echo "gate_deadline_at=$deadline_at" >> "$GITHUB_OUTPUT"
+
+      - name: Check public CI gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LEDGER_PATH: ${{ steps.context.outputs.ledger_path }}
+          GATE_RECEIPT_RUN_ID: ${{ steps.context.outputs.gate_receipt_run_id }}
+          GATE_DEADLINE_AT: ${{ steps.context.outputs.gate_deadline_at }}
+        run: |
+          set -euo pipefail
+          repo=verivus-oss/sqry
+          max_attempts=120
+          sleep_seconds=15
+          ci_run_id=""
+          ci_run_url=""
+          ci_status=""
+          ci_conclusion=""
+
+          gate_status=$(jq -r '.stages.stage_6_distribute.public_ci_gate.status // empty' "$LEDGER_PATH")
+          ledger_gate_run_id=$(jq -r '.stages.stage_6_distribute.public_ci_gate.stage6_run_id // empty' "$LEDGER_PATH")
+          [[ "$ledger_gate_run_id" == "$GATE_RECEIPT_RUN_ID" ]] || {
+            echo "FATAL: public CI gate receipt identity changed before the gate could be checked" >&2
+            exit 1
+          }
+          if [[ "$gate_status" == passed ]]; then
+            ci_run_id=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_run_id // empty' "$LEDGER_PATH")
+            ci_run_url=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_run_url // empty' "$LEDGER_PATH")
+            ci_status=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_status // empty' "$LEDGER_PATH")
+            ci_conclusion=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_conclusion // empty' "$LEDGER_PATH")
+            [[ -n "$ci_run_id" && "$ci_status" == completed && "$ci_conclusion" == success && -n "$ci_run_url" ]] || {
+              echo "FATAL: matching public CI gate is marked passed without a successful CI receipt" >&2
+              exit 1
+            }
+            echo "[OK] Reused successful public CI gate receipt: $ci_run_url"
+            exit 0
+          fi
+          [[ "$gate_status" == waiting ]] || {
+            echo "FATAL: public CI gate has invalid status '$gate_status'" >&2
+            exit 1
+          }
+          deadline_epoch=$(date -u -d "$GATE_DEADLINE_AT" +%s) || {
+            echo "FATAL: public CI gate deadline is invalid" >&2
+            exit 1
+          }
+
+          persist_gate_state() {
+            local state="$1" reason="$2" tmp
+            tmp=$(mktemp)
+            jq --arg gate_run_id "$GATE_RECEIPT_RUN_ID" --arg observer_run_id "$GITHUB_RUN_ID" \
+              --arg state "$state" --arg reason "$reason" \
+              --arg ci_run_id "$ci_run_id" --arg ci_run_url "$ci_run_url" \
+              --arg ci_status "$ci_status" --arg ci_conclusion "$ci_conclusion" '
+                if (.stages.stage_6_distribute.status == "waiting_public_ci"
+                    and .stages.stage_6_distribute.public_ci_gate.stage6_run_id == $gate_run_id)
+                then
+                  if $state == "failed" then
+                    .stages.stage_6_distribute.status = "failed" |
+                    .stages.stage_6_distribute.failed_at = (now | todateiso8601) |
+                    .stages.stage_6_distribute.error = $reason
+                  else . end |
+                  .stages.stage_6_distribute.public_ci_gate.status = $state |
+                  .stages.stage_6_distribute.public_ci_gate.error = $reason |
+                  .stages.stage_6_distribute.public_ci_gate.ci_run_id = $ci_run_id |
+                  .stages.stage_6_distribute.public_ci_gate.ci_run_url = $ci_run_url |
+                  .stages.stage_6_distribute.public_ci_gate.ci_status = $ci_status |
+                  .stages.stage_6_distribute.public_ci_gate.ci_conclusion = $ci_conclusion |
+                  .stages.stage_6_distribute.public_ci_gate.last_observed_by_run_id = $observer_run_id |
+                  .stages.stage_6_distribute.public_ci_gate.updated_at = (now | todateiso8601)
+                else error("public CI gate receipt no longer belongs to this Stage 6 run")
+                end
+              ' "$LEDGER_PATH" > "$tmp"
+            mv "$tmp" "$LEDGER_PATH"
+            gh release upload "$TAG" "$LEDGER_PATH" --repo "$repo" --clobber
+          }
+
+          for attempt in $(seq 1 "$max_attempts"); do
+            if (( $(date -u +%s) >= deadline_epoch )); then
+              persist_gate_state failed public_ci_gate_timeout
+              echo "FATAL: public CI gate deadline elapsed before a successful CI receipt for $EXPECTED_SHA" >&2
+              exit 1
+            fi
+            response=$(gh api -X GET "repos/$repo/actions/workflows/ci.yml/runs" \
+              -f "head_sha=$EXPECTED_SHA" -f "event=push" -f "per_page=30")
+            run_json=$(jq -c --arg sha "$EXPECTED_SHA" --arg branch main '
+              [.workflow_runs[] | select(.head_sha == $sha) | select(.event == "push")
+              | select((.head_branch // "") == $branch)] | sort_by(.created_at) | last // empty
+            ' <<<"$response")
+            if [[ -n "$run_json" && "$run_json" != null ]]; then
+              ci_run_id=$(jq -r '.database_id // .id // empty' <<<"$run_json")
+              ci_run_url=$(jq -r '.html_url // empty' <<<"$run_json")
+              ci_status=$(jq -r '.status // empty' <<<"$run_json")
+              ci_conclusion=$(jq -r '.conclusion // empty' <<<"$run_json")
+              echo "Public CI gate: SHA=$EXPECTED_SHA run=${ci_run_url:-$ci_run_id} status=${ci_status:-unknown} conclusion=${ci_conclusion:-none}"
+              if [[ "$ci_status" == completed ]]; then
+                if [[ "$ci_conclusion" == success ]]; then
+                  persist_gate_state passed ""
+                  echo "[OK] public CI succeeded for $EXPECTED_SHA: ${ci_run_url:-run $ci_run_id}"
+                  exit 0
+                fi
+                reason=public_ci_gate_unsuccessful
+                [[ "$ci_conclusion" == cancelled ]] && reason=public_ci_gate_cancelled
+                persist_gate_state failed "$reason"
+                echo "FATAL: public CI completed with conclusion=${ci_conclusion:-none} for $EXPECTED_SHA: ${ci_run_url:-run $ci_run_id}" >&2
+                exit 1
+              fi
+            else
+              echo "Public CI gate: no ci.yml push run on main for $EXPECTED_SHA (attempt $attempt/$max_attempts)"
+            fi
+            [[ "$attempt" -eq "$max_attempts" ]] || sleep "$sleep_seconds"
+          done
+          persist_gate_state failed public_ci_gate_timeout
+          echo "FATAL: timed out waiting for successful public CI for $EXPECTED_SHA; last run=${ci_run_url:-none} status=${ci_status:-none} conclusion=${ci_conclusion:-none}" >&2
+          exit 1
+
+      - name: Persist interrupted public CI gate state
+        if: ${{ failure() || cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GATE_RECEIPT_RUN_ID: ${{ steps.context.outputs.gate_receipt_run_id }}
+        run: |
+          set -euo pipefail
+          [[ -n "$TAG" && -n "$VERSION" && -n "$EXPECTED_SHA" && -n "$GATE_RECEIPT_RUN_ID" ]] || exit 0
+          ledger_dir="$RUNNER_TEMP/interrupted-public-ci-gate-ledger"
+          mkdir -p "$ledger_dir"
+          gh release download "$TAG" --repo verivus-oss/sqry --dir "$ledger_dir" --pattern "release-ledger-v${VERSION}.json" || exit 0
+          ledger_path="$ledger_dir/release-ledger-v${VERSION}.json"
+          [[ -f "$ledger_path" ]] || exit 0
+          matching=$(jq -r --arg gate_run_id "$GATE_RECEIPT_RUN_ID" '
+            .stages.stage_6_distribute.status == "waiting_public_ci"
+            and .stages.stage_6_distribute.public_ci_gate.stage6_run_id == $gate_run_id
+          ' "$ledger_path")
+          [[ "$matching" == true ]] || exit 0
+          tmp=$(mktemp)
+          jq '
+            .stages.stage_6_distribute.status = "failed" |
+            .stages.stage_6_distribute.failed_at = (now | todateiso8601) |
+            .stages.stage_6_distribute.error = "public_ci_gate_interrupted" |
+            .stages.stage_6_distribute.public_ci_gate.status = "failed" |
+            .stages.stage_6_distribute.public_ci_gate.error = "public_ci_gate_interrupted" |
+            .stages.stage_6_distribute.public_ci_gate.interrupted_at = (now | todateiso8601)
+          ' "$ledger_path" > "$tmp"
+          mv "$tmp" "$ledger_path"
+          gh release upload "$TAG" "$ledger_path" --repo verivus-oss/sqry --clobber
+
+  build-release-artifacts:
+    name: Build Release Artifacts
+    needs: check-public-ci
+    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    timeout-minutes: 60
+    env:
+      TAG: ${{ needs.check-public-ci.outputs.tag }}
+      VERSION: ${{ needs.check-public-ci.outputs.version }}
+      EXPECTED_SHA: ${{ needs.check-public-ci.outputs.expected_sha }}
+      STAGED_ORIGIN: ${{ needs.check-public-ci.outputs.staged_origin }}
+      STAGED_SHA: ${{ needs.check-public-ci.outputs.staged_sha }}
+      EXPECTED_DIGEST: ${{ needs.check-public-ci.outputs.expected_digest }}
     steps:
       - name: Workspace wipe
         run: |
@@ -53,47 +371,7 @@ jobs:
           fi
           mkdir -p "$GITHUB_WORKSPACE"
 
-      # For workflow_dispatch, resolve all env vars from ledger before validation
-      - name: Resolve inputs from ledger (manual trigger)
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [[ -z "$TAG" ]]; then
-            echo "FATAL: tag input is required for workflow_dispatch" >&2
-            exit 1
-          fi
-
-          LEDGER_DIR="$RUNNER_TEMP/dispatch-ledger"
-          mkdir -p "$LEDGER_DIR"
-          gh release download "$TAG" \
-            --repo "verivus-oss/sqry" \
-            --dir "$LEDGER_DIR" \
-            --pattern "release-ledger-*.json"
-          LEDGER_FILE=$(find "$LEDGER_DIR" -name 'release-ledger-*.json' -type f | head -1)
-          if [[ -z "$LEDGER_FILE" || ! -f "$LEDGER_FILE" ]]; then
-            echo "FATAL: no release ledger found for tag $TAG" >&2
-            exit 1
-          fi
-
-          DISPATCH=$(jq -r '.stages.stage_5_publish.dispatch_payload // empty' "$LEDGER_FILE")
-          if [[ -z "$DISPATCH" || "$DISPATCH" == "null" ]]; then
-            echo "FATAL: stage_5_publish.dispatch_payload missing from ledger for $TAG" >&2
-            exit 1
-          fi
-
-          echo "VERSION=$(jq -r '.stages.stage_5_publish.dispatch_payload.version' "$LEDGER_FILE")" >> "$GITHUB_ENV"
-          echo "EXPECTED_SHA=$(jq -r '.stages.stage_5_publish.dispatch_payload.sha' "$LEDGER_FILE")" >> "$GITHUB_ENV"
-          echo "STAGED_ORIGIN=$(jq -r '.stages.stage_5_publish.dispatch_payload.staged_origin' "$LEDGER_FILE")" >> "$GITHUB_ENV"
-          echo "STAGED_SHA=$(jq -r '.stages.stage_5_publish.dispatch_payload.staged_sha' "$LEDGER_FILE")" >> "$GITHUB_ENV"
-          echo "EXPECTED_DIGEST=$(jq -r '.stages.stage_5_publish.dispatch_payload.sanitized_tree_sha256' "$LEDGER_FILE")" >> "$GITHUB_ENV"
-
-          echo "Resolved from ledger: version=$(jq -r '.stages.stage_5_publish.dispatch_payload.version' "$LEDGER_FILE") sha=$(jq -r '.stages.stage_5_publish.dispatch_payload.sha' "$LEDGER_FILE" | head -c 12)"
-
-          rm -rf "$LEDGER_DIR"
-
-      # Guard: validate dispatch payload (runs after ledger resolution for workflow_dispatch)
+      # Guard: validate the context emitted by the hosted public-CI preflight.
       - name: Validate dispatch payload
         run: |
           FAIL=0
@@ -197,16 +475,38 @@ jobs:
             exit 1
           fi
 
-          # Block running state — prevents overlapping Stage 6 runs
+          # Only the hosted preflight can acknowledge the pending transaction.
           STAGE6_STATUS=$(jq -r '.stages.stage_6_distribute.status // empty' "$LEDGER_PATH")
-          if [[ "$STAGE6_STATUS" == "running" ]]; then
-            echo "FATAL: stage_6_distribute is currently 'running' in the ledger" >&2
-            echo "Another Stage 6 run may be active. Verify no active run exists," >&2
-            echo "then manually update the ledger asset to set status to 'failed' before retrying." >&2
+          if [[ "$STAGE6_STATUS" != "waiting_public_ci" ]]; then
+            echo "FATAL: stage_6_distribute status is '$STAGE6_STATUS', required 'waiting_public_ci' after the hosted public CI gate" >&2
             exit 1
           fi
 
           echo "[OK] Staged-origin proof verified. Publication originated from verivusai-open/sqry."
+
+      - name: Verify public CI gate receipt
+        env:
+          LEDGER_PATH: ${{ steps.ledger.outputs.path }}
+        run: |
+          set -euo pipefail
+          GATE_STATUS=$(jq -r '.stages.stage_6_distribute.public_ci_gate.status // empty' "$LEDGER_PATH")
+          GATE_TAG=$(jq -r '.stages.stage_6_distribute.public_ci_gate.tag // empty' "$LEDGER_PATH")
+          GATE_VERSION=$(jq -r '.stages.stage_6_distribute.public_ci_gate.version // empty' "$LEDGER_PATH")
+          GATE_SHA=$(jq -r '.stages.stage_6_distribute.public_ci_gate.expected_sha // empty' "$LEDGER_PATH")
+          GATE_WORKFLOW=$(jq -r '.stages.stage_6_distribute.public_ci_gate.workflow // empty' "$LEDGER_PATH")
+          GATE_EVENT=$(jq -r '.stages.stage_6_distribute.public_ci_gate.event // empty' "$LEDGER_PATH")
+          GATE_BRANCH=$(jq -r '.stages.stage_6_distribute.public_ci_gate.branch // empty' "$LEDGER_PATH")
+          GATE_RUN_ID=$(jq -r '.stages.stage_6_distribute.public_ci_gate.stage6_run_id // empty' "$LEDGER_PATH")
+          GATE_RUN_URL=$(jq -r '.stages.stage_6_distribute.public_ci_gate.stage6_run_url // empty' "$LEDGER_PATH")
+          CI_RUN_ID=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_run_id // empty' "$LEDGER_PATH")
+          CI_RUN_URL=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_run_url // empty' "$LEDGER_PATH")
+          if [[ "$GATE_STATUS" != passed || "$GATE_TAG" != "$TAG" || "$GATE_VERSION" != "$VERSION" || "$GATE_SHA" != "$EXPECTED_SHA" \
+            || "$GATE_WORKFLOW" != ci.yml || "$GATE_EVENT" != push || "$GATE_BRANCH" != main \
+            || -z "$GATE_RUN_ID" || -z "$GATE_RUN_URL" || -z "$CI_RUN_ID" || -z "$CI_RUN_URL" ]]; then
+            echo "FATAL: public CI gate receipt is absent, incomplete, or does not match this release transaction" >&2
+            exit 1
+          fi
+          echo "[OK] Public CI gate receipt verified: $CI_RUN_URL"
 
       - name: Mark Stage 6 as running in ledger
         env:
@@ -859,7 +1159,7 @@ jobs:
   publish-distribution:
     name: Publish Distribution
     needs: [build-release-artifacts, windows-native-smoke, macos-native-smoke]
-    runs-on: [self-hosted, linux, rust, x86_64, workhorse2]
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
       TAG: ${{ github.event.client_payload.tag || github.event.inputs.tag }}
@@ -1041,12 +1341,25 @@ jobs:
       # Authenticate to the Marketplace as the sqry-vscode-publisher service
       # principal via GitHub OIDC (workload identity federation). No PAT: the SP
       # is a Contributor member of the 'verivus' publisher, and vsce
-      # authenticates with --azure-credential. Skips cleanly if the identity is
-      # not configured.
+      # authenticates with --azure-credential. Marketplace publication is a
+      # required distribution artifact and must fail closed.
+      - name: Verify Marketplace publication configuration
+        env:
+          VSCE_PUBLISHER_CLIENT_ID: ${{ vars.VSCE_PUBLISHER_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$VSCE_PUBLISHER_CLIENT_ID" ]]; then
+            echo "FATAL: VSCE_PUBLISHER_CLIENT_ID is required for Marketplace publication" >&2
+            exit 1
+          fi
+          if [[ -z "$AZURE_TENANT_ID" ]]; then
+            echo "FATAL: AZURE_TENANT_ID is required for Marketplace publication" >&2
+            exit 1
+          fi
+
       - name: Azure login for marketplace publish (service principal, OIDC)
         id: vsce-azure-login
-        if: vars.VSCE_PUBLISHER_CLIENT_ID != ''
-        continue-on-error: true
         uses: azure/login@a457da9ea143d694b1b9c7c869ebb04ebe844ef5 # v2
         with:
           client-id: ${{ vars.VSCE_PUBLISHER_CLIENT_ID }}
@@ -1057,22 +1370,18 @@ jobs:
         id: publish-vscode
         run: |
           set -euo pipefail
-          if [ "${{ steps.vsce-azure-login.outcome }}" != "success" ]; then
-            echo "Marketplace identity unavailable (VSCE_PUBLISHER_CLIENT_ID unset or azure/login failed), skipping marketplace publish (manual upload required)"
-            echo "status=skipped_no_identity" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
           cd sqry-vscode
           npm ci
-          if ! OUTPUT=$(npx vsce publish --azure-credential --packagePath "../dist/sqry-vscode-${VERSION}.vsix" 2>&1); then
-            if echo "$OUTPUT" | grep -qi "already exists\|version.*already"; then
-              echo "VS Code extension version already published — skipping"
-              echo "status=already_published" >> "$GITHUB_OUTPUT"
-            else
-              echo "WARNING: vsce publish failed (manual upload required):"
-              echo "$OUTPUT"
-              echo "status=failed" >> "$GITHUB_OUTPUT"
-            fi
+          npx vsce verify-pat verivus --azure-credential
+          # vsce itself handles only a Gallery version conflict with this
+          # option. Every authentication, authorization, packaging, or other
+          # publish failure remains a non-zero exit under set -e.
+          OUTPUT=$(npx vsce publish --skip-duplicate --azure-credential --packagePath "../dist/sqry-vscode-${VERSION}.vsix" 2>&1)
+          printf '%s\n' "$OUTPUT"
+          normalized_output=$(printf '%s\n' "$OUTPUT" | tr '\n' ' ')
+          if printf '%s\n' "$normalized_output" | grep -Fq "Version ${VERSION} is already published. Skipping publish."; then
+            echo "VS Code extension version already published — verified by vsce"
+            echo "status=already_published" >> "$GITHUB_OUTPUT"
           else
             echo "status=published" >> "$GITHUB_OUTPUT"
           fi
@@ -1562,7 +1871,10 @@ jobs:
           }
           public_ledger_path.write_text(json.dumps(public_ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
           PY
-          ! rg -n 'verivusai-open|/srv/repos/(internal|external)|staged_origin' "dist/release-ledger-v${VERSION}.json"
+          if grep -n -E 'verivusai-open|/srv/repos/(internal|external)|staged_origin' "dist/release-ledger-v${VERSION}.json"; then
+            echo "FATAL: public release ledger still contains staging-only data" >&2
+            exit 1
+          fi
           source scripts/release/github-release-assets.sh
           gh_release_upload_with_retry "$TAG" "dist/release-ledger-v${VERSION}.json"
           gh release edit "$TAG" --draft=false --latest
