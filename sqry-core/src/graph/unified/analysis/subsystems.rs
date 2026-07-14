@@ -17,7 +17,7 @@
 //! 1. **`&GraphSnapshot`, not `&CompactionSnapshot`.** As with
 //!    [`super::centrality`], the edge-only `CompactionSnapshot` cannot expose
 //!    node kind / name / file, so we take the node-and-edge-bearing
-//!    [`GraphSnapshot`](crate::graph::unified::concurrent::GraphSnapshot).
+//!    [`GraphSnapshot`].
 //! 2. **Bucket keys are `String`, not `StringId`.** A subsystem key is a
 //!    *synthesized* directory prefix (e.g. `crate_a/src`), not a symbol that
 //!    already lives in the snapshot's interner; a read-only snapshot cannot

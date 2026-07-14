@@ -129,7 +129,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "29.0.2"
+version = "29.0.3"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"

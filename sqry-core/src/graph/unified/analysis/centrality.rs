@@ -20,7 +20,7 @@
 //! carries no `NodeKind`, interned name, or file, so it cannot back a ranking
 //! that filters by kind and reports names. The load-bearing computation needs
 //! both node metadata and edges, which is exactly what
-//! [`GraphSnapshot`](crate::graph::unified::concurrent::GraphSnapshot) bundles
+//! [`GraphSnapshot`] bundles
 //! (`nodes()` / `edges()` / `strings()` / `files()`). We therefore take a
 //! `&GraphSnapshot`. The edge scan uses
 //! [`BidirectionalEdgeStore::all_live_forward_edges`](crate::graph::unified::edge::BidirectionalEdgeStore::all_live_forward_edges),

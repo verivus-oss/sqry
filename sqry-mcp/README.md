@@ -1,6 +1,6 @@
 # sqry MCP Server
 
-**Version**: 29.0.2
+**Version**: 29.0.3
 
 `sqry-mcp` exposes sqry semantic code-search tools to Model Context Protocol clients.
 
