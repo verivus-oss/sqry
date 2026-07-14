@@ -53,6 +53,7 @@ jobs:
       STAGED_ORIGIN: ${{ github.event.client_payload.staged_origin || '' }}
       STAGED_SHA: ${{ github.event.client_payload.staged_sha || '' }}
       EXPECTED_DIGEST: ${{ github.event.client_payload.sanitized_tree_sha256 || '' }}
+      STAGE6_RECOVERY: ${{ github.event.client_payload.stage6_recovery || '' }}
     steps:
       - name: Resolve inputs from ledger (manual trigger)
         if: github.event_name == 'workflow_dispatch'
@@ -185,8 +186,132 @@ jobs:
               # A matching receipt is therefore safe to observe without overwriting it.
               echo "Reusing matching Stage 6 public CI gate receipt from run $gate_receipt_run_id"
               ;;
+            failed)
+              # A failed Stage 6 must be re-entered through the bounded Stage 5
+              # manual re-dispatch path.  Ordinary Stage 5 dispatches never set
+              # this marker, so they cannot silently replay a failed transaction.
+              [[ "$STAGE6_RECOVERY" == true ]] || {
+                echo "FATAL: Stage 6 is failed; use the Stage 5 manual re-dispatch path after reviewing the failed public run" >&2
+                exit 1
+              }
+
+              gate_status=$(jq -r '.stages.stage_6_distribute.public_ci_gate.status // empty' "$ledger_path")
+              gate_tag=$(jq -r '.stages.stage_6_distribute.public_ci_gate.tag // empty' "$ledger_path")
+              gate_version=$(jq -r '.stages.stage_6_distribute.public_ci_gate.version // empty' "$ledger_path")
+              gate_sha=$(jq -r '.stages.stage_6_distribute.public_ci_gate.expected_sha // empty' "$ledger_path")
+              gate_workflow=$(jq -r '.stages.stage_6_distribute.public_ci_gate.workflow // empty' "$ledger_path")
+              gate_event=$(jq -r '.stages.stage_6_distribute.public_ci_gate.event // empty' "$ledger_path")
+              gate_branch=$(jq -r '.stages.stage_6_distribute.public_ci_gate.branch // empty' "$ledger_path")
+              previous_stage6_run_id=$(jq -r '.stages.stage_6_distribute.public_ci_gate.stage6_run_id // empty' "$ledger_path")
+              previous_stage6_run_url=$(jq -r '.stages.stage_6_distribute.public_ci_gate.stage6_run_url // empty' "$ledger_path")
+              gate_ci_run_id=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_run_id // empty' "$ledger_path")
+              gate_ci_run_url=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_run_url // empty' "$ledger_path")
+              gate_ci_status=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_status // empty' "$ledger_path")
+              gate_ci_conclusion=$(jq -r '.stages.stage_6_distribute.public_ci_gate.ci_conclusion // empty' "$ledger_path")
+              [[ "$gate_status" == passed && "$gate_tag" == "$TAG" && "$gate_version" == "$VERSION" \
+                && "$gate_sha" == "$EXPECTED_SHA" && "$gate_workflow" == ci.yml \
+                && "$gate_event" == push && "$gate_branch" == main ]] || {
+                echo "FATAL: failed Stage 6 does not retain a matching successful public CI gate" >&2
+                exit 1
+              }
+              [[ -n "$previous_stage6_run_id" && -n "$previous_stage6_run_url" && -n "$gate_ci_run_id" \
+                && -n "$gate_ci_run_url" && "$gate_ci_status" == completed && "$gate_ci_conclusion" == success ]] || {
+                echo "FATAL: failed Stage 6 has an incomplete successful public CI receipt" >&2
+                exit 1
+              }
+              if ! jq -e '
+                (.finalized // false) == false
+                and (.stages.stage_6_distribute.completed_at // null) == null
+                and (.stages.stage_6_distribute.release_url // null) == null
+                and ((.stages.stage_6_distribute.assets // []) | length) == 0
+                and ((.stages.stage_6_distribute.artifacts // []) | length) == 0
+              ' "$ledger_path" >/dev/null; then
+                echo "FATAL: failed Stage 6 has completion or artifact evidence and cannot be replayed automatically" >&2
+                exit 1
+              fi
+
+              # Revalidate the stored receipt against the live public CI run;
+              # never trust a mutable release asset by itself for recovery.
+              ci_run=$(gh api -X GET "repos/verivus-oss/sqry/actions/runs/$gate_ci_run_id")
+              ci_run_sha=$(jq -r '.head_sha // empty' <<<"$ci_run")
+              ci_run_event=$(jq -r '.event // empty' <<<"$ci_run")
+              ci_run_branch=$(jq -r '.head_branch // empty' <<<"$ci_run")
+              ci_run_path=$(jq -r '.path // empty' <<<"$ci_run")
+              ci_run_status=$(jq -r '.status // empty' <<<"$ci_run")
+              ci_run_conclusion=$(jq -r '.conclusion // empty' <<<"$ci_run")
+              ci_run_url=$(jq -r '.html_url // empty' <<<"$ci_run")
+              [[ "$ci_run_sha" == "$EXPECTED_SHA" && "$ci_run_event" == push && "$ci_run_branch" == main \
+                && "$ci_run_path" == .github/workflows/ci.yml && "$ci_run_status" == completed \
+                && "$ci_run_conclusion" == success && "$ci_run_url" == "$gate_ci_run_url" ]] || {
+                echo "FATAL: live public CI run no longer matches the failed Stage 6 transaction" >&2
+                exit 1
+              }
+
+              # The recovery may proceed only while the public release remains
+              # an unpromoted draft containing no asset other than its ledger.
+              releases=$(gh api --paginate --slurp "repos/verivus-oss/sqry/releases?per_page=100")
+              release=$(jq -ce --arg tag "$TAG" '[.[][] | select(.tag_name == $tag)] | if length == 1 then .[0] else empty end' <<<"$releases") || {
+                echo "FATAL: expected exactly one public release draft for $TAG" >&2
+                exit 1
+              }
+              release_draft=$(jq -r '.draft // false' <<<"$release")
+              release_target=$(jq -r '.target_commitish // empty' <<<"$release")
+              release_asset_count=$(jq '[.assets[]?.name] | length' <<<"$release")
+              release_asset_name=$(jq -r '.assets[0].name // empty' <<<"$release")
+              [[ "$release_draft" == true && "$release_target" == "$EXPECTED_SHA" \
+                && "$release_asset_count" == 1 && "$release_asset_name" == "release-ledger-v${VERSION}.json" ]] || {
+                echo "FATAL: public release is no longer an empty matching draft; refusing Stage 6 recovery" >&2
+                exit 1
+              }
+
+              queued_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+              deadline_at=$(date -u -d '+30 minutes' +"%Y-%m-%dT%H:%M:%SZ")
+              gate_receipt_run_id="$GITHUB_RUN_ID"
+              gate_run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+              previous_failed_at=$(jq -r '.stages.stage_6_distribute.failed_at // empty' "$ledger_path")
+              previous_error=$(jq -r '.stages.stage_6_distribute.error // empty' "$ledger_path")
+              previous_gate=$(jq -c '.stages.stage_6_distribute.public_ci_gate' "$ledger_path")
+              tmp=$(mktemp)
+              jq --arg tag "$TAG" --arg version "$VERSION" --arg expected_sha "$EXPECTED_SHA" \
+                --arg gate_run_id "$GITHUB_RUN_ID" --arg gate_run_attempt "$GITHUB_RUN_ATTEMPT" \
+                --arg gate_run_url "$gate_run_url" --arg queued_at "$queued_at" --arg deadline_at "$deadline_at" \
+                --arg ci_run_id "$gate_ci_run_id" --arg ci_run_url "$gate_ci_run_url" \
+                --arg previous_stage6_run_id "$previous_stage6_run_id" \
+                --arg previous_stage6_run_url "$previous_stage6_run_url" \
+                --arg previous_failed_at "$previous_failed_at" --arg previous_error "$previous_error" \
+                --argjson previous_gate "$previous_gate" '
+                  .stages.stage_6_distribute.status = "waiting_public_ci" |
+                  .stages.stage_6_distribute.queued_at = $queued_at |
+                  .stages.stage_6_distribute.recovered_at = $queued_at |
+                  .stages.stage_6_distribute.public_ci_gate = {
+                    status: "passed", tag: $tag, version: $version, expected_sha: $expected_sha,
+                    workflow: "ci.yml", event: "push", branch: "main",
+                    stage6_run_id: $gate_run_id, stage6_run_attempt: $gate_run_attempt,
+                    stage6_run_url: $gate_run_url, queued_at: $queued_at, deadline_at: $deadline_at,
+                    ci_run_id: $ci_run_id, ci_run_url: $ci_run_url,
+                    ci_status: "completed", ci_conclusion: "success",
+                    recovery_of_stage6_run_id: $previous_stage6_run_id,
+                    recovery_of_stage6_run_url: $previous_stage6_run_url,
+                    revalidated_at: $queued_at
+                  } |
+                  .stages.stage_6_distribute.recovery_history =
+                    ((.stages.stage_6_distribute.recovery_history // []) + [{
+                      recovered_at: $queued_at,
+                      trigger: "stage5_manual_redispatch",
+                      prior_status: "failed",
+                      prior_failed_at: $previous_failed_at,
+                      prior_error: $previous_error,
+                      prior_public_ci_gate: $previous_gate,
+                      revalidated_ci_run_id: $ci_run_id,
+                      revalidated_ci_run_url: $ci_run_url
+                    }])
+                ' "$ledger_path" > "$tmp"
+              mv "$tmp" "$ledger_path"
+              gh release upload "$TAG" "$ledger_path" --repo verivus-oss/sqry --clobber
+              echo "Recovered failed Stage 6 with a revalidated public CI receipt"
+              ;;
             *)
-              echo "FATAL: Stage 6 is '$stage6_status', required pending or matching waiting_public_ci" >&2
+              echo "FATAL: Stage 6 is '$stage6_status', required pending, matching waiting_public_ci, or a guarded failed recovery" >&2
               exit 1
               ;;
           esac
@@ -610,7 +735,7 @@ jobs:
             sudo apt-get update -qq && sudo apt-get install -y -qq gcc-mingw-w64-x86-64
           }
           node --version
-          npx vsce --version
+          npx --yes @vscode/vsce@3.9.2 --version
           gh --version
           echo "All required tools present."
 
@@ -936,7 +1061,7 @@ jobs:
         run: |
           cd sqry-vscode
           npm ci
-          npx vsce package -o "../dist/sqry-vscode-${VERSION}.vsix"
+          npx --yes @vscode/vsce@3.9.2 package -o "../dist/sqry-vscode-${VERSION}.vsix"
 
       - name: Record build environment
         run: |
@@ -1372,11 +1497,11 @@ jobs:
           set -euo pipefail
           cd sqry-vscode
           npm ci
-          npx vsce verify-pat verivus --azure-credential
+          npx --yes @vscode/vsce@3.9.2 verify-pat verivus --azure-credential
           # vsce itself handles only a Gallery version conflict with this
           # option. Every authentication, authorization, packaging, or other
           # publish failure remains a non-zero exit under set -e.
-          OUTPUT=$(npx vsce publish --skip-duplicate --azure-credential --packagePath "../dist/sqry-vscode-${VERSION}.vsix" 2>&1)
+          OUTPUT=$(npx --yes @vscode/vsce@3.9.2 publish --skip-duplicate --azure-credential --packagePath "../dist/sqry-vscode-${VERSION}.vsix" 2>&1)
           printf '%s\n' "$OUTPUT"
           normalized_output=$(printf '%s\n' "$OUTPUT" | tr '\n' ' ')
           if printf '%s\n' "$normalized_output" | grep -Fq "Version ${VERSION} is already published. Skipping publish."; then
