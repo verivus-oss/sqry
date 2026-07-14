@@ -36,6 +36,7 @@ pub use tools::{
     execute_find_duplicates,
     execute_find_similar,
     execute_find_unused,
+    execute_generate_overview,
     // Navigation tools
     execute_get_definition,
     execute_get_dependencies,
@@ -76,6 +77,8 @@ pub use types::{
 // Phase 8b Task 4: surface the per-tool `*_inner` re-exports at
 // `crate::execution::*` so the daemon adapter can reach the
 // SqryServer-shared bodies without widening the private `tools` module.
+pub(crate) use tools::parse_overview_sections;
 pub(crate) use tools::{
-    analysis_inner, graph_inner, introspection_inner, relations_inner, search_inner, trace_inner,
+    analysis_inner, graph_inner, introspection_inner, overview_inner, relations_inner,
+    search_inner, trace_inner,
 };

@@ -131,6 +131,37 @@ const DEFAULT_EXCLUDED_SOURCE_DIRS: &[&str] = &[
 
 const DEFAULT_EXCLUDED_SOURCE_DIR_PREFIXES: &[&str] = &["externals."];
 
+/// Rust-only, per-`index`-invocation macro / cfg build options.
+///
+/// This is a plain-data carrier owned by sqry-core (NOT by the Rust plugin) so
+/// that `BuildConfig` can hold it without sqry-core depending on
+/// `sqry-lang-rust` (that would be a dependency cycle: the plugin depends on
+/// core). Core carries the value opaquely; only the Rust builder interprets it,
+/// reading it off the per-file [`StagingGraph`] side channel at Pass 2.5.
+///
+/// `Default` = today's behaviour (empty/none), so every `..BuildConfig::default()`
+/// construction site is unaffected. Phase 1a carries `cfg_flags` (`--cfg`);
+/// Phase 1b adds `expand_cache_dir` (`--expand-cache`).
+#[derive(Debug, Clone, Default)]
+pub struct MacroBuildOptions {
+    /// Raw `--cfg` predicate strings (e.g. `"unix"`, `"feature=serde"`).
+    ///
+    /// The Rust plugin splits `feature=<name>` tokens into cfg features and
+    /// feeds the rest as raw cfg flags when building its `MacroBoundaryConfig`.
+    /// Empty (the default) leaves cfg evaluation as "unknown", exactly as today.
+    pub cfg_flags: Vec<String>,
+
+    /// Directory of a pre-generated macro expand cache (`--expand-cache <DIR>`,
+    /// Phase 1b). `None` = off (no cache consumption).
+    ///
+    /// When set, the Rust builder reads this directory's per-crate JSON cache
+    /// (produced by `sqry cache expand`) at Pass 2.5 and materialises the
+    /// macro-generated symbols as searchable graph nodes. This is
+    /// execution-free: the index only reads and validates JSON, hashes source
+    /// files, and parses `Cargo.toml`; it never runs `cargo` / `rustc`.
+    pub expand_cache_dir: Option<std::path::PathBuf>,
+}
+
 /// Configuration for building the unified graph.
 #[derive(Debug, Clone)]
 pub struct BuildConfig {
@@ -161,6 +192,14 @@ pub struct BuildConfig {
     /// Controls the maximum number of intervals per edge kind and what
     /// to do when the budget is exceeded (fail or degrade to BFS).
     pub label_budget: LabelBudgetConfig,
+
+    /// Rust-only macro / cfg options for this `index` invocation.
+    ///
+    /// Empty by default (no behaviour change). Transient build-time input:
+    /// never serialised into the snapshot or the persisted build-config
+    /// manifest. Copied onto each per-file [`StagingGraph`] and read by the
+    /// Rust builder at Pass 2.5; ignored by the other 36 language plugins.
+    pub macro_options: MacroBuildOptions,
 }
 
 impl Default for BuildConfig {
@@ -184,6 +223,7 @@ impl Default for BuildConfig {
             num_threads: None,
             staging_memory_limit: limit,
             label_budget,
+            macro_options: MacroBuildOptions::default(),
         }
     }
 }
@@ -539,7 +579,7 @@ fn build_unified_graph_inner(
             chunk_files
                 .par_iter()
                 .map(|path| {
-                    let result = parse_file(path.as_path(), plugins);
+                    let result = parse_file(path.as_path(), plugins, &config.macro_options);
                     tracker.increment_progress();
                     (path.clone(), result)
                 })
@@ -2170,7 +2210,11 @@ pub(super) enum ParsedFileOutcome {
 /// `pub(super)` as of Task 4 Step 4 Phase 3c so the sibling
 /// [`super::incremental`] module can re-parse closure files against the
 /// rebuild-local `GraphMutationTarget` plane during `incremental_rebuild`.
-pub(super) fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedFileOutcome> {
+pub(super) fn parse_file(
+    path: &Path,
+    plugins: &PluginManager,
+    macro_options: &MacroBuildOptions,
+) -> Result<ParsedFileOutcome> {
     let plugin = plugins.plugin_for_path(path);
     let Some(plugin) = plugin else {
         return Ok(ParsedFileOutcome::Skipped);
@@ -2199,6 +2243,11 @@ pub(super) fn parse_file(path: &Path, plugins: &PluginManager) -> Result<ParsedF
     }
 
     let mut staging = StagingGraph::new();
+    // Per-file copy of the Rust macro / cfg options. Each `parse_file` runs on a
+    // fresh, thread-local `StagingGraph` under rayon `par_iter`, so setting the
+    // field here needs no synchronisation. The Rust builder reads it at Pass 2.5;
+    // the other 36 plugins ignore it.
+    staging.set_macro_options(macro_options.clone());
     let build_start = Instant::now();
     match builder.build_graph(&tree, parse_content, path, &mut staging) {
         Ok(()) => {}
@@ -2881,7 +2930,9 @@ mod tests {
         )));
         let mut graph = CodeGraph::new();
 
-        let parsed = expect_parsed_file(parse_file(&file_path, &plugins).expect("parse file"));
+        let parsed = expect_parsed_file(
+            parse_file(&file_path, &plugins, &MacroBuildOptions::default()).expect("parse file"),
+        );
         commit_parsed_file_for_test(&file_path, parsed, &mut graph);
     }
 
@@ -2899,7 +2950,9 @@ mod tests {
         )));
         let mut graph = CodeGraph::new();
 
-        let parsed = expect_parsed_file(parse_file(&file_path, &plugins).expect("parse file"));
+        let parsed = expect_parsed_file(
+            parse_file(&file_path, &plugins, &MacroBuildOptions::default()).expect("parse file"),
+        );
         commit_parsed_file_for_test(&file_path, parsed, &mut graph);
     }
 
@@ -2917,7 +2970,9 @@ mod tests {
         )));
         let mut graph = CodeGraph::new();
 
-        let parsed = expect_parsed_file(parse_file(&file_path, &plugins).expect("parse file"));
+        let parsed = expect_parsed_file(
+            parse_file(&file_path, &plugins, &MacroBuildOptions::default()).expect("parse file"),
+        );
         commit_parsed_file_for_test(&file_path, parsed, &mut graph);
     }
 
@@ -2934,7 +2989,8 @@ mod tests {
             Some(Box::new(TimeoutGraphBuilder)),
         )));
 
-        let outcome = parse_file(&file_path, &plugins).expect("parse file");
+        let outcome =
+            parse_file(&file_path, &plugins, &MacroBuildOptions::default()).expect("parse file");
         match outcome {
             ParsedFileOutcome::TimedOut {
                 file,
@@ -2966,7 +3022,8 @@ mod tests {
         unsafe {
             std::env::set_var("SQRY_MAX_SOURCE_FILE_SIZE", "1048576");
         }
-        let err = parse_file(&file_path, &plugins).expect_err("oversized file should fail");
+        let err = parse_file(&file_path, &plugins, &MacroBuildOptions::default())
+            .expect_err("oversized file should fail");
         unsafe {
             std::env::remove_var("SQRY_MAX_SOURCE_FILE_SIZE");
         }

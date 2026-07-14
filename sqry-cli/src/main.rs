@@ -529,7 +529,6 @@ fn run() -> Result<()> {
             no_incremental,
             cache_dir,
             metrics_format,
-            enable_macro_expansion,
             cfg_flags,
             expand_cache,
             classpath,
@@ -550,7 +549,6 @@ fn run() -> Result<()> {
             *no_incremental,
             cache_dir.as_deref(),
             *metrics_format,
-            *enable_macro_expansion,
             cfg_flags,
             expand_cache.as_deref(),
             *classpath,
@@ -800,6 +798,33 @@ fn run() -> Result<()> {
                 *max_results,
             )
             .context("Unused command failed")?;
+        }
+
+        // Repository orientation report
+        Some(Command::Overview {
+            path,
+            format,
+            top,
+            sections,
+            group_depth,
+            output,
+            no_index,
+            redaction,
+        }) => {
+            commands::run_overview(
+                &cli,
+                &commands::OverviewOptions {
+                    path: path.as_deref(),
+                    format,
+                    top: *top,
+                    sections: sections.as_deref(),
+                    group_depth: *group_depth,
+                    output: output.as_deref(),
+                    no_index: *no_index,
+                    redaction,
+                },
+            )
+            .context("Overview command failed")?;
         }
 
         // Graph export
@@ -1265,9 +1290,6 @@ fn validate_index_if_requested(
                     false,
                     None,
                     false,
-                    &[],
-                    None,
-                    false,
                     false,
                     crate::args::ClasspathDepthArg::Full,
                     None,
@@ -1276,6 +1298,11 @@ fn validate_index_if_requested(
                     // auto-rebuild path always operates on an existing graph at
                     // `search_path`, so nested-index creation cannot apply.
                     false,
+                    // auto-rebuild does not carry `--cfg` / `--expand-cache`
+                    // (Phase 1a/1b): stale-index recovery rebuilds with today's
+                    // default behaviour.
+                    &[],
+                    None,
                 ) {
                     eprintln!("Error: auto-rebuild failed: {err}");
                     return Err(2);
@@ -1315,7 +1342,6 @@ fn handle_index_command(
     no_incremental: bool,
     cache_dir: Option<&str>,
     metrics_format: crate::args::MetricsFormat,
-    enable_macro_expansion: bool,
     cfg_flags: &[String],
     expand_cache: Option<&std::path::Path>,
     classpath: bool,
@@ -1332,11 +1358,6 @@ fn handle_index_command(
     // falling back to `cli.search_path()` (STEP_8 codex iter1 fix).
     let index_path = cli.resolve_subcommand_path(path)?;
 
-    if enable_macro_expansion {
-        eprintln!("WARNING: Macro expansion enabled. This executes build scripts and proc macros.");
-        eprintln!("         Only use on trusted codebases.");
-    }
-
     if status {
         commands::run_index_status(cli, index_path, metrics_format)
             .context("Index status command failed")?;
@@ -1349,9 +1370,6 @@ fn handle_index_command(
             add_to_gitignore,
             no_incremental,
             cache_dir,
-            enable_macro_expansion,
-            cfg_flags,
-            expand_cache.map(std::path::Path::new),
             classpath,
             _no_classpath,
             classpath_depth,
@@ -1359,6 +1377,8 @@ fn handle_index_command(
             build_system,
             force_classpath,
             allow_nested,
+            cfg_flags,
+            expand_cache,
         )
         .context("Index command failed")?;
     }

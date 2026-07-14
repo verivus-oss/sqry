@@ -3,7 +3,13 @@
 use crate::args::{CacheAction, Cli};
 use anyhow::{Context, Result};
 use sqry_core::cache::{CacheConfig, CacheManager, PruneOptions, PruneOutputMode, PruneReport};
-use std::collections::HashMap;
+use sqry_lang_rust::macro_boundaries::expand_cache::{
+    EXPAND_CACHE_SCHEMA_VERSION, ExpandCache, ExpandCacheEntry, GeneratedSymbol,
+    compute_crate_source_hash,
+};
+use sqry_lang_rust::macro_boundaries::generated_symbols::{
+    SymbolInfo, diff_symbols, extract_symbols_from_source, extract_symbols_from_source_in_module,
+};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -338,12 +344,6 @@ const DEFAULT_EXPAND_CACHE_DIR: &str = ".sqry/expand-cache";
 /// Maximum allowed expansion output size per file (10 MB).
 const MAX_EXPANSION_SIZE_BYTES: usize = 10 * 1024 * 1024;
 
-/// Allowed character pattern for symbol names in expand cache (security validation).
-fn is_valid_symbol_name(name: &str) -> bool {
-    name.chars()
-        .all(|c| c.is_alphanumeric() || matches!(c, '_' | ':' | '<' | '>' | ' ' | '&' | '\''))
-}
-
 /// Result of expanding a single crate.
 #[derive(Debug)]
 struct CrateExpandResult {
@@ -352,25 +352,6 @@ struct CrateExpandResult {
     generated_symbols: usize,
     cached: bool,
     skipped_reason: Option<String>,
-}
-
-/// Expand cache entry persisted as JSON.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct ExpandCacheEntry {
-    crate_name: String,
-    rust_version: String,
-    generated_at: String,
-    source_hash: String,
-    files: HashMap<String, ExpandCacheFileEntry>,
-}
-
-/// Per-file entry in the expand cache.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct ExpandCacheFileEntry {
-    original_symbols: Vec<String>,
-    expanded_symbols: Vec<String>,
-    generated_symbols: Vec<String>,
-    confidence: String,
 }
 
 /// Run the expand cache command.
@@ -516,38 +497,12 @@ fn discover_workspace_crates(workspace_root: &Path) -> Result<Vec<(String, PathB
     Ok(crates)
 }
 
-/// Compute SHA-256 hash of all Rust source files in a crate directory.
-fn compute_source_hash(crate_dir: &Path) -> Result<String> {
-    use sha2::{Digest, Sha256};
-    use walkdir::WalkDir;
-
-    let mut hasher = Sha256::new();
-    let mut file_count = 0u64;
-
-    let mut paths: Vec<PathBuf> = WalkDir::new(crate_dir)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-        .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "rs"))
-        .map(walkdir::DirEntry::into_path)
-        .collect();
-
-    // Sort for deterministic hashing
-    paths.sort();
-
-    for path in &paths {
-        let content =
-            std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
-        hasher.update(&content);
-        file_count += 1;
-    }
-
-    // Include file count to detect additions/deletions
-    hasher.update(file_count.to_le_bytes());
-
-    Ok(hex::encode(hasher.finalize()))
-}
-
-/// Check if a cached entry is fresh (source hash matches).
+/// Check if a cached entry is fresh: it exists, parses, matches the current
+/// schema version, and its recorded `source_hash` matches `current_hash`.
+///
+/// The source hash itself is computed by the shared
+/// [`compute_crate_source_hash`], so the writer and the index-side consumer
+/// agree byte-for-byte.
 fn is_cache_fresh(cache_path: &Path, current_hash: &str) -> bool {
     let Ok(content) = std::fs::read_to_string(cache_path) else {
         return false;
@@ -555,22 +510,30 @@ fn is_cache_fresh(cache_path: &Path, current_hash: &str) -> bool {
     let Ok(entry) = serde_json::from_str::<ExpandCacheEntry>(&content) else {
         return false;
     };
-    entry.source_hash == current_hash
+    entry.schema_version == EXPAND_CACHE_SCHEMA_VERSION && entry.source_hash == current_hash
 }
 
 /// Expand a single crate and write the cache entry.
+///
+/// The output is a per-crate, qualified, kinded `generated_symbols` list, built
+/// by tree-sitter parsing (not a line heuristic) and routed through
+/// [`ExpandCache::write`] so writer and index-side reader share one path/key
+/// scheme. `workspace_root` is retained for signature compatibility with the
+/// caller; per-file attribution is not recoverable from `cargo expand` output,
+/// so ownership is carried structurally via each symbol's module scope chain.
 fn expand_single_crate(
     crate_name: &str,
     crate_dir: &Path,
-    workspace_root: &Path,
+    _workspace_root: &Path,
     cache_dir: &Path,
     refresh: bool,
 ) -> Result<CrateExpandResult> {
-    // Compute source hash
-    let source_hash = compute_source_hash(crate_dir)
+    // Compute the source hash via the SHARED hasher so `is_fresh` is comparable
+    // with the index-side consumer.
+    let source_hash = compute_crate_source_hash(crate_dir)
         .with_context(|| format!("Failed to compute source hash for {crate_name}"))?;
 
-    // Check freshness
+    // Check freshness.
     let cache_file = cache_dir.join(format!("{crate_name}.json"));
     if !refresh && is_cache_fresh(&cache_file, &source_hash) {
         return Ok(CrateExpandResult {
@@ -582,10 +545,10 @@ fn expand_single_crate(
         });
     }
 
-    // Run cargo expand
-    let expand_output = run_cargo_expand(crate_name, crate_dir)?;
+    // Run cargo expand (the only subprocess; confined to this writer command).
+    let (expand_output, expand_target) = run_cargo_expand(crate_name, crate_dir)?;
 
-    // Check size limit
+    // Check size limit.
     if expand_output.len() > MAX_EXPANSION_SIZE_BYTES {
         return Ok(CrateExpandResult {
             crate_name: crate_name.to_string(),
@@ -600,55 +563,62 @@ fn expand_single_crate(
         });
     }
 
-    // Parse expanded output to extract symbols
-    let expanded_symbols = extract_rust_symbols_from_source(&expand_output);
-
-    // Find original symbols from source files
-    let original_symbols = collect_original_symbols(crate_dir)?;
-
-    // Diff to find generated symbols
-    let generated: Vec<String> = expanded_symbols
-        .iter()
-        .filter(|s| !original_symbols.contains(s))
-        .filter(|s| is_valid_symbol_name(s))
-        .cloned()
-        .collect();
-
-    let generated_count = generated.len();
+    // Tree-sitter qualified extraction of the expanded output.
+    let expanded_symbols = extract_symbols_from_source(&expand_output, crate_name);
     let total_expanded = expanded_symbols.len();
 
-    // Compute relative file path for the entry
-    let relative_src = crate_dir
-        .strip_prefix(workspace_root)
-        .unwrap_or(crate_dir)
-        .join("src/lib.rs");
+    // Tree-sitter qualified extraction of every original `.rs` file in the crate,
+    // each qualified with its crate-relative module path so both sides of the
+    // diff share one namespace.
+    let original_symbols = collect_original_symbols(crate_dir, crate_name, expand_target)?;
 
-    // Build cache entry
+    // Diff (keyed on the crate-prefixed qualified_name) to find generated names.
+    let diff = diff_symbols(&original_symbols, &expanded_symbols);
+    let generated_names: std::collections::HashSet<&str> =
+        diff.generated.iter().map(String::as_str).collect();
+
+    // Materialise a `GeneratedSymbol` (structured pieces) for each generated
+    // qualified name, deduped by the consumer-facing
+    // `(scope_segments, impl_type, simple_name)` tuple. The crate-prefixed
+    // qualified_name is the diff key ONLY and is not persisted.
+    let mut seen: std::collections::HashSet<(String, Option<String>, String)> =
+        std::collections::HashSet::new();
+    let mut generated_symbols: Vec<GeneratedSymbol> = Vec::new();
+    for sym in &expanded_symbols {
+        if !generated_names.contains(sym.qualified_name.as_str()) {
+            continue;
+        }
+        let scope_key = sym
+            .scope_segments
+            .iter()
+            .map(|seg| format!("{}:{}", u8::from(seg.is_module), seg.name))
+            .collect::<Vec<_>>()
+            .join("|");
+        let dedup_key = (scope_key, sym.impl_type.clone(), sym.simple_name.clone());
+        if !seen.insert(dedup_key) {
+            continue;
+        }
+        generated_symbols.push(sym_to_generated(sym));
+    }
+
+    let generated_count = generated_symbols.len();
+
+    // Build and write the cache entry through ExpandCache (shared path/key).
     let entry = ExpandCacheEntry {
+        schema_version: EXPAND_CACHE_SCHEMA_VERSION,
         crate_name: crate_name.to_string(),
         rust_version: get_rust_version(),
         generated_at: chrono_now_utc(),
         source_hash,
-        files: {
-            let mut map = HashMap::new();
-            map.insert(
-                relative_src.to_string_lossy().to_string(),
-                ExpandCacheFileEntry {
-                    original_symbols: original_symbols.into_iter().collect(),
-                    expanded_symbols: expanded_symbols.into_iter().collect(),
-                    generated_symbols: generated,
-                    confidence: "heuristic".to_string(),
-                },
-            );
-            map
-        },
+        confidence: "heuristic".to_string(),
+        generated_symbols,
     };
 
-    // Write cache file
-    let json =
-        serde_json::to_string_pretty(&entry).context("Failed to serialize expand cache entry")?;
-    std::fs::write(&cache_file, json)
-        .with_context(|| format!("Failed to write cache file: {}", cache_file.display()))?;
+    let cache = ExpandCache::new(cache_dir.to_path_buf())
+        .with_context(|| format!("Failed to open expand cache dir {}", cache_dir.display()))?;
+    cache
+        .write(crate_name, &entry)
+        .with_context(|| format!("Failed to write expand cache for {crate_name}"))?;
 
     Ok(CrateExpandResult {
         crate_name: crate_name.to_string(),
@@ -659,8 +629,33 @@ fn expand_single_crate(
     })
 }
 
-/// Run `cargo expand` for a specific crate.
-fn run_cargo_expand(crate_name: &str, crate_dir: &Path) -> Result<String> {
+/// Convert an extracted [`SymbolInfo`] into a persisted [`GeneratedSymbol`],
+/// carrying only the structured pieces (never the crate-prefixed diff key).
+fn sym_to_generated(sym: &SymbolInfo) -> GeneratedSymbol {
+    GeneratedSymbol {
+        simple_name: sym.simple_name.clone(),
+        scope_segments: sym.scope_segments.clone(),
+        impl_type: sym.impl_type.clone(),
+        kind: sym.kind,
+    }
+}
+
+/// Which `cargo expand` target produced the output.
+///
+/// Drives which crate-root file the original-symbol collector must EXCLUDE so
+/// the original set matches the expanded set (a lib+bin crate has two crate
+/// roots, `lib.rs` and `main.rs`, both mapping to the crate-root module path;
+/// only the expanded target's root belongs in the diff).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpandTarget {
+    /// `cargo expand --lib` (the library target).
+    Lib,
+    /// `cargo expand` with no explicit target (a binary crate).
+    Default,
+}
+
+/// Run `cargo expand` for a specific crate, reporting which target was expanded.
+fn run_cargo_expand(crate_name: &str, crate_dir: &Path) -> Result<(String, ExpandTarget)> {
     let output = std::process::Command::new("cargo")
         .args(["expand", "--lib"])
         .current_dir(crate_dir)
@@ -684,93 +679,43 @@ fn run_cargo_expand(crate_name: &str, crate_dir: &Path) -> Result<String> {
                 stderr2.lines().next().unwrap_or("unknown error")
             );
         }
-        return Ok(String::from_utf8_lossy(&output2.stdout).to_string());
+        return Ok((
+            String::from_utf8_lossy(&output2.stdout).to_string(),
+            ExpandTarget::Default,
+        ));
     }
 
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    Ok((
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        ExpandTarget::Lib,
+    ))
 }
 
-/// Extract symbol names from Rust source using simple heuristic parsing.
+/// Collect original (unexpanded) qualified symbols from every `.rs` file in a
+/// crate directory via tree-sitter, matching the extraction used on the expanded
+/// output so `diff_symbols` compares like with like.
 ///
-/// This extracts function, struct, enum, trait, impl, type, const, and static
-/// declarations by scanning for declaration keywords. It's a lightweight
-/// alternative to full tree-sitter parsing for the expand cache use case.
-fn extract_rust_symbols_from_source(source: &str) -> Vec<String> {
-    let mut symbols = Vec::new();
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-
-        // Skip comments and empty lines
-        if trimmed.is_empty() || trimmed.starts_with("//") || trimmed.starts_with("/*") {
-            continue;
-        }
-
-        // Extract declaration names
-        if let Some(name) = extract_decl_name(trimmed, "fn ") {
-            symbols.push(name);
-        } else if let Some(name) = extract_decl_name(trimmed, "struct ") {
-            symbols.push(name);
-        } else if let Some(name) = extract_decl_name(trimmed, "enum ") {
-            symbols.push(name);
-        } else if let Some(name) = extract_decl_name(trimmed, "trait ") {
-            symbols.push(name);
-        } else if let Some(name) = extract_decl_name(trimmed, "type ") {
-            symbols.push(name);
-        } else if let Some(name) = extract_decl_name(trimmed, "const ") {
-            symbols.push(name);
-        } else if let Some(name) = extract_decl_name(trimmed, "static ") {
-            symbols.push(name);
-        } else if let Some(name) = extract_decl_name(trimmed, "mod ") {
-            symbols.push(name);
-        }
-    }
-
-    symbols.sort();
-    symbols.dedup();
-    symbols
-}
-
-/// Extract declaration name from a line starting with a keyword.
-fn extract_decl_name(line: &str, keyword: &str) -> Option<String> {
-    // Strip visibility modifiers
-    let stripped = line
-        .strip_prefix("pub(crate) ")
-        .or_else(|| line.strip_prefix("pub(super) "))
-        .or_else(|| line.strip_prefix("pub(in "))
-        .or_else(|| line.strip_prefix("pub "))
-        .unwrap_or(line);
-
-    // Strip async/unsafe modifiers (not const — it's both a modifier and keyword)
-    let stripped = stripped
-        .strip_prefix("async ")
-        .or_else(|| stripped.strip_prefix("unsafe "))
-        .unwrap_or(stripped);
-
-    // Only strip "const " as modifier when keyword is NOT "const " itself
-    let stripped = if keyword == "const " {
-        stripped
-    } else {
-        stripped.strip_prefix("const ").unwrap_or(stripped)
-    };
-
-    if !stripped.starts_with(keyword) {
-        return None;
-    }
-
-    let rest = &stripped[keyword.len()..];
-    let name: String = rest
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_')
-        .collect();
-
-    if name.is_empty() { None } else { Some(name) }
-}
-
-/// Collect original symbols from source files in a crate directory.
-fn collect_original_symbols(crate_dir: &Path) -> Result<Vec<String>> {
+/// Each file's symbols are qualified with that file's crate-relative module path
+/// (via [`ModuleResolver::compute_file_module_path`]) so a `src/foo.rs` item is
+/// keyed `crate::foo::bar`, exactly as `cargo expand` inlines it. Without this,
+/// an ordinary file-backed-module item would look "generated" to `diff_symbols`.
+///
+/// A lib+bin crate has two crate roots (`src/lib.rs` and `src/main.rs`), both
+/// mapping to the crate-root module path. Only the EXPANDED target's root (plus
+/// its module tree) belongs in the diff, so when the lib was expanded the binary
+/// roots (`src/main.rs` and `src/bin/*.rs`) are skipped, and when a binary was
+/// expanded the library root (`src/lib.rs`) is skipped. Otherwise a same-named
+/// crate-root item from the other target could mask a genuinely macro-generated
+/// symbol (false negative).
+fn collect_original_symbols(
+    crate_dir: &Path,
+    crate_name: &str,
+    expand_target: ExpandTarget,
+) -> Result<Vec<SymbolInfo>> {
+    use sqry_lang_rust::module_resolver::ModuleResolver;
     use walkdir::WalkDir;
 
+    let resolver = ModuleResolver::new(crate_dir.to_path_buf());
     let mut all_symbols = Vec::new();
 
     for entry in WalkDir::new(crate_dir)
@@ -778,15 +723,49 @@ fn collect_original_symbols(crate_dir: &Path) -> Result<Vec<String>> {
         .filter_map(std::result::Result::ok)
         .filter(|e| e.file_type().is_file() && e.path().extension().is_some_and(|ext| ext == "rs"))
     {
-        let content = std::fs::read_to_string(entry.path())
-            .with_context(|| format!("Failed to read {}", entry.path().display()))?;
-        let symbols = extract_rust_symbols_from_source(&content);
-        all_symbols.extend(symbols);
+        let path = entry.path();
+        if excluded_crate_root(path, crate_dir, expand_target) {
+            continue;
+        }
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let file_module_path = resolver.compute_file_module_path(path);
+        all_symbols.extend(extract_symbols_from_source_in_module(
+            &content,
+            crate_name,
+            file_module_path.as_deref(),
+        ));
     }
 
-    all_symbols.sort();
-    all_symbols.dedup();
     Ok(all_symbols)
+}
+
+/// Whether an original `.rs` file belongs to a crate target OTHER than the one
+/// `cargo expand` expanded, and must therefore be excluded from the diff.
+///
+/// When the library was expanded, the binary roots (`src/main.rs`, `src/bin/*`)
+/// are foreign; when a binary was expanded, the library root (`src/lib.rs`) is.
+fn excluded_crate_root(path: &Path, crate_dir: &Path, expand_target: ExpandTarget) -> bool {
+    // Match Cargo's target roots CRATE-RELATIVE. A previous version scanned the
+    // absolute path for any component named `bin`, which wrongly excluded a crate
+    // living under a directory named `bin` (dropping every file) and legitimate
+    // library modules like `src/foo/bin/bar.rs`. `Path::{==, starts_with}` here
+    // match whole components, so `src/bin/x.rs` is caught but `src/bingo.rs` and
+    // `src/foo/bin/bar.rs` are not.
+    let Ok(rel) = path.strip_prefix(crate_dir) else {
+        return false;
+    };
+    let is_src_main = rel == Path::new("src/main.rs");
+    let in_src_bin = rel.starts_with("src/bin");
+    let is_src_lib = rel == Path::new("src/lib.rs");
+
+    match expand_target {
+        // The lib was expanded: exclude the binary targets (`src/main.rs` and
+        // any `src/bin/*.rs`), which are not part of the library crate.
+        ExpandTarget::Lib => is_src_main || in_src_bin,
+        // A binary was expanded: exclude the library root (`src/lib.rs`).
+        ExpandTarget::Default => is_src_lib,
+    }
 }
 
 /// Get the current Rust compiler version.
@@ -829,7 +808,7 @@ fn print_dry_run_plan(
             "refresh": refresh,
             "cache_dir": cache_dir.display().to_string(),
             "crates": crates.iter().map(|(name, path)| {
-                let hash = compute_source_hash(path).unwrap_or_default();
+                let hash = compute_crate_source_hash(path).unwrap_or_default();
                 let cache_file = cache_dir.join(format!("{name}.json"));
                 let fresh = is_cache_fresh(&cache_file, &hash);
                 serde_json::json!({
@@ -854,7 +833,7 @@ fn print_dry_run_plan(
         println!("Crates ({}):", crates.len());
 
         for (name, path) in crates {
-            let hash = compute_source_hash(path).unwrap_or_default();
+            let hash = compute_crate_source_hash(path).unwrap_or_default();
             let cache_file = cache_dir.join(format!("{name}.json"));
             let fresh = is_cache_fresh(&cache_file, &hash);
 
@@ -930,115 +909,198 @@ fn print_expand_results(cli: &Cli, results: &[CrateExpandResult], cache_dir: &Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqry_lang_rust::macro_boundaries::expand_cache::GeneratedSymbolKind;
 
     #[test]
-    fn test_is_valid_symbol_name() {
-        assert!(is_valid_symbol_name("MyStruct"));
-        assert!(is_valid_symbol_name("my_crate::MyStruct"));
-        assert!(is_valid_symbol_name("my_crate::<MyStruct as Debug>::fmt"));
-        assert!(is_valid_symbol_name("some_fn"));
-        assert!(is_valid_symbol_name("CONSTANT_NAME"));
-        // Control characters should be rejected
-        assert!(!is_valid_symbol_name("bad\x00name"));
-        assert!(!is_valid_symbol_name("bad\nname"));
-        // Shell metacharacters should be rejected
-        assert!(!is_valid_symbol_name("$(evil)"));
-        assert!(!is_valid_symbol_name("`backtick`"));
-        assert!(!is_valid_symbol_name("semi;colon"));
-        assert!(!is_valid_symbol_name("pipe|char"));
-    }
-
-    #[test]
-    fn test_extract_decl_name_fn() {
-        assert_eq!(
-            extract_decl_name("fn main() {", "fn "),
-            Some("main".to_string())
-        );
-        assert_eq!(
-            extract_decl_name("pub fn foo() {", "fn "),
-            Some("foo".to_string())
-        );
-        assert_eq!(
-            extract_decl_name("pub(crate) fn bar() {", "fn "),
-            Some("bar".to_string())
-        );
-        assert_eq!(
-            extract_decl_name("async fn baz() {", "fn "),
-            Some("baz".to_string())
-        );
-        assert_eq!(
-            extract_decl_name("pub async fn qux() {", "fn "),
-            Some("qux".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_decl_name_struct() {
-        assert_eq!(
-            extract_decl_name("struct Foo {", "struct "),
-            Some("Foo".to_string())
-        );
-        assert_eq!(
-            extract_decl_name("pub struct Bar;", "struct "),
-            Some("Bar".to_string())
-        );
-    }
-
-    #[test]
-    fn test_extract_decl_name_no_match() {
-        assert_eq!(extract_decl_name("let x = 5;", "fn "), None);
-        assert_eq!(extract_decl_name("// fn foo", "fn "), None);
-    }
-
-    #[test]
-    fn test_extract_rust_symbols_from_source() {
+    fn test_sym_to_generated_carries_structured_pieces_not_diff_key() {
+        // Extract a derive-style method and confirm the persisted GeneratedSymbol
+        // carries structured pieces (never the crate-prefixed diff key).
         let source = r"
-pub fn hello() {}
-struct MyStruct {
-    field: i32,
+mod widgets {
+    pub struct Gizmo;
+    impl Clone for Gizmo {
+        fn clone(&self) -> Self { Gizmo }
+    }
 }
-enum Color { Red, Green, Blue }
-const MAX: usize = 100;
-mod inner {}
 ";
-        let symbols = extract_rust_symbols_from_source(source);
-        assert!(symbols.contains(&"hello".to_string()));
-        assert!(symbols.contains(&"MyStruct".to_string()));
-        assert!(symbols.contains(&"Color".to_string()));
-        assert!(symbols.contains(&"MAX".to_string()));
-        assert!(symbols.contains(&"inner".to_string()));
+        let symbols = extract_symbols_from_source(source, "my_crate");
+        let clone = symbols
+            .iter()
+            .find(|s| s.qualified_name == "my_crate::widgets::<Gizmo as Clone>::clone")
+            .expect("trait-impl method must be extracted");
+
+        let generated = sym_to_generated(clone);
+        assert_eq!(generated.simple_name, "clone");
+        // Plain impl type, trait dropped (matches the live graph naming).
+        assert_eq!(generated.impl_type.as_deref(), Some("Gizmo"));
+        assert_eq!(generated.kind, GeneratedSymbolKind::Method);
+        // Only the module scope survives (the impl pushes no segment).
+        assert_eq!(generated.scope_segments.len(), 1);
+        assert_eq!(generated.scope_segments[0].name, "widgets");
+        assert!(generated.scope_segments[0].is_module);
     }
 
     #[test]
-    fn test_expand_cache_entry_roundtrip() {
-        let entry = ExpandCacheEntry {
-            crate_name: "test_crate".to_string(),
-            rust_version: "rustc 1.94.0".to_string(),
-            generated_at: "1234567890Z".to_string(),
-            source_hash: "abc123".to_string(),
-            files: {
-                let mut map = HashMap::new();
-                map.insert(
-                    "src/lib.rs".to_string(),
-                    ExpandCacheFileEntry {
-                        original_symbols: vec!["Foo".to_string()],
-                        expanded_symbols: vec!["Foo".to_string(), "Foo_fmt".to_string()],
-                        generated_symbols: vec!["Foo_fmt".to_string()],
-                        confidence: "heuristic".to_string(),
-                    },
-                );
-                map
-            },
-        };
+    fn test_collect_original_symbols_reads_all_rs_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn root_fn() {}\n").unwrap();
+        std::fs::write(src.join("helper.rs"), "pub fn helper_fn() {}\n").unwrap();
 
-        let json = serde_json::to_string_pretty(&entry).unwrap();
-        let parsed: ExpandCacheEntry = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.crate_name, "test_crate");
-        assert_eq!(parsed.source_hash, "abc123");
-        assert_eq!(parsed.files.len(), 1);
+        let symbols = collect_original_symbols(dir.path(), "my_crate", ExpandTarget::Lib).unwrap();
+        let names: Vec<&str> = symbols.iter().map(|s| s.simple_name.as_str()).collect();
+        assert!(names.contains(&"root_fn"));
+        assert!(names.contains(&"helper_fn"));
+    }
 
-        let file_entry = parsed.files.get("src/lib.rs").unwrap();
-        assert_eq!(file_entry.generated_symbols, vec!["Foo_fmt"]);
+    #[test]
+    fn test_collect_original_symbols_qualifies_file_module_path() {
+        // A file-backed module (`src/foo.rs`) item must be keyed
+        // `crate::foo::bar`, exactly as `cargo expand` inlines it, so the diff
+        // does NOT misclassify it as macro-generated. The crate root (`lib.rs`)
+        // stays at the crate root.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("nested")).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn root_fn() {}\n").unwrap();
+        std::fs::write(src.join("foo.rs"), "pub fn bar() {}\n").unwrap();
+        std::fs::write(src.join("nested/deep.rs"), "pub fn deep_fn() {}\n").unwrap();
+
+        let symbols = collect_original_symbols(dir.path(), "my_crate", ExpandTarget::Lib).unwrap();
+        let qnames: Vec<&str> = symbols.iter().map(|s| s.qualified_name.as_str()).collect();
+
+        // Crate root: no module prefix.
+        assert!(
+            qnames.contains(&"my_crate::root_fn"),
+            "crate-root fn must stay at the crate root, got {qnames:?}"
+        );
+        // `src/foo.rs` -> module `foo`.
+        assert!(
+            qnames.contains(&"my_crate::foo::bar"),
+            "src/foo.rs item must be qualified with its file module path, got {qnames:?}"
+        );
+        // `src/nested/deep.rs` -> module `nested::deep`.
+        assert!(
+            qnames.contains(&"my_crate::nested::deep::deep_fn"),
+            "nested file module path must be reflected, got {qnames:?}"
+        );
+
+        // The `foo::bar` original symbol carries the leading `foo` module
+        // segment, matching what `cargo expand` produces (so `scope_segments`
+        // compares equal in the dedup key too).
+        let bar = symbols
+            .iter()
+            .find(|s| s.simple_name == "bar")
+            .expect("bar extracted");
+        assert_eq!(bar.scope_segments.len(), 1);
+        assert_eq!(bar.scope_segments[0].name, "foo");
+        assert!(bar.scope_segments[0].is_module);
+    }
+
+    #[test]
+    fn test_file_backed_module_item_not_flagged_generated() {
+        // The Codex blocker end-to-end (writer/diff side): an ordinary item in a
+        // file-backed module must NOT appear in `diff.generated`. We simulate
+        // `cargo expand` output (everything inlined into `mod foo { .. }`) and
+        // the original file tree, and prove the diff is clean.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub mod foo;\npub fn root_fn() {}\n").unwrap();
+        std::fs::write(src.join("foo.rs"), "pub fn bar() {}\n").unwrap();
+
+        // Expanded output: cargo expand inlines `src/foo.rs` as `mod foo { .. }`.
+        let expanded_output = "pub mod foo { pub fn bar() {} }\npub fn root_fn() {}\n";
+        let expanded = extract_symbols_from_source(expanded_output, "my_crate");
+        let original = collect_original_symbols(dir.path(), "my_crate", ExpandTarget::Lib).unwrap();
+
+        let diff = diff_symbols(&original, &expanded);
+        assert!(
+            !diff.generated.iter().any(|g| g.contains("bar")),
+            "ordinary file-backed-module item `bar` must NOT be flagged generated; got {:?}",
+            diff.generated
+        );
+        assert!(
+            !diff.generated.iter().any(|g| g.contains("root_fn")),
+            "crate-root item must not be flagged generated; got {:?}",
+            diff.generated
+        );
+    }
+
+    #[test]
+    fn test_lib_expand_excludes_binary_roots() {
+        // A lib+bin crate: `cargo expand --lib` expands the library, so the
+        // binary roots (`src/main.rs`, `src/bin/tool.rs`) must be EXCLUDED from
+        // the original set. Otherwise a same-named crate-root item in main.rs
+        // could mask a genuinely macro-generated lib crate-root symbol.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("bin")).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn lib_fn() {}\n").unwrap();
+        std::fs::write(src.join("main.rs"), "fn main_only() {}\n").unwrap();
+        std::fs::write(src.join("bin/tool.rs"), "fn tool_only() {}\n").unwrap();
+
+        let symbols = collect_original_symbols(dir.path(), "my_crate", ExpandTarget::Lib).unwrap();
+        let names: Vec<&str> = symbols.iter().map(|s| s.simple_name.as_str()).collect();
+        assert!(names.contains(&"lib_fn"), "lib root must be included");
+        assert!(
+            !names.contains(&"main_only"),
+            "src/main.rs must be excluded when the lib is expanded"
+        );
+        assert!(
+            !names.contains(&"tool_only"),
+            "src/bin/*.rs must be excluded when the lib is expanded"
+        );
+    }
+
+    #[test]
+    fn test_lib_module_named_bin_not_excluded() {
+        // Regression: a legitimate library module tree under a directory named
+        // `bin` (e.g. src/foo/bin/bar.rs) must NOT be excluded on --lib expand.
+        // The prior check scanned for ANY `bin` path component and wrongly
+        // dropped these files, so their real symbols were misclassified as
+        // macro-generated. The exclusion is crate-relative to `src/bin/*` only.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(src.join("foo/bin")).unwrap();
+        std::fs::create_dir_all(src.join("bin")).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn lib_fn() {}\n").unwrap();
+        std::fs::write(src.join("foo/bin/bar.rs"), "pub fn deep_lib_fn() {}\n").unwrap();
+        // A genuine foreign binary root, for contrast.
+        std::fs::write(src.join("bin/tool.rs"), "fn tool_only() {}\n").unwrap();
+
+        let symbols = collect_original_symbols(dir.path(), "my_crate", ExpandTarget::Lib).unwrap();
+        let names: Vec<&str> = symbols.iter().map(|s| s.simple_name.as_str()).collect();
+        assert!(
+            names.contains(&"deep_lib_fn"),
+            "src/foo/bin/bar.rs is a library module and must NOT be excluded"
+        );
+        assert!(names.contains(&"lib_fn"), "lib root must be included");
+        assert!(
+            !names.contains(&"tool_only"),
+            "real src/bin/*.rs must still be excluded on --lib expand"
+        );
+    }
+
+    #[test]
+    fn test_default_expand_excludes_lib_root() {
+        // A binary was expanded (no lib target found): the library root
+        // (`src/lib.rs`) is foreign and must be excluded.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("lib.rs"), "pub fn lib_fn() {}\n").unwrap();
+        std::fs::write(src.join("main.rs"), "fn main_fn() {}\n").unwrap();
+
+        let symbols =
+            collect_original_symbols(dir.path(), "my_crate", ExpandTarget::Default).unwrap();
+        let names: Vec<&str> = symbols.iter().map(|s| s.simple_name.as_str()).collect();
+        assert!(names.contains(&"main_fn"), "binary root must be included");
+        assert!(
+            !names.contains(&"lib_fn"),
+            "src/lib.rs must be excluded when a binary is expanded"
+        );
     }
 
     #[test]
@@ -1050,47 +1112,69 @@ mod inner {}
     }
 
     #[test]
-    fn test_is_cache_fresh_matching_hash() {
+    fn test_is_cache_fresh_matching_hash_and_schema() {
         let dir = tempfile::tempdir().unwrap();
         let cache_path = dir.path().join("test.json");
         let entry = ExpandCacheEntry {
+            schema_version: EXPAND_CACHE_SCHEMA_VERSION,
             crate_name: "test".to_string(),
             rust_version: "1.94.0".to_string(),
             generated_at: "0Z".to_string(),
             source_hash: "hash123".to_string(),
-            files: HashMap::new(),
+            confidence: "heuristic".to_string(),
+            generated_symbols: vec![],
         };
         let json = serde_json::to_string(&entry).unwrap();
-        std::fs::write(&cache_path, json).unwrap();
+        std::fs::write(&cache_path, &json).unwrap();
 
         assert!(is_cache_fresh(&cache_path, "hash123"));
         assert!(!is_cache_fresh(&cache_path, "different_hash"));
+
+        // A matching hash but stale schema version is NOT fresh.
+        let mut stale = entry;
+        stale.schema_version = EXPAND_CACHE_SCHEMA_VERSION - 1;
+        std::fs::write(&cache_path, serde_json::to_string(&stale).unwrap()).unwrap();
+        assert!(!is_cache_fresh(&cache_path, "hash123"));
     }
 
     #[test]
-    fn test_compute_source_hash_deterministic() {
+    fn test_writer_round_trip_through_expand_cache() {
+        // End-to-end (minus the cargo-expand subprocess): a written entry is
+        // readable back through ExpandCache with qualified, kinded symbols.
+        let source = r"
+pub struct Foo;
+impl Foo {
+    pub fn generated_new() -> Self { Foo }
+}
+";
+        let symbols = extract_symbols_from_source(source, "round_trip");
+        let generated: Vec<GeneratedSymbol> = symbols
+            .iter()
+            .filter(|s| s.simple_name == "generated_new")
+            .map(sym_to_generated)
+            .collect();
+        assert_eq!(generated.len(), 1);
+
+        let entry = ExpandCacheEntry {
+            schema_version: EXPAND_CACHE_SCHEMA_VERSION,
+            crate_name: "round_trip".to_string(),
+            rust_version: "1.94.0".to_string(),
+            generated_at: "0Z".to_string(),
+            source_hash: "hash".to_string(),
+            confidence: "heuristic".to_string(),
+            generated_symbols: generated,
+        };
+
         let dir = tempfile::tempdir().unwrap();
-        let src_dir = dir.path().join("src");
-        std::fs::create_dir_all(&src_dir).unwrap();
-        std::fs::write(src_dir.join("lib.rs"), "fn main() {}").unwrap();
-        std::fs::write(src_dir.join("helper.rs"), "fn helper() {}").unwrap();
+        let cache = ExpandCache::new(dir.path().to_path_buf()).unwrap();
+        cache.write("round_trip", &entry).unwrap();
 
-        let hash1 = compute_source_hash(dir.path()).unwrap();
-        let hash2 = compute_source_hash(dir.path()).unwrap();
-        assert_eq!(hash1, hash2, "Hashes should be deterministic");
-        assert!(!hash1.is_empty());
-    }
-
-    #[test]
-    fn test_compute_source_hash_changes_on_modification() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("lib.rs"), "fn main() {}").unwrap();
-
-        let hash1 = compute_source_hash(dir.path()).unwrap();
-
-        std::fs::write(dir.path().join("lib.rs"), "fn main() { println!() }").unwrap();
-        let hash2 = compute_source_hash(dir.path()).unwrap();
-
-        assert_ne!(hash1, hash2, "Hash should change when source changes");
+        let read_back = cache.read("round_trip").unwrap().unwrap();
+        assert_eq!(read_back.schema_version, EXPAND_CACHE_SCHEMA_VERSION);
+        assert_eq!(read_back.generated_symbols.len(), 1);
+        let sym = &read_back.generated_symbols[0];
+        assert_eq!(sym.simple_name, "generated_new");
+        assert_eq!(sym.impl_type.as_deref(), Some("Foo"));
+        assert_eq!(sym.kind, GeneratedSymbolKind::Method);
     }
 }

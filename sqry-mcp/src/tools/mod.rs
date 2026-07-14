@@ -56,6 +56,7 @@ pub use validation::{
     FindCyclesArgs,
     FindDuplicatesArgs,
     FindUnusedArgs,
+    GenerateOverviewArgs,
     // Introspection tool args
     GetDefinitionArgs,
     GetDocumentSymbolsArgs,

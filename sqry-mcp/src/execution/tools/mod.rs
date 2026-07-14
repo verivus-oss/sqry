@@ -10,6 +10,7 @@ mod graph;
 mod index;
 mod introspection;
 mod navigation;
+mod overview;
 mod planner_query;
 mod relations;
 mod rules;
@@ -41,6 +42,8 @@ pub use navigation::{
     execute_get_definition, execute_get_document_symbols, execute_get_hover_info,
     execute_get_references, execute_get_workspace_symbols,
 };
+pub use overview::execute_generate_overview;
+pub(crate) use overview::parse_sections as parse_overview_sections;
 pub use planner_query::execute_sqry_query;
 pub use relations::{execute_call_hierarchy, execute_relation_query};
 pub use rules::execute_rules_run;
@@ -55,6 +58,8 @@ pub(crate) use analysis::inner as analysis_inner;
 pub(crate) use graph::inner as graph_inner;
 #[allow(unused_imports)]
 pub(crate) use introspection::inner as introspection_inner;
+#[allow(unused_imports)]
+pub(crate) use overview::inner as overview_inner;
 #[allow(unused_imports)]
 pub(crate) use relations::inner as relations_inner;
 #[allow(unused_imports)]

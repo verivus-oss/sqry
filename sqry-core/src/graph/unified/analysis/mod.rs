@@ -9,17 +9,27 @@
 //! All analyses are persisted to disk and memory-mapped for fast loading.
 
 pub mod cache;
+pub mod centrality;
+pub mod community;
 pub mod condensation;
 pub mod csr;
+pub mod hotspots;
 pub mod persistence;
 pub mod reachability;
 pub mod scc;
+pub mod subsystems;
 
 pub use cache::AnalysisCache;
+pub use centrality::{HubMetric, HubOpts, HubRank, KindMask, rank_hubs};
+pub use community::{
+    Community, CommunityGate, CommunityOpts, CommunityOutcome, CommunityReport, GateVerdict,
+    Resolution, detect_communities,
+};
 pub use condensation::{
     BudgetExceededPolicy, CondensationDag, Interval, LabelBudgetConfig, ReachabilityStrategy,
 };
 pub use csr::{CsrAdjacency, EdgeKindDiscriminant};
+pub use hotspots::{HotspotRank, rank_hotspots};
 pub use persistence::{
     AnalysisIdentity, compute_manifest_hash, compute_node_id_hash, load_condensation,
     load_condensation_checked, load_csr, load_csr_checked, load_scc, load_scc_checked,
@@ -27,6 +37,7 @@ pub use persistence::{
     try_load_scc_and_condensation,
 };
 pub use scc::SccData;
+pub use subsystems::{Coupling, CouplingEdgeKind, Subsystem, SubsystemOpts, aggregate_subsystems};
 
 use crate::graph::unified::compaction::CompactionSnapshot;
 use crate::graph::unified::edge::{EdgeKind, ResolvedVia};

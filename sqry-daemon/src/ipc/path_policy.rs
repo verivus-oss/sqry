@@ -29,12 +29,39 @@ use sqry_core::project::{absolutize_without_resolution, canonicalize_path};
 
 use super::methods::MethodError;
 
+/// #566: enforce that a user-supplied workspace path is absolute before it is
+/// resolved.
+///
+/// The daemon serves many workspaces and has no client working directory to
+/// resolve a relative path against (unlike standalone sqry-mcp, which pins the
+/// client root via the MCP `roots/list` callback). Any resolver that joins a
+/// relative path onto `std::env::current_dir()` therefore silently selects the
+/// daemon's own process directory (`$HOME` under the systemd user unit),
+/// picking the wrong workspace. This is the single guard shared by every
+/// daemon-side path resolver (`resolve_index_root` here,
+/// `tool_core::resolve_path`, and the revision-target query/search handlers).
+///
+/// Returns the canonical rejection message on failure so each caller can wrap
+/// it in its own error type.
+pub(crate) fn ensure_absolute_workspace_path(raw: &Path) -> Result<(), String> {
+    if raw.is_absolute() {
+        return Ok(());
+    }
+    Err(format!(
+        "workspace path must be absolute in daemon mode; received relative path {raw:?}. \
+         The daemon has no client working directory to resolve it against (it would resolve \
+         against the daemon's own directory). Pass an absolute path, or load the workspace \
+         with `sqry daemon load <ABSOLUTE_PATH>`."
+    ))
+}
+
 /// Resolve a user-supplied `index_root` into the canonical path used
 /// to construct a [`crate::workspace::WorkspaceKey`].
 ///
 /// # Errors
 ///
 /// Returns [`MethodError::InvalidParams`] (wire code `-32602`) when:
+/// - the path is not absolute (#566: no daemon-side CWD to resolve against)
 /// - the input cannot be absolutised (e.g., the current working
 ///   directory probe fails)
 /// - the path exists and is not a directory
@@ -42,6 +69,8 @@ use super::methods::MethodError;
 /// - the filesystem stat call fails for any other reason
 /// - the canonicalisation call fails on an existing directory
 pub fn resolve_index_root(raw: &Path) -> Result<PathBuf, MethodError> {
+    ensure_absolute_workspace_path(raw)
+        .map_err(|reason| MethodError::InvalidParams(serde_json::Error::custom(reason)))?;
     let absolutised = absolutize_without_resolution(raw).map_err(|e| {
         MethodError::InvalidParams(serde_json::Error::custom(format!(
             "index_root absolutise: {e}"
@@ -123,17 +152,35 @@ mod tests {
     }
 
     #[test]
-    fn relative_path_absolutises_against_cwd() {
-        let tmp = tempdir().unwrap();
-        let sub = tmp.path().join("sub");
-        std::fs::create_dir(&sub).unwrap();
-        let prev = std::env::current_dir().unwrap();
-        // chdir into tmp so "sub" is resolvable lexically.
-        std::env::set_current_dir(tmp.path()).unwrap();
-        let got = resolve_index_root(Path::new("sub"));
-        // Restore cwd BEFORE asserting so a failure doesn't leak state.
-        std::env::set_current_dir(&prev).unwrap();
-        let got = got.expect("relative existing dir must resolve");
-        assert!(got.is_absolute(), "result must be absolute: {got:?}");
+    fn ensure_absolute_workspace_path_contract() {
+        // Absolute paths pass; relative paths (and `.`) are rejected with a
+        // message naming the absolute-path requirement.
+        assert!(ensure_absolute_workspace_path(Path::new("/abs/dir")).is_ok());
+        for rel in ["sub", ".", "./x", "../y"] {
+            let msg = ensure_absolute_workspace_path(Path::new(rel))
+                .expect_err("relative path must be rejected");
+            assert!(
+                msg.contains("absolute"),
+                "message must mention absolute requirement for {rel:?}: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn relative_path_rejected() {
+        // #566: a relative path in daemon mode has no client working directory
+        // to resolve against, so it must be rejected rather than absolutised
+        // against the daemon's own CWD (which would silently select the wrong
+        // workspace). No chdir needed: the guard fires before any CWD use.
+        let err = resolve_index_root(Path::new("sub")).unwrap_err();
+        match err {
+            MethodError::InvalidParams(e) => {
+                assert!(
+                    e.to_string().contains("absolute"),
+                    "reason must mention the absolute-path requirement: {e}"
+                );
+            }
+            other => panic!("expected InvalidParams, got {other:?}"),
+        }
     }
 }

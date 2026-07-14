@@ -201,6 +201,7 @@ sqry provides **37 MCP tools** for AI/LLM integration:
 | `list_symbols` | List symbols with pagination |
 | `get_graph_stats` | Get graph statistics |
 | `get_insights` | Get codebase health indicators |
+| `generate_overview` | One-call repository orientation map (summary, hubs, subsystems, hotspots, issues, suggested queries) |
 | `complexity_metrics` | Get cyclomatic complexity metrics |
 | `workspace_status` | Report logical workspace identity, source roots, and per-root index status |
 

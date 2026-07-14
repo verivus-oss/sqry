@@ -103,7 +103,6 @@ semver.workspace = true
 log.workspace = true
 blake3.workspace = true
 zstd.workspace = true
-cacache.workspace = true
 sha2.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }

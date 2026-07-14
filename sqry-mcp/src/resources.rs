@@ -270,6 +270,8 @@ fn tool_category(name: &str) -> ToolCategory {
         "get_index_status"
         | "get_graph_stats"
         | "get_insights"
+        // One-call repository orientation map (agent parity with `sqry overview`).
+        | "generate_overview"
         | "rebuild_index"
         | "list_files"
         | "list_symbols"
@@ -458,6 +460,7 @@ unified graph; results are byte-exact, not signature-substring matches:
 | `get_index_status` | Index status and metadata | - |
 | `get_graph_stats` | Node, edge, file counts + language breakdown | - |
 | `get_insights` | Health metrics: cycles, quality indicators | - |
+| `generate_overview` | One-call orientation map: summary+health, hubs, subsystems, hotspots, issues, suggested queries | top:int?, sections:str?, group_depth:int? |
 | `rebuild_index` | Rebuild code graph from source | force:bool? |
 | `list_files` | List indexed files | language:str? |
 | `list_symbols` | List indexed symbols | kind:str?, language:str?, items_only:bool? |
@@ -864,6 +867,7 @@ mod tests {
             "get_index_status".into(),
             "get_graph_stats".into(),
             "get_insights".into(),
+            "generate_overview".into(),
             "rebuild_index".into(),
             "list_files".into(),
             "list_symbols".into(),
@@ -958,6 +962,7 @@ mod tests {
             "get_index_status",
             "get_graph_stats",
             "get_insights",
+            "generate_overview",
             "rebuild_index",
             "list_files",
             "list_symbols",

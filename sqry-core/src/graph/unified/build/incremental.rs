@@ -1083,7 +1083,16 @@ fn phase3c_reparse_closure<S: std::hash::BuildHasher>(
         // that all fire strictly before this loop, and also distinct
         // from the post-substep-4 check that fires strictly after.
         cancellation.check()?;
-        match parse_file(path.as_path(), plugins) {
+        // Phase 1c follow-on: the incremental / daemon reparse path does not yet
+        // thread the workspace's effective macro / cfg options, so it reparses
+        // with defaults (empty = today's behaviour). This keeps incremental
+        // rebuilds producing the same graph they do today; `sqry index` is the
+        // only surface that applies `--cfg` for now.
+        match parse_file(
+            path.as_path(),
+            plugins,
+            &super::entrypoint::MacroBuildOptions::default(),
+        ) {
             Ok(ParsedFileOutcome::Parsed(pf)) => {
                 parsed.push((path, pf));
             }

@@ -846,6 +846,13 @@ pub struct StagingGraph {
     /// remapped the embedded staging-local `NodeId`s / `StringId`s.
     /// Plugins for other languages leave this empty.
     go_hints: GoHints,
+    /// Rust-plugin-private per-file macro / cfg options (Phase 1a `--cfg`).
+    ///
+    /// Set by `parse_file` immediately after `new()` from
+    /// [`BuildConfig::macro_options`](super::entrypoint::BuildConfig); read by
+    /// the Rust builder at Pass 2.5 to populate its `MacroBoundaryConfig`.
+    /// Empty on every non-Rust staging graph (the other plugins never read it).
+    macro_options: super::entrypoint::MacroBuildOptions,
 }
 
 impl StagingGraph {
@@ -867,6 +874,7 @@ impl StagingGraph {
             macro_metadata: crate::graph::unified::storage::metadata::NodeMetadataStore::new(),
             c_indirect: None,
             go_hints: GoHints::default(),
+            macro_options: super::entrypoint::MacroBuildOptions::default(),
         }
     }
 
@@ -889,6 +897,26 @@ impl StagingGraph {
     /// [`GoReceiverCallHint`] entries during AST traversal.
     pub fn go_hints_mut(&mut self) -> &mut GoHints {
         &mut self.go_hints
+    }
+
+    /// Set the Rust-plugin-private per-file macro / cfg options
+    /// (Phase 1a `--cfg`).
+    ///
+    /// Called by `parse_file` right after `new()`, once per file, on a fresh
+    /// thread-local staging graph, so no synchronisation is required under the
+    /// parallel parse.
+    pub fn set_macro_options(&mut self, opts: super::entrypoint::MacroBuildOptions) {
+        self.macro_options = opts;
+    }
+
+    /// Shared borrow of the Rust-plugin-private per-file macro / cfg options
+    /// (Phase 1a `--cfg`).
+    ///
+    /// Returns the empty default on non-Rust staging graphs. The Rust builder
+    /// reads through this accessor at Pass 2.5.
+    #[must_use]
+    pub fn macro_options(&self) -> &super::entrypoint::MacroBuildOptions {
+        &self.macro_options
     }
 
     /// Approximate memory footprint of this staging buffer in bytes.

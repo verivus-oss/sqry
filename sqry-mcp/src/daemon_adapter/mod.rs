@@ -68,17 +68,18 @@ use crate::engine::canonicalize_in_workspace_enforced;
 use crate::execution::ToolExecution;
 use crate::execution::types::{
     ComplexityMetricsData, DependencyGraphData, DependencyImpactData, DirectCalleesData,
-    DirectCallersData, FindCyclesData, FindUnusedData, NodeInCycleData, RelationQueryData,
-    SemanticDiffData, SemanticSearchData, StructuralSimilarData, TracePathData,
+    DirectCallersData, FindCyclesData, FindUnusedData, GenerateOverviewData, NodeInCycleData,
+    RelationQueryData, SemanticDiffData, SemanticSearchData, StructuralSimilarData, TracePathData,
 };
 use crate::execution::{
-    analysis_inner, graph_inner, introspection_inner, relations_inner, search_inner, trace_inner,
+    analysis_inner, graph_inner, introspection_inner, overview_inner, relations_inner,
+    search_inner, trace_inner,
 };
 use crate::tools::{
     ComplexityMetricsArgs, DependencyImpactArgs, DirectCalleesArgs, DirectCallersArgs,
-    ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, IsNodeInCycleArgs, RelationQueryArgs,
-    SemanticDiffArgs, SemanticSearchArgs, ShowDependenciesArgs, StructuralSimilarArgs,
-    SubgraphArgs, TracePathArgs,
+    ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, GenerateOverviewArgs, IsNodeInCycleArgs,
+    RelationQueryArgs, SemanticDiffArgs, SemanticSearchArgs, ShowDependenciesArgs,
+    StructuralSimilarArgs, SubgraphArgs, TracePathArgs,
 };
 
 /// Caller-supplied, pre-resolved workspace state consumed by every
@@ -278,6 +279,19 @@ pub fn execute_export_graph_for_daemon(
 ) -> Result<ToolExecution<DependencyGraphData>> {
     let start = Instant::now();
     graph_inner::execute_export_graph(ctx, args, start)
+}
+
+/// Daemon-path wrapper for `generate_overview`.
+///
+/// # Errors
+///
+/// Returns an error if the overview report cannot be composed from `args`.
+pub fn execute_generate_overview_for_daemon(
+    ctx: &WorkspaceContext,
+    args: &GenerateOverviewArgs,
+) -> Result<ToolExecution<GenerateOverviewData>> {
+    let start = Instant::now();
+    overview_inner::execute_generate_overview(ctx, args, start)
 }
 
 /// Daemon-path wrapper for `complexity_metrics`.

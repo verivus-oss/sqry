@@ -1298,6 +1298,175 @@ pub struct ComplexityMetricsData {
 }
 
 // ============================================================================
+// Overview Tool Data Types (`generate_overview`)
+// ============================================================================
+
+/// Summary section of the overview report: graph stats + health block.
+///
+/// Mirrors the `sqry overview` CLI summary. Reuses [`LanguageStatsData`] and
+/// [`HealthIndicatorsData`] so the agent-facing report shares one shape with
+/// `get_insights`. `health` counts are the real cycle / unused / duplicate
+/// totals computed once for the whole report (not the cheap estimates), so the
+/// summary and the `issues` section stay internally consistent.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewSummaryData {
+    /// Total number of files.
+    pub total_files: usize,
+    /// Total number of symbols.
+    pub total_symbols: usize,
+    /// Total number of edges.
+    pub total_edges: usize,
+    /// Statistics by language.
+    pub languages: Vec<LanguageStatsData>,
+    /// Health indicators.
+    pub health: HealthIndicatorsData,
+}
+
+/// One load-bearing hub symbol (degree centrality).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewHubData {
+    /// Symbol name (qualified when available).
+    pub name: String,
+    /// Node kind.
+    pub kind: String,
+    /// Workspace-relative `path:line` location.
+    pub location: String,
+    /// Incoming `Calls` + `References` edge count.
+    pub fan_in: u32,
+    /// Outgoing `Calls` + `References` edge count.
+    pub fan_out: u32,
+}
+
+/// One path/package subsystem bucket.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewSubsystemData {
+    /// Bucket key (directory / package prefix).
+    pub key: String,
+    /// Number of symbols in the bucket.
+    pub size: u32,
+    /// Internal edge count within the bucket.
+    pub internal_edges: u64,
+    /// Representative symbol name for the bucket.
+    pub representative: String,
+}
+
+/// One cross-subsystem coupling.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewCouplingData {
+    /// Source subsystem key.
+    pub from: String,
+    /// Target subsystem key.
+    pub to: String,
+    /// Coupling edge kind.
+    pub kind: String,
+    /// Number of edges crossing this coupling.
+    pub count: u32,
+}
+
+/// Subsystems section: buckets + their couplings.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewSubsystemsData {
+    /// Ranked subsystem buckets.
+    pub subsystems: Vec<OverviewSubsystemData>,
+    /// Ranked cross-subsystem couplings.
+    pub couplings: Vec<OverviewCouplingData>,
+}
+
+/// One complexity hotspot (fan-out complexity).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewHotspotData {
+    /// Symbol name (qualified when available).
+    pub name: String,
+    /// Node kind.
+    pub kind: String,
+    /// Workspace-relative `path:line` location.
+    pub location: String,
+    /// Fan-out complexity score (outgoing `Calls` + deepest call chain).
+    pub score: usize,
+}
+
+/// A named symbol with a workspace-relative location.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewNamedLocationData {
+    /// Symbol name (qualified when available).
+    pub name: String,
+    /// Workspace-relative `path:line` location.
+    pub location: String,
+}
+
+/// One body-duplicate group.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewDuplicateData {
+    /// Stable group identifier (body-hash hex).
+    pub group_id: String,
+    /// Number of members.
+    pub count: usize,
+    /// Member symbol names.
+    pub members: Vec<String>,
+}
+
+/// One high-fan-out symbol.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewFanOutData {
+    /// Symbol name (qualified when available).
+    pub name: String,
+    /// Workspace-relative `path:line` location.
+    pub location: String,
+    /// Outgoing `Calls` + `References` edge count.
+    pub fan_out: u32,
+}
+
+/// Potential-issues section: cycles, unused public APIs, duplicates, fan-out.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OverviewIssuesData {
+    /// Call cycles, each an ordered ring of qualified names.
+    pub cycles: Vec<Vec<String>>,
+    /// Unused public API symbols.
+    pub unused_public: Vec<OverviewNamedLocationData>,
+    /// Body-duplicate groups.
+    pub duplicates: Vec<OverviewDuplicateData>,
+    /// High-fan-out symbols.
+    pub high_fan_out: Vec<OverviewFanOutData>,
+}
+
+/// Response data for the `generate_overview` tool: the one-call orientation
+/// map. Each section is optional and omitted from JSON when not selected.
+/// Field order is the serialization order (stable JSON contract), matching the
+/// canonical `sqry overview` report order.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerateOverviewData {
+    /// Summary (stats + health).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary: Option<OverviewSummaryData>,
+    /// Load-bearing hubs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hubs: Option<Vec<OverviewHubData>>,
+    /// Path/package subsystems + couplings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subsystems: Option<OverviewSubsystemsData>,
+    /// Complexity hotspots.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hotspots: Option<Vec<OverviewHotspotData>>,
+    /// Potential issues.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issues: Option<OverviewIssuesData>,
+    /// Ready-to-run sqry queries templated from the findings.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_questions: Option<Vec<String>>,
+}
+
+// ============================================================================
 // Macro Boundary Response Types
 // ============================================================================
 

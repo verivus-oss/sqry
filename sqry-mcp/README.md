@@ -1,6 +1,6 @@
 # sqry MCP Server
 
-**Version**: 28.0.3
+**Version**: 29.0.2
 
 `sqry-mcp` exposes sqry semantic code-search tools to Model Context Protocol clients.
 
@@ -20,7 +20,7 @@ sqry daemon load .
 sqry-mcp --daemon
 ```
 
-Standalone mode currently exposes 38 tools. Daemon-hosted MCP exposes a 16-tool subset backed by `sqryd`. Use dynamic discovery for exact schemas and descriptions:
+Standalone mode currently exposes 39 tools. Daemon-hosted MCP exposes a 17-tool subset backed by `sqryd`. Use dynamic discovery for exact schemas and descriptions:
 
 ```bash
 sqry-mcp --list-tools

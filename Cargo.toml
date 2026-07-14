@@ -129,7 +129,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "28.0.3"
+version = "29.0.2"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"
@@ -195,7 +195,6 @@ smallvec = "1.15"
 semver = "1.0"
 blake3 = "1.8"  # Fast cryptographic hashing for cache keys
 zstd = "0.13.3"   # Fast compression for index files (pinned for reproducibility)
-cacache = { version = "13", default-features = false, features = ["mmap", "tokio-runtime"] }
 
 # Parallel processing
 rayon = "1.12"

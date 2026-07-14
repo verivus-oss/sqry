@@ -2220,8 +2220,52 @@ pub struct ExpandCacheStatusParams {
     pub path: String,
 }
 
+/// `generate_overview` params: the agent-facing one-call orientation map.
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
+pub struct GenerateOverviewParams {
+    /// Workspace path.
+    #[serde(default = "default_path")]
+    pub path: String,
+
+    /// Maximum rows per ranked section (default: 10).
+    #[serde(default = "default_overview_top")]
+    #[schemars(range(min = 1, max = 200))]
+    pub top: usize,
+
+    /// Comma-separated subset of sections to include. Section names:
+    /// `summary`, `hubs`, `subsystems`, `hotspots`, `issues`, `questions`.
+    /// Omit for all sections in canonical report order.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sections: Option<String>,
+
+    /// Number of leading directory components that form a subsystem bucket key
+    /// (default: 2).
+    #[serde(default = "default_group_depth")]
+    #[schemars(range(min = 1, max = 16))]
+    pub group_depth: usize,
+}
+
+impl Default for GenerateOverviewParams {
+    fn default() -> Self {
+        Self {
+            path: default_path(),
+            top: default_overview_top(),
+            sections: None,
+            group_depth: default_group_depth(),
+        }
+    }
+}
+
 fn default_min_complexity() -> u32 {
     1
+}
+
+fn default_overview_top() -> usize {
+    10
+}
+
+fn default_group_depth() -> usize {
+    2
 }
 
 /// Call direction.

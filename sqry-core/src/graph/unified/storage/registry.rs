@@ -363,11 +363,15 @@ impl FileRegistry {
     ///
     /// [`NodeIdBearing`]: crate::graph::unified::rebuild::coverage::NodeIdBearing
     ///
-    /// Live in the default build: the consumer is the
-    /// `NodeIdBearing::all_node_ids` impl driven by the debug-build
-    /// residue check, reached from the ungated public
-    /// `build::incremental::incremental_rebuild` -> `finalize` path (the
-    /// `rebuild::coverage` unit tests exercise it too).
+    /// Live in debug and test builds only: the sole consumer is the
+    /// `NodeIdBearing::all_node_ids` impl driven by the tombstone-residue
+    /// check (`CodeGraph::assert_no_tombstone_residue_for`, itself
+    /// `#[cfg(any(debug_assertions, test))]`). Every release build compiles
+    /// that check out (the `rebuild-internals` feature gates other hooks, not
+    /// this helper), so it has no caller there; the `cfg_attr` below silences
+    /// the resulting release-only `dead_code` warning while keeping the lint
+    /// active in debug/test.
+    #[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
     pub(crate) fn iter_all_bucket_node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
         self.per_file_nodes.values().flat_map(|v| v.iter().copied())
     }

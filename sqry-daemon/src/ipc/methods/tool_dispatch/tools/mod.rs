@@ -13,6 +13,7 @@ pub(crate) mod direct_callers;
 pub(crate) mod export_graph;
 pub(crate) mod find_cycles;
 pub(crate) mod find_unused;
+pub(crate) mod generate_overview;
 pub(crate) mod is_node_in_cycle;
 pub(crate) mod relation_query;
 pub(crate) mod semantic_diff;

@@ -37,16 +37,16 @@ use crate::pagination::decode_cursor;
 use crate::tools::params::{
     ChangeTypeParam, ComplexityMetricsParams, CycleTypeParam, DependencyImpactParams,
     DirectCalleesParams, DirectCallersParams, EdgeKindParam, ExportGraphParams, FindCyclesParams,
-    FindUnusedParams, GraphFormatParam, IsNodeInCycleParams, PaginationParams, RelationQueryParams,
-    RelationTypeParam, SearchFiltersParams, SemanticDiffParams, SemanticSearchParams,
-    ShowDependenciesParams, StructuralSimilarParams, SubgraphParams, TracePathParams,
-    UnusedScopeParam, VisibilityParam,
+    FindUnusedParams, GenerateOverviewParams, GraphFormatParam, IsNodeInCycleParams,
+    PaginationParams, RelationQueryParams, RelationTypeParam, SearchFiltersParams,
+    SemanticDiffParams, SemanticSearchParams, ShowDependenciesParams, StructuralSimilarParams,
+    SubgraphParams, TracePathParams, UnusedScopeParam, VisibilityParam,
 };
 use crate::tools::{
     ChangeType, ComplexityMetricsArgs, CycleType, DependencyImpactArgs, DirectCalleesArgs,
-    DirectCallersArgs, ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, GitVersionRef,
-    IsNodeInCycleArgs, PaginationArgs, RelationQueryArgs, RelationType, SearchFilters,
-    SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs,
+    DirectCallersArgs, ExportGraphArgs, FindCyclesArgs, FindUnusedArgs, GenerateOverviewArgs,
+    GitVersionRef, IsNodeInCycleArgs, PaginationArgs, RelationQueryArgs, RelationType,
+    SearchFilters, SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs,
     StructuralSimilarArgs, SubgraphArgs, TracePathArgs, UnusedScope, Visibility,
 };
 
@@ -541,6 +541,30 @@ pub fn params_to_export_graph_args(params: Value) -> Result<ExportGraphArgs, Rpc
 ///
 /// Returns [`RpcError`] when JSON-RPC params are malformed or result-count
 /// bounds validation fails.
+/// Convert `generate_overview` params to internal args. Mirrors
+/// `server.rs::convert_generate_overview_params` (same bounds + section
+/// validation). `top` is bounded to `1..=200`, `group_depth` to `1..=16`, and
+/// `sections` is parsed into the canonical inclusion set (empty = all).
+pub fn params_to_generate_overview_args(params: Value) -> Result<GenerateOverviewArgs, RpcError> {
+    let params: GenerateOverviewParams = deserialise_params(params)?;
+    let top = validate_usize(i64::try_from(params.top).unwrap_or(i64::MAX), "top", 1, 200)?;
+    let group_depth = validate_usize(
+        i64::try_from(params.group_depth).unwrap_or(i64::MAX),
+        "group_depth",
+        1,
+        16,
+    )?;
+    let sections = crate::execution::parse_overview_sections(params.sections.as_deref())
+        .map_err(RpcError::validation)?;
+
+    Ok(GenerateOverviewArgs {
+        path: params.path,
+        top,
+        sections,
+        group_depth,
+    })
+}
+
 pub fn params_to_complexity_metrics_args(params: Value) -> Result<ComplexityMetricsArgs, RpcError> {
     let params: ComplexityMetricsParams = deserialise_params(params)?;
     let max_results = validate_max_results(params.max_results, 1000)?;

@@ -531,6 +531,14 @@ fn resolve_tree(root: &Path, oid: &str) -> Result<String, DaemonError> {
 }
 
 fn canonical_git_root(root: &Path) -> Result<PathBuf, DaemonError> {
+    // #566: `git -C <relative root>` runs against the daemon's own process CWD
+    // ($HOME under the systemd user unit), silently targeting the wrong
+    // repository. Reject a non-absolute root before invoking git. This is the
+    // single choke point for loadRevision's `req.root` (checked here before the
+    // selector's resolve_ref/commit/tree ever run) and the Worktree selector's
+    // optional `path`.
+    crate::ipc::path_policy::ensure_absolute_workspace_path(root)
+        .map_err(|reason| DaemonError::InvalidArgument { reason })?;
     let top = git_stdout(root, &["rev-parse", "--show-toplevel"])?;
     PathBuf::from(top)
         .canonicalize()
@@ -590,4 +598,26 @@ fn identity_error(err: &crate::workspace::revision::RepositoryIdentityError) -> 
 
 fn resolved_at_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+#[cfg(test)]
+mod path_guard_tests {
+    use super::canonical_git_root;
+    use std::path::Path;
+
+    #[test]
+    fn canonical_git_root_rejects_relative_root() {
+        // #566: a relative `req.root` must be rejected before `git -C` runs it
+        // against the daemon's own process CWD. The guard fires before any git
+        // invocation, so no repository is needed.
+        let err = canonical_git_root(Path::new("relative/repo"))
+            .expect_err("relative git root must be rejected");
+        match err {
+            crate::error::DaemonError::InvalidArgument { reason } => assert!(
+                reason.contains("absolute"),
+                "reason must mention the absolute-path requirement: {reason}"
+            ),
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
 }

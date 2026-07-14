@@ -2080,6 +2080,22 @@ pub struct ExpandCacheStatusArgs {
     pub path: String,
 }
 
+/// Arguments for `generate_overview` tool (post-validation).
+///
+/// `sections` is the canonicalized, deduplicated inclusion set in report order
+/// (empty means all sections); see `params_to_generate_overview_args`.
+#[derive(Debug, Clone)]
+pub struct GenerateOverviewArgs {
+    /// Workspace path.
+    pub path: String,
+    /// Maximum rows per ranked section.
+    pub top: usize,
+    /// Selected sections in canonical report order (empty = all).
+    pub sections: Vec<String>,
+    /// Directory-component depth for subsystem bucket keys.
+    pub group_depth: usize,
+}
+
 /// Arguments for `rebuild_index` tool.
 #[derive(Debug, Clone)]
 pub struct RebuildIndexArgs {

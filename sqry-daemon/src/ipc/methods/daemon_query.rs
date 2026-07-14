@@ -86,6 +86,12 @@ async fn handle_revision_query(
     req: QueryRequest,
     target: RevisionQueryTarget,
 ) -> Result<Value, MethodError> {
+    // #566: guard the direct-canonicalize revision branch (bypasses the
+    // `resolve_path` funnel) so a relative path is not resolved against the
+    // daemon's own CWD.
+    crate::ipc::path_policy::ensure_absolute_workspace_path(Path::new(&req.search_path)).map_err(
+        |reason| MethodError::Daemon(crate::error::DaemonError::InvalidArgument { reason }),
+    )?;
     let root = PathBuf::from(&req.search_path)
         .canonicalize()
         .map_err(|err| {

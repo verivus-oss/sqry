@@ -20,6 +20,12 @@ pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, Metho
         Value::Null => PruneRevisionsRequest::default(),
         other => serde_json::from_value(other).map_err(MethodError::InvalidParams)?,
     };
+    // #566: the optional `root` filter is a user-supplied path; reject a
+    // relative one rather than canonicalizing it against the daemon's own CWD.
+    if let Some(root) = req.root.as_deref() {
+        crate::ipc::path_policy::ensure_absolute_workspace_path(root)
+            .map_err(|reason| crate::error::DaemonError::InvalidArgument { reason })?;
+    }
     let root = req.root.as_deref().map(canonical_or_original);
     let store = RevisionArtifactStore::new(RevisionArtifactStore::default_cache_root());
     let statuses = ctx
@@ -117,4 +123,55 @@ fn apply_worktree_candidate(
         worktree: path.to_path_buf(),
         reason: "candidate is not under a configured managed worktree root".to_owned(),
     })
+}
+
+#[cfg(test)]
+mod path_guard_tests {
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use tokio_util::sync::CancellationToken;
+
+    use super::handle;
+    use crate::RebuildDispatcher;
+    use crate::config::DaemonConfig;
+    use crate::ipc::methods::{HandlerContext, MethodError};
+    use crate::ipc::shim_registry::ShimRegistry;
+    use crate::workspace::{EmptyGraphBuilder, WorkspaceManager};
+    use sqry_core::plugin::PluginManager;
+
+    fn make_ctx() -> HandlerContext {
+        let config = Arc::new(DaemonConfig::default());
+        let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
+        let plugins = Arc::new(PluginManager::default());
+        let dispatcher = RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&config), plugins);
+        let executor = Arc::new(sqry_core::query::executor::QueryExecutor::default());
+        HandlerContext {
+            manager,
+            dispatcher,
+            workspace_builder: Arc::new(EmptyGraphBuilder),
+            tool_executor: executor,
+            cpu_executor: crate::ipc::tool_core::cpu_executor::CpuExecutor::with_threads(1),
+            shim_registry: ShimRegistry::new(),
+            shutdown: CancellationToken::new(),
+            config,
+            daemon_version: "test",
+        }
+    }
+
+    #[test]
+    fn prune_revisions_rejects_relative_root_filter() {
+        // #566: the optional `root` filter is a user path; a relative one must
+        // be rejected, not canonicalized against the daemon CWD.
+        let ctx = make_ctx();
+        let err = handle(&ctx, json!({ "root": "relative/dir" }))
+            .expect_err("relative root filter must be rejected");
+        match err {
+            MethodError::Daemon(crate::error::DaemonError::InvalidArgument { reason }) => assert!(
+                reason.contains("absolute"),
+                "reason must mention the absolute-path requirement: {reason}"
+            ),
+            other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
 }

@@ -141,6 +141,7 @@ fn tool_arguments(name: &str, project: &Path) -> Option<Value> {
             json!({"duplicate_type": "signature", "threshold": 80, "max_results": 20})
         }
         "find_unused" => json!({"scope": "all", "max_results": 20}),
+        "generate_overview" => json!({"top": 10, "group_depth": 2}),
         "get_definition" => json!({"symbol": "process"}),
         "get_document_symbols" => json!({"file_path": "src/lib.rs"}),
         "get_graph_stats" => json!({}),

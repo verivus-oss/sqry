@@ -6,6 +6,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [29.0.2](https://github.com/verivus-oss/sqry/compare/v29.0.1...v29.0.2) - 2026-07-13
+
+### Other
+
+- update Cargo.toml dependencies
+## [29.0.1](https://github.com/verivus-oss/sqry/compare/v29.0.0...v29.0.1) - 2026-07-13
+
+### Other
+
+- update Cargo.toml dependencies
+## [29.0.0](https://github.com/verivus-oss/sqry/compare/v28.0.3...v29.0.0) - 2026-07-09
+
+### Added
+
+- *(index)* wire --cfg and --expand-cache into Rust macro-boundary analysis (post-#567) ([#574](https://github.com/verivus-oss/sqry/pull/574))
 ## [28.0.0](https://github.com/verivus-oss/sqry/compare/v27.0.8...v28.0.0) - 2026-07-07
 
 ### Documentation

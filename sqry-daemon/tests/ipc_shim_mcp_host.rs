@@ -4,7 +4,7 @@
 //! via rmcp `serve_client`. The 8 tests cover:
 //!
 //! 1. `mcp_host_serves_initialize` — rmcp initialize round-trip.
-//! 2. `mcp_host_tools_list_returns_16_subset` — tools/list returns 16 names
+//! 2. `mcp_host_tools_list_returns_17_subset` — tools/list returns 17 names
 //!    (the natural-language sqry_ask tool was removed).
 //! 3. `mcp_host_tools_call_semantic_search_fresh_verdict` — fresh workspace,
 //!    success response.
@@ -153,11 +153,11 @@ async fn mcp_host_serves_initialize() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: mcp_host_tools_list_returns_16_subset
+// Test 2: mcp_host_tools_list_returns_17_subset
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn mcp_host_tools_list_returns_16_subset() {
+async fn mcp_host_tools_list_returns_17_subset() {
     let server = TestServer::new().await;
     let (rh, wh) = connect_mcp_shim(&server).await;
     let running = rmcp::serve_client((), (rh, wh))
@@ -179,9 +179,9 @@ async fn mcp_host_tools_list_returns_16_subset() {
     );
     assert_eq!(
         list_result.tools.len(),
-        16,
-        "tools/list count must be 16 under default feature flags \
-         (15 + body-shape structural_similar, U07)"
+        17,
+        "tools/list count must be 17 under default feature flags \
+         (15 + body-shape structural_similar U07 + generate_overview)"
     );
 
     drop(running);
@@ -922,91 +922,79 @@ async fn mcp_host_rebuild_index_accepts_file_path() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 13: mcp_host_rebuild_index_defaults_path_to_dot
+// Test 13: mcp_host_rebuild_index_rejects_non_absolute_path
 //
-// Parity with standalone sqry-mcp: `rebuild_index` with no `path`
-// argument defaults to `"."` (the current working directory).
-// Regression test for Codex gpt-5.4 iter-0 finding 2 (MAJOR).
+// #566: unlike standalone sqry-mcp (which resolves an omitted/`.` path
+// against the client launch directory via the MCP `roots/list` callback),
+// the daemon has no client working directory. A relative or omitted
+// `rebuild_index` path would otherwise canonicalize against the daemon's
+// own process CWD ($HOME under the systemd user unit), silently targeting
+// the wrong workspace. The daemon must reject both with a clear
+// `InvalidArgument`. (Supersedes the former
+// `mcp_host_rebuild_index_defaults_path_to_dot` parity test, which encoded
+// the pre-#566 silent-CWD behavior.)
 // ---------------------------------------------------------------------------
 
-/// Panic-safe guard that saves the current process CWD on construction
-/// and restores it on drop. Prevents tests that mutate CWD from
-/// permanently polluting the test binary's global state even on panic.
-struct CwdGuard {
-    prev: std::path::PathBuf,
-}
-
-impl CwdGuard {
-    fn change_to(new_cwd: &std::path::Path) -> Self {
-        let prev = std::env::current_dir().expect("cwd snapshot");
-        std::env::set_current_dir(new_cwd).expect("chdir");
-        Self { prev }
-    }
-}
-
-impl Drop for CwdGuard {
-    fn drop(&mut self) {
-        if let Err(e) = std::env::set_current_dir(&self.prev) {
-            // Dropping during a panic: avoid masking the original with
-            // a secondary panic; log instead. Running on `cargo test`
-            // where stderr is captured per-test, so the message still
-            // surfaces under `--nocapture`.
-            eprintln!(
-                "CwdGuard: failed to restore cwd to {}: {e}",
-                self.prev.display()
-            );
-        }
-    }
-}
-
-// Codex gpt-5.4 iter-1 MINOR: this test mutates process-global CWD
-// because `rebuild_index(path=".")` canonicalises through
-// `std::fs::canonicalize(".")` which reads the CWD. `#[serial]`
-// serialises against every other `#[serial]` test in the binary;
-// `CwdGuard` is panic-safe so the restore happens even on test failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial_test::serial(cwd_global)]
-async fn mcp_host_rebuild_index_defaults_path_to_dot() {
+async fn mcp_host_rebuild_index_rejects_non_absolute_path() {
     let server = TestServer::new().await;
-    let dir = tempfile::tempdir().unwrap();
-    let canonical_dir = canonicalize_path(dir.path()).unwrap();
-
-    // RAII: restores the previous CWD on drop, even if an assertion
-    // below panics. `#[serial(cwd_global)]` above guarantees no other
-    // test in this binary observes the mutation.
-    let _cwd_guard = CwdGuard::change_to(dir.path());
 
     let (rh, wh) = connect_mcp_shim(&server).await;
     let running = rmcp::serve_client((), (rh, wh))
         .await
         .expect("rmcp initialize");
 
-    // Call with `force=true` but NO `path` argument at all.
-    let result = running
+    // (a) Omitted `path` is rejected (no client CWD to default to).
+    let omitted = running
         .peer()
         .call_tool(call_tool_request(
             "rebuild_index",
             serde_json::Map::from_iter([("force".to_string(), json!(true))]),
         ))
-        .await
-        .expect("rebuild_index must succeed when path is omitted");
+        .await;
+    match omitted {
+        Err(rmcp::ServiceError::McpError(mcp_err)) => {
+            let reason = mcp_err
+                .data
+                .as_ref()
+                .and_then(|d| d["details"]["reason"].as_str())
+                .expect("details.reason must be a string")
+                .to_string();
+            assert!(
+                reason.contains("required") && reason.contains("daemon mode"),
+                "omitted `path` must be rejected as required in daemon mode; got: {reason}"
+            );
+        }
+        other => panic!("expected InvalidArgument McpError for omitted path, got: {other:?}"),
+    }
 
-    assert!(result.is_error != Some(true));
-
-    let structured = result
-        .structured_content
-        .as_ref()
-        .expect("structured_content must be present");
-    let data = structured.get("data").expect("envelope must carry data");
-    let reported_root = data
-        .get("rootPath")
-        .and_then(|v| v.as_str())
-        .expect("data.rootPath must be a string");
-    let expected = canonical_dir.to_string_lossy().replace('\\', "/");
-    assert_eq!(
-        reported_root, expected,
-        "omitted `path` must default to `.` and resolve to the process CWD"
-    );
+    // (b) A present-but-relative `path` is rejected (it would otherwise
+    //     canonicalize against the daemon's CWD).
+    let relative = running
+        .peer()
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
+                ("path".to_string(), json!("some/relative/dir")),
+                ("force".to_string(), json!(true)),
+            ]),
+        ))
+        .await;
+    match relative {
+        Err(rmcp::ServiceError::McpError(mcp_err)) => {
+            let reason = mcp_err
+                .data
+                .as_ref()
+                .and_then(|d| d["details"]["reason"].as_str())
+                .expect("details.reason must be a string")
+                .to_string();
+            assert!(
+                reason.contains("absolute"),
+                "relative `path` must be rejected as non-absolute; got: {reason}"
+            );
+        }
+        other => panic!("expected InvalidArgument McpError for relative path, got: {other:?}"),
+    }
 
     drop(running);
     server.stop().await;

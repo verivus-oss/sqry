@@ -14,14 +14,15 @@ use crate::tools::params::{
     ComplexityMetricsParams, CrossLanguageEdgesParams, CycleTypeParam, DependencyImpactParams,
     DirectCalleesParams, DirectCallersParams, DuplicateTypeParam, EdgeKindParam,
     ExpandCacheStatusParams, ExplainCodeParams, ExportGraphParams, FindCyclesParams,
-    FindDuplicatesParams, FindUnusedParams, GetDefinitionParams, GetDocumentSymbolsParams,
-    GetGraphStatsParams, GetHoverInfoParams, GetIndexStatusParams, GetInsightsParams,
-    GetReferencesParams, GetWorkspaceSymbolsParams, GraphFormatParam, HierarchicalSearchParams,
-    IsNodeInCycleParams, ListFilesParams, ListSymbolsParams, PaginationParams, PatternSearchParams,
-    RebuildIndexParams, RelationQueryParams, RelationTypeParam, RulesRunParams,
-    SearchFiltersParams, SearchSimilarParams, SemanticDiffParams, SemanticSearchParams,
-    ShowDependenciesParams, SqryQueryParams, StructuralSimilarParams, SubgraphParams,
-    TracePathParams, UnusedScopeParam, VisibilityParam, WorkspaceStatusParams,
+    FindDuplicatesParams, FindUnusedParams, GenerateOverviewParams, GetDefinitionParams,
+    GetDocumentSymbolsParams, GetGraphStatsParams, GetHoverInfoParams, GetIndexStatusParams,
+    GetInsightsParams, GetReferencesParams, GetWorkspaceSymbolsParams, GraphFormatParam,
+    HierarchicalSearchParams, IsNodeInCycleParams, ListFilesParams, ListSymbolsParams,
+    PaginationParams, PatternSearchParams, RebuildIndexParams, RelationQueryParams,
+    RelationTypeParam, RulesRunParams, SearchFiltersParams, SearchSimilarParams,
+    SemanticDiffParams, SemanticSearchParams, ShowDependenciesParams, SqryQueryParams,
+    StructuralSimilarParams, SubgraphParams, TracePathParams, UnusedScopeParam, VisibilityParam,
+    WorkspaceStatusParams,
 };
 use crate::workspace_session::{self, WorkspaceSessionRegistry};
 use rmcp::{
@@ -1410,6 +1411,31 @@ impl SqryServer {
         Ok(Self::success_result(&result))
     }
 
+    /// One-call repository orientation map for an unfamiliar codebase.
+    #[tool(
+        description = "One-call repository orientation map: summary + health, load-bearing hubs, \
+                       path/package subsystems and couplings, complexity hotspots, potential issues \
+                       (cycles, unused public APIs, duplicates, high fan-out), and ready-to-run \
+                       sqry queries. Mirrors the `sqry overview` CLI report.",
+        annotations(read_only_hint = true, open_world_hint = false)
+    )]
+    async fn generate_overview(
+        &self,
+        Parameters(params): Parameters<GenerateOverviewParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        self.ensure_tool_enabled("generate_overview")?;
+
+        let args = convert_generate_overview_params(params.clone()).map_err(rpc_error_to_mcp)?;
+        let result = self
+            .execute_tool_for_request("generate_overview", &params, &context, move |_cancel| {
+                execution::execute_generate_overview(&args)
+            })
+            .await?;
+
+        Ok(Self::success_result(&result))
+    }
+
     /// Estimate function complexity from call graph and line count.
     #[tool(
         description = "Estimate function complexity from call graph and line count",
@@ -1612,6 +1638,7 @@ impl ServerHandler for SqryServer {
                  - Analyze impact: dependency_impact, show_dependencies, subgraph\n\
                  - Code quality: find_cycles, find_unused, find_duplicates, is_node_in_cycle, complexity_metrics\n\
                  - Compare versions: semantic_diff\n\
+                 - Orient in an unfamiliar repo: generate_overview\n\
                  - Inspect index: get_index_status, get_graph_stats, get_insights, list_files, list_symbols\n\
                  - Macro expansion: expand_cache_status\n\
                  - File symbols: get_document_symbols\n\
@@ -1718,11 +1745,12 @@ use crate::pagination::decode_cursor;
 use crate::tools::{
     ChangeType, ComplexityMetricsArgs, CrossLanguageEdgesArgs, CycleType, DependencyImpactArgs,
     DuplicateType, ExplainCodeArgs, ExportGraphArgs, FindCyclesArgs, FindDuplicatesArgs,
-    FindUnusedArgs, GetDefinitionArgs, GetDocumentSymbolsArgs, GetGraphStatsArgs, GetHoverInfoArgs,
-    GetIndexStatusArgs, GetInsightsArgs, GetReferencesArgs, GetWorkspaceSymbolsArgs, GitVersionRef,
-    HierarchicalSearchArgs, ListFilesArgs, ListSymbolsArgs, PaginationArgs, RelationQueryArgs,
-    RelationType, SearchFilters, SearchSimilarArgs, SemanticDiffArgs, SemanticDiffFilters,
-    SemanticSearchArgs, ShowDependenciesArgs, SubgraphArgs, TracePathArgs, UnusedScope, Visibility,
+    FindUnusedArgs, GenerateOverviewArgs, GetDefinitionArgs, GetDocumentSymbolsArgs,
+    GetGraphStatsArgs, GetHoverInfoArgs, GetIndexStatusArgs, GetInsightsArgs, GetReferencesArgs,
+    GetWorkspaceSymbolsArgs, GitVersionRef, HierarchicalSearchArgs, ListFilesArgs, ListSymbolsArgs,
+    PaginationArgs, RelationQueryArgs, RelationType, SearchFilters, SearchSimilarArgs,
+    SemanticDiffArgs, SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs, SubgraphArgs,
+    TracePathArgs, UnusedScope, Visibility,
 };
 
 // ============================================================================
@@ -2496,6 +2524,27 @@ fn convert_get_graph_stats_params(params: GetGraphStatsParams) -> GetGraphStatsA
 
 fn convert_get_insights_params(params: GetInsightsParams) -> GetInsightsArgs {
     GetInsightsArgs { path: params.path }
+}
+
+fn convert_generate_overview_params(
+    params: GenerateOverviewParams,
+) -> Result<GenerateOverviewArgs, RpcError> {
+    let top = validate_usize(i64::try_from(params.top).unwrap_or(i64::MAX), "top", 1, 200)?;
+    let group_depth = validate_usize(
+        i64::try_from(params.group_depth).unwrap_or(i64::MAX),
+        "group_depth",
+        1,
+        16,
+    )?;
+    let sections = crate::execution::parse_overview_sections(params.sections.as_deref())
+        .map_err(RpcError::validation)?;
+
+    Ok(GenerateOverviewArgs {
+        path: params.path,
+        top,
+        sections,
+        group_depth,
+    })
 }
 
 fn convert_expand_cache_status_params(

@@ -2,8 +2,8 @@
   "name": "sqry-vscode",
   "displayName": "sqry Semantic Search",
   "description": "Semantic code search for 35 languages. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports - powered by unified graph architecture.",
-  "version": "28.0.3",
-  "binaryVersion": "28.0.3",
+  "version": "29.0.2",
+  "binaryVersion": "29.0.2",
   "publisher": "verivus",
   "license": "MIT",
   "icon": "media/sqry-icon-512.png",
@@ -149,6 +149,12 @@
         "command": "sqry.editWorkspaceClassification",
         "title": "Sqry: Edit Workspace Classification (.code-workspace)",
         "category": "Sqry"
+      },
+      {
+        "command": "sqry.showOutput",
+        "title": "Sqry: Show Output",
+        "category": "Sqry",
+        "icon": "$(output)"
       }
     ],
     "configuration": {
@@ -157,7 +163,8 @@
         "sqry.path": {
           "type": "string",
           "default": "sqry",
-          "description": "Path to the sqry binary (used to launch `sqry lsp --stdio`)."
+          "description": "Path to the sqry binary (used to launch `sqry lsp --stdio`).",
+          "scope": "machine-overridable"
         },
         "sqry.limit": {
           "type": "number",

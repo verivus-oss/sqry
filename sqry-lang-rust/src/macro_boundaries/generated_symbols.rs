@@ -20,6 +20,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use super::expand_cache::{GeneratedSymbolKind, ScopeSegment};
+
 /// Result of comparing original and expanded symbol sets.
 #[derive(Debug, Clone)]
 pub struct DiffResult {
@@ -51,6 +53,10 @@ impl DiffResult {
 #[derive(Debug, Clone)]
 pub struct SymbolInfo {
     /// Fully-qualified name (e.g., `my_crate::MyStruct`, `my_crate::<MyStruct as Debug>::fmt`).
+    ///
+    /// Carries the crate prefix and the `<Type as Trait>` decoration; used ONLY
+    /// as the [`diff_symbols`] key. The Phase 1b index consumer reconstructs the
+    /// graph-convention name from the structured pieces below instead.
     pub qualified_name: String,
     /// Simple name (e.g., `MyStruct`, `fmt`).
     pub simple_name: String,
@@ -60,6 +66,18 @@ pub struct SymbolInfo {
     pub start_line: u32,
     /// End line in source (1-indexed).
     pub end_line: u32,
+    /// The FULL ordered scope chain from the crate root to (but not including)
+    /// this symbol, matching exactly the segments the live `scope_node_name`
+    /// pushes (`mod` = module, `struct` / `enum` / `trait` / `type` = type). Does
+    /// NOT include a crate segment, the `impl` type, or the symbol itself.
+    pub scope_segments: Vec<ScopeSegment>,
+    /// For methods (items inside an `impl` block): the plain, trimmed impl `type`
+    /// field text (e.g. `"MyStruct"`), matching the live `current_impl_type`.
+    /// `None` for free items.
+    pub impl_type: Option<String>,
+    /// Declaration kind recovered from the tree-sitter node kind (plus impl
+    /// context, so a `fn` inside an `impl` is [`GeneratedSymbolKind::Method`]).
+    pub kind: GeneratedSymbolKind,
 }
 
 /// Diff two sets of symbols to find generated, modified, and removed entries.
@@ -135,6 +153,53 @@ pub fn is_deterministic(hash_a: &str, hash_b: &str) -> bool {
     hash_a == hash_b
 }
 
+/// Parse Rust source text with the tree-sitter grammar and extract its
+/// qualified symbols (including the Phase 1b structured `scope_segments` /
+/// `impl_type` / `kind` pieces).
+///
+/// Convenience wrapper over [`extract_symbols_from_tree`] for callers (such as
+/// the `sqry cache expand` writer) that have raw source text rather than an
+/// already-parsed tree, and that do not otherwise depend on tree-sitter.
+/// Returns an empty vector if the grammar cannot be loaded or the source fails
+/// to parse.
+#[must_use]
+pub fn extract_symbols_from_source(source: &str, crate_name: &str) -> Vec<SymbolInfo> {
+    extract_symbols_from_source_in_module(source, crate_name, None)
+}
+
+/// Same as [`extract_symbols_from_source`], but seeds the extraction with a
+/// file-level module path so a file that is NOT the crate root (e.g. `src/foo.rs`
+/// -> module `foo`, `src/foo/bar.rs` -> module `foo::bar`) yields symbols in the
+/// SAME crate-relative namespace that `cargo expand` produces.
+///
+/// `cargo expand` inlines every file-backed module into `mod <name> { .. }`, so
+/// an item `bar` in `src/foo.rs` appears in the expanded output as
+/// `crate::foo::bar` with a leading `foo` module scope segment. Extracting the
+/// original file WITHOUT this prefix would yield `crate::bar` (no `foo`), so
+/// [`diff_symbols`] would see `crate::foo::bar` as "generated" and wrongly flag
+/// the ordinary file-backed-module item as macro-generated. Seeding the file
+/// module path puts both sides of the diff in the same namespace.
+///
+/// `file_module_path` follows the `ModuleResolver::compute_file_module_path`
+/// convention: `None` for crate roots (`lib.rs` / `main.rs`), `Some("foo")` for
+/// `src/foo.rs`, `Some("foo::bar")` for `src/foo/bar.rs` or `src/foo/bar/mod.rs`.
+#[must_use]
+pub fn extract_symbols_from_source_in_module(
+    source: &str,
+    crate_name: &str,
+    file_module_path: Option<&str>,
+) -> Vec<SymbolInfo> {
+    let mut parser = tree_sitter::Parser::new();
+    let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(source.as_bytes(), None) else {
+        return Vec::new();
+    };
+    extract_symbols_from_tree_in_module(&tree, source.as_bytes(), crate_name, file_module_path)
+}
+
 /// Extract symbol names from a tree-sitter parse tree.
 ///
 /// Walks the tree and extracts qualified names for all top-level definitions:
@@ -143,25 +208,94 @@ pub fn is_deterministic(hash_a: &str, hash_b: &str) -> bool {
 ///
 /// # Arguments
 ///
-/// * `tree` — parsed tree-sitter tree
-/// * `content` — source file bytes
-/// * `crate_name` — crate name prefix for qualified names
+/// * `tree`: parsed tree-sitter tree
+/// * `content`: source file bytes
+/// * `crate_name`: crate name prefix for qualified names
 #[must_use]
 pub fn extract_symbols_from_tree(
     tree: &tree_sitter::Tree,
     content: &[u8],
     crate_name: &str,
 ) -> Vec<SymbolInfo> {
+    extract_symbols_from_tree_in_module(tree, content, crate_name, None)
+}
+
+/// Extract symbol names from a parse tree, seeding a file-level module path.
+///
+/// See [`extract_symbols_from_source_in_module`] for why the module prefix
+/// matters. `file_module_path` seeds BOTH the crate-prefixed diff-key path
+/// (`crate::foo`) AND the structured `scope_segments` accumulator (one
+/// `is_module: true` segment per `::`-delimited component), so the original-file
+/// symbols land in the exact namespace `cargo expand` produces.
+#[must_use]
+pub fn extract_symbols_from_tree_in_module(
+    tree: &tree_sitter::Tree,
+    content: &[u8],
+    crate_name: &str,
+    file_module_path: Option<&str>,
+) -> Vec<SymbolInfo> {
     let mut symbols = Vec::new();
-    extract_from_node(tree.root_node(), content, crate_name, &mut symbols);
+    let (scope_prefix, seed_segments): (String, Vec<ScopeSegment>) = match file_module_path {
+        None | Some("") => (crate_name.to_string(), Vec::new()),
+        Some(module_path) => {
+            let prefix = format!("{crate_name}::{module_path}");
+            let segments = module_path
+                .split("::")
+                .map(|name| ScopeSegment {
+                    name: name.to_string(),
+                    is_module: true,
+                })
+                .collect();
+            (prefix, segments)
+        }
+    };
+    extract_from_node(
+        tree.root_node(),
+        content,
+        &scope_prefix,
+        &seed_segments,
+        None,
+        &mut symbols,
+    );
     symbols
 }
 
+/// Map a leaf/type tree-sitter node kind (plus impl context) to a
+/// [`GeneratedSymbolKind`].
+fn symbol_kind_for(node_kind: &str, impl_type: Option<&str>) -> GeneratedSymbolKind {
+    match node_kind {
+        "function_item" => {
+            if impl_type.is_some() {
+                GeneratedSymbolKind::Method
+            } else {
+                GeneratedSymbolKind::Function
+            }
+        }
+        // Unions have no dedicated kind / helper sink; treat them like structs.
+        "struct_item" | "union_item" => GeneratedSymbolKind::Struct,
+        "enum_item" => GeneratedSymbolKind::Enum,
+        "trait_item" => GeneratedSymbolKind::Trait,
+        "type_item" => GeneratedSymbolKind::TypeAlias,
+        "const_item" | "static_item" => GeneratedSymbolKind::Constant,
+        "mod_item" => GeneratedSymbolKind::Module,
+        "impl_item" => GeneratedSymbolKind::Impl,
+        _ => GeneratedSymbolKind::Other,
+    }
+}
+
 /// Recursively extract symbols from a tree-sitter node and its children.
+///
+/// `scope_prefix` is the crate-prefixed diff key path (unchanged from the
+/// original behaviour). `scope_segments` is the SEPARATE structured accumulator
+/// that mirrors exactly what the live `scope_node_name` pushes (module + type
+/// segments, NO crate segment, NO `impl` segment); `impl_type` is the plain impl
+/// `type` text threaded to the methods extracted from an impl body.
 fn extract_from_node(
     node: tree_sitter::Node,
     content: &[u8],
     scope_prefix: &str,
+    scope_segments: &[ScopeSegment],
+    impl_type: Option<&str>,
     symbols: &mut Vec<SymbolInfo>,
 ) {
     let kind = node.kind();
@@ -182,11 +316,47 @@ fn extract_from_node(
                     start_line: node.start_position().row as u32 + 1,
                     #[allow(clippy::cast_possible_truncation)] // Graph storage: node/edge index counts fit in u32
                     end_line: node.end_position().row as u32 + 1,
+                    scope_segments: scope_segments.to_vec(),
+                    impl_type: impl_type.map(str::to_string),
+                    kind: symbol_kind_for(kind, impl_type),
                 });
 
-                // Recurse into the body for nested items.
                 let child_prefix = qualified;
-                extract_children(node, content, &child_prefix, symbols);
+                match kind {
+                    // Type wrappers push a `is_module: false` scope segment (they
+                    // are what `scope_node_name` pushes). A type cannot contain an
+                    // `impl`, so impl context resets to `None` inside its body.
+                    "struct_item" | "enum_item" | "trait_item" | "type_item" => {
+                        let mut child_segments = scope_segments.to_vec();
+                        child_segments.push(ScopeSegment {
+                            name: name.to_string(),
+                            is_module: false,
+                        });
+                        extract_children(
+                            node,
+                            content,
+                            &child_prefix,
+                            &child_segments,
+                            None,
+                            symbols,
+                        );
+                    }
+                    // Functions / consts / statics / unions are naming leaves:
+                    // `scope_node_name` pushes NO segment for them. Nested items
+                    // inherit the current scope + impl context (a nested `fn`
+                    // inside a method keeps the enclosing impl type, matching the
+                    // live visitor).
+                    _ => {
+                        extract_children(
+                            node,
+                            content,
+                            &child_prefix,
+                            scope_segments,
+                            impl_type,
+                            symbols,
+                        );
+                    }
+                }
                 return;
             }
         }
@@ -195,7 +365,8 @@ fn extract_from_node(
             if let Some(type_node) = node.child_by_field_name("type")
                 && let Ok(type_name) = type_node.utf8_text(content)
             {
-                // Check for trait impl: `impl Trait for Type`
+                // Diff-key prefix: keep the `<Type as Trait>` decoration so the
+                // qualified_name diff key stays unique per impl.
                 let impl_prefix = if let Some(trait_node) = node.child_by_field_name("trait") {
                     if let Ok(trait_name) = trait_node.utf8_text(content) {
                         format!("{scope_prefix}::<{type_name} as {trait_name}>")
@@ -206,9 +377,20 @@ fn extract_from_node(
                     format!("{scope_prefix}::{type_name}")
                 };
 
-                // Extract methods from the impl body.
+                // The live graph names methods with the PLAIN impl type (trait
+                // dropped), so thread the trimmed `type` text as `impl_type`. The
+                // `impl_item` node itself pushes NO scope segment.
+                let plain_impl_type = type_name.trim();
+
                 if let Some(body) = node.child_by_field_name("body") {
-                    extract_children(body, content, &impl_prefix, symbols);
+                    extract_children(
+                        body,
+                        content,
+                        &impl_prefix,
+                        scope_segments,
+                        Some(plain_impl_type),
+                        symbols,
+                    );
                 }
                 return;
             }
@@ -219,7 +401,13 @@ fn extract_from_node(
                 && let Ok(name) = name_node.utf8_text(content)
             {
                 let mod_prefix = format!("{scope_prefix}::{name}");
-                extract_children(node, content, &mod_prefix, symbols);
+                let mut child_segments = scope_segments.to_vec();
+                child_segments.push(ScopeSegment {
+                    name: name.to_string(),
+                    is_module: true,
+                });
+                // A module resets impl context.
+                extract_children(node, content, &mod_prefix, &child_segments, None, symbols);
                 return;
             }
         }
@@ -227,8 +415,15 @@ fn extract_from_node(
         _ => {}
     }
 
-    // Default: recurse into children.
-    extract_children(node, content, scope_prefix, symbols);
+    // Default: recurse into children, carrying the current scope + impl context.
+    extract_children(
+        node,
+        content,
+        scope_prefix,
+        scope_segments,
+        impl_type,
+        symbols,
+    );
 }
 
 /// Extract symbols from a node's children.
@@ -236,11 +431,20 @@ fn extract_children(
     node: tree_sitter::Node,
     content: &[u8],
     scope_prefix: &str,
+    scope_segments: &[ScopeSegment],
+    impl_type: Option<&str>,
     symbols: &mut Vec<SymbolInfo>,
 ) {
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        extract_from_node(child, content, scope_prefix, symbols);
+        extract_from_node(
+            child,
+            content,
+            scope_prefix,
+            scope_segments,
+            impl_type,
+            symbols,
+        );
     }
 }
 
@@ -275,47 +479,52 @@ mod tests {
         parser.parse(source.as_bytes(), None).unwrap()
     }
 
+    /// Build a diff-test `SymbolInfo`. `diff_symbols` keys only on
+    /// `qualified_name`, so the structured Phase 1b fields are irrelevant here.
+    fn si(
+        qualified: &str,
+        simple: &str,
+        signature: Option<&str>,
+        start: u32,
+        end: u32,
+    ) -> SymbolInfo {
+        SymbolInfo {
+            qualified_name: qualified.to_string(),
+            simple_name: simple.to_string(),
+            signature: signature.map(str::to_string),
+            start_line: start,
+            end_line: end,
+            scope_segments: Vec::new(),
+            impl_type: None,
+            kind: GeneratedSymbolKind::Other,
+        }
+    }
+
+    /// Look up an extracted symbol by its crate-prefixed qualified name.
+    fn find<'a>(symbols: &'a [SymbolInfo], qualified: &str) -> &'a SymbolInfo {
+        symbols
+            .iter()
+            .find(|s| s.qualified_name == qualified)
+            .unwrap_or_else(|| panic!("symbol {qualified} not extracted"))
+    }
+
     #[test]
     fn test_symbol_diffing() {
         let original = vec![
-            SymbolInfo {
-                qualified_name: "my_crate::MyStruct".to_string(),
-                simple_name: "MyStruct".to_string(),
-                signature: None,
-                start_line: 1,
-                end_line: 3,
-            },
-            SymbolInfo {
-                qualified_name: "my_crate::main".to_string(),
-                simple_name: "main".to_string(),
-                signature: Some("() -> ()".to_string()),
-                start_line: 5,
-                end_line: 7,
-            },
+            si("my_crate::MyStruct", "MyStruct", None, 1, 3),
+            si("my_crate::main", "main", Some("() -> ()"), 5, 7),
         ];
 
         let expanded = vec![
-            SymbolInfo {
-                qualified_name: "my_crate::MyStruct".to_string(),
-                simple_name: "MyStruct".to_string(),
-                signature: None,
-                start_line: 1,
-                end_line: 3,
-            },
-            SymbolInfo {
-                qualified_name: "my_crate::main".to_string(),
-                simple_name: "main".to_string(),
-                signature: Some("() -> ()".to_string()),
-                start_line: 5,
-                end_line: 7,
-            },
-            SymbolInfo {
-                qualified_name: "my_crate::<MyStruct as Debug>::fmt".to_string(),
-                simple_name: "fmt".to_string(),
-                signature: Some("(&self, f: &mut Formatter<'_>) -> Result".to_string()),
-                start_line: 10,
-                end_line: 15,
-            },
+            si("my_crate::MyStruct", "MyStruct", None, 1, 3),
+            si("my_crate::main", "main", Some("() -> ()"), 5, 7),
+            si(
+                "my_crate::<MyStruct as Debug>::fmt",
+                "fmt",
+                Some("(&self, f: &mut Formatter<'_>) -> Result"),
+                10,
+                15,
+            ),
         ];
 
         let diff = diff_symbols(&original, &expanded);
@@ -328,13 +537,13 @@ mod tests {
     #[test]
     fn test_generated_symbol_metadata() {
         let original = vec![];
-        let expanded = vec![SymbolInfo {
-            qualified_name: "my_crate::generated_fn".to_string(),
-            simple_name: "generated_fn".to_string(),
-            signature: Some("() -> u32".to_string()),
-            start_line: 1,
-            end_line: 3,
-        }];
+        let expanded = vec![si(
+            "my_crate::generated_fn",
+            "generated_fn",
+            Some("() -> u32"),
+            1,
+            3,
+        )];
 
         let diff = diff_symbols(&original, &expanded);
         assert_eq!(diff.generated.len(), 1);
@@ -343,20 +552,8 @@ mod tests {
 
     #[test]
     fn test_empty_expansion() {
-        let original = vec![SymbolInfo {
-            qualified_name: "my_crate::Foo".to_string(),
-            simple_name: "Foo".to_string(),
-            signature: None,
-            start_line: 1,
-            end_line: 1,
-        }];
-        let expanded = vec![SymbolInfo {
-            qualified_name: "my_crate::Foo".to_string(),
-            simple_name: "Foo".to_string(),
-            signature: None,
-            start_line: 1,
-            end_line: 1,
-        }];
+        let original = vec![si("my_crate::Foo", "Foo", None, 1, 1)];
+        let expanded = vec![si("my_crate::Foo", "Foo", None, 1, 1)];
 
         let diff = diff_symbols(&original, &expanded);
         assert!(diff.is_empty());
@@ -366,28 +563,10 @@ mod tests {
     #[test]
     fn test_qualified_name_collision_handling() {
         // Two symbols with the same simple name but different qualified names.
-        let original = vec![SymbolInfo {
-            qualified_name: "mod_a::Foo".to_string(),
-            simple_name: "Foo".to_string(),
-            signature: None,
-            start_line: 1,
-            end_line: 1,
-        }];
+        let original = vec![si("mod_a::Foo", "Foo", None, 1, 1)];
         let expanded = vec![
-            SymbolInfo {
-                qualified_name: "mod_a::Foo".to_string(),
-                simple_name: "Foo".to_string(),
-                signature: None,
-                start_line: 1,
-                end_line: 1,
-            },
-            SymbolInfo {
-                qualified_name: "mod_b::Foo".to_string(),
-                simple_name: "Foo".to_string(),
-                signature: None,
-                start_line: 5,
-                end_line: 5,
-            },
+            si("mod_a::Foo", "Foo", None, 1, 1),
+            si("mod_b::Foo", "Foo", None, 5, 5),
         ];
 
         let diff = diff_symbols(&original, &expanded);
@@ -403,20 +582,8 @@ mod tests {
 
     #[test]
     fn test_possibly_modified_detection() {
-        let original = vec![SymbolInfo {
-            qualified_name: "my_crate::foo".to_string(),
-            simple_name: "foo".to_string(),
-            signature: Some("() -> u32".to_string()),
-            start_line: 1,
-            end_line: 3,
-        }];
-        let expanded = vec![SymbolInfo {
-            qualified_name: "my_crate::foo".to_string(),
-            simple_name: "foo".to_string(),
-            signature: Some("(x: i32) -> u32".to_string()),
-            start_line: 1,
-            end_line: 5,
-        }];
+        let original = vec![si("my_crate::foo", "foo", Some("() -> u32"), 1, 3)];
+        let expanded = vec![si("my_crate::foo", "foo", Some("(x: i32) -> u32"), 1, 5)];
 
         let diff = diff_symbols(&original, &expanded);
         assert!(diff.generated.is_empty());
@@ -448,6 +615,63 @@ fn helper() -> u32 {
         assert!(names.contains(&"my_crate::MyStruct"));
         assert!(names.contains(&"my_crate::MyStruct::new"));
         assert!(names.contains(&"my_crate::helper"));
+    }
+
+    #[test]
+    fn test_extract_captures_scope_impl_type_and_kind() {
+        let source = r"
+mod outer {
+    pub struct Widget;
+
+    impl Widget {
+        pub fn build() -> Self {
+            Widget
+        }
+    }
+
+    pub trait Greeter {
+        fn greet(&self) {}
+    }
+}
+
+const TOP: u32 = 1;
+";
+        let tree = parse_rust(source);
+        let symbols = extract_symbols_from_tree(&tree, source.as_bytes(), "my_crate");
+
+        // Free struct inside a module: scope = [outer(mod)], no impl type.
+        let widget = find(&symbols, "my_crate::outer::Widget");
+        assert_eq!(widget.kind, GeneratedSymbolKind::Struct);
+        assert!(widget.impl_type.is_none());
+        assert_eq!(widget.scope_segments.len(), 1);
+        assert_eq!(widget.scope_segments[0].name, "outer");
+        assert!(widget.scope_segments[0].is_module);
+
+        // Method inside an impl: kind = Method, impl_type = "Widget", the impl
+        // pushes NO scope segment (only the module segment remains).
+        let build = find(&symbols, "my_crate::outer::Widget::build");
+        assert_eq!(build.kind, GeneratedSymbolKind::Method);
+        assert_eq!(build.impl_type.as_deref(), Some("Widget"));
+        assert_eq!(build.scope_segments.len(), 1);
+        assert_eq!(build.scope_segments[0].name, "outer");
+        assert!(build.scope_segments[0].is_module);
+
+        // Trait default-body method: no impl block, so kind = Function, and the
+        // trait pushes a `is_module: false` scope segment after the module.
+        let greet = find(&symbols, "my_crate::outer::Greeter::greet");
+        assert_eq!(greet.kind, GeneratedSymbolKind::Function);
+        assert!(greet.impl_type.is_none());
+        assert_eq!(greet.scope_segments.len(), 2);
+        assert_eq!(greet.scope_segments[0].name, "outer");
+        assert!(greet.scope_segments[0].is_module);
+        assert_eq!(greet.scope_segments[1].name, "Greeter");
+        assert!(!greet.scope_segments[1].is_module);
+
+        // Free constant at crate root: no scope, Constant kind.
+        let top = find(&symbols, "my_crate::TOP");
+        assert_eq!(top.kind, GeneratedSymbolKind::Constant);
+        assert!(top.scope_segments.is_empty());
+        assert!(top.impl_type.is_none());
     }
 
     #[test]

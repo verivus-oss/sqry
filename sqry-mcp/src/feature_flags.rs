@@ -109,6 +109,7 @@ impl FeatureFlags {
             | "list_symbols"
             | "get_graph_stats"
             | "get_insights"
+            | "generate_overview"
             | "complexity_metrics"
             // Navigation tools (always enabled)
             | "get_definition"

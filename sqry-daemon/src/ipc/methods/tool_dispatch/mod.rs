@@ -1,6 +1,8 @@
 //! Phase 8b Task 7 — tool-method dispatch.
 //!
-//! Routes the 14 MCP tool methods over the daemon IPC. Each call is
+//! Routes the daemon-supported MCP tool methods over the daemon IPC (every
+//! `DAEMON_SUPPORTED_TOOL_NAMES` entry except `rebuild_index`, which the MCP
+//! host handles on its own path). Each call is
 //! gated on [`crate::workspace::WorkspaceManager::classify_for_serve`],
 //! which returns one of:
 //!
@@ -47,7 +49,7 @@ use crate::ipc::tool_core;
 
 pub(crate) mod tools;
 
-/// Dispatch one of the 14 registered tool methods. Called from
+/// Dispatch one of the registered tool methods. Called from
 /// [`crate::ipc::methods::dispatch`] via the match arm introduced in
 /// Task 7 Work Item D.
 pub(crate) async fn dispatch_tool(
@@ -67,6 +69,7 @@ pub(crate) async fn dispatch_tool(
         "subgraph" => tools::subgraph::handle(ctx, params).await,
         "export_graph" => tools::export_graph::handle(ctx, params).await,
         "complexity_metrics" => tools::complexity_metrics::handle(ctx, params).await,
+        "generate_overview" => tools::generate_overview::handle(ctx, params).await,
         "semantic_diff" => tools::semantic_diff::handle(ctx, params).await,
         "dependency_impact" => tools::dependency_impact::handle(ctx, params).await,
         "show_dependencies" => tools::show_dependencies::handle(ctx, params).await,

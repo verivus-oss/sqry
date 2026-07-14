@@ -39,7 +39,9 @@ pub fn execute(
     force_classpath: bool,
 ) -> Result<()> {
     let root_path = resolve_path(path)?;
-    let build_config = create_build_config(cli, &root_path, threads)?;
+    // `sqry watch` does not carry `--cfg` / `--expand-cache` (Phase 1a/1b):
+    // rebuild with defaults.
+    let build_config = create_build_config(cli, &root_path, threads, &[], None)?;
     let classpath_opts = ClasspathCliOptions {
         enabled: classpath,
         depth: classpath_depth,

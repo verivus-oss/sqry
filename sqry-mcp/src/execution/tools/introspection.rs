@@ -558,16 +558,19 @@ pub fn execute_get_graph_stats(args: &GetGraphStatsArgs) -> Result<ToolExecution
 }
 
 /// Aggregated symbol and file statistics grouped by language and kind.
-struct SymbolStats {
-    lang_file_counts: HashMap<String, usize>,
-    lang_symbol_counts: HashMap<String, usize>,
-    kind_counts: HashMap<String, usize>,
-    total_files: usize,
-    total_symbols: usize,
+///
+/// `pub(crate)` so the `generate_overview` tool composer reuses the exact
+/// `get_insights` stat computation for its summary section.
+pub(crate) struct SymbolStats {
+    pub(crate) lang_file_counts: HashMap<String, usize>,
+    pub(crate) lang_symbol_counts: HashMap<String, usize>,
+    pub(crate) kind_counts: HashMap<String, usize>,
+    pub(crate) total_files: usize,
+    pub(crate) total_symbols: usize,
 }
 
 /// Count symbol and file statistics grouped by language and kind.
-fn count_symbol_stats(
+pub(crate) fn count_symbol_stats(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
 ) -> SymbolStats {
     let files = snapshot.files();
@@ -613,7 +616,10 @@ fn count_symbol_stats(
 }
 
 /// Count total edges and cross-language edge count.
-fn count_edge_stats(
+///
+/// `pub(crate)` so the `generate_overview` composer reuses the exact
+/// `get_insights` edge computation for its summary block.
+pub(crate) fn count_edge_stats(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
 ) -> (usize, usize) {
     let files = snapshot.files();

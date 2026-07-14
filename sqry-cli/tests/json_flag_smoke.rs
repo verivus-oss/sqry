@@ -228,6 +228,18 @@ const SUBCOMMAND_SMOKE_CASES: &[SmokeCase] = &[
         subcommand: "is-in-cycle",
         args: &["parseConfig"],
     },
+    SmokeCase {
+        subcommand: "hubs",
+        args: &[],
+    },
+    SmokeCase {
+        subcommand: "subsystems",
+        args: &[],
+    },
+    SmokeCase {
+        subcommand: "communities",
+        args: &[],
+    },
 ];
 
 /// Run a single invocation and return the parsed JSON value. Fails

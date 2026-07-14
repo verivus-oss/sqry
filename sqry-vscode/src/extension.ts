@@ -62,6 +62,19 @@ export async function activate(
   outputChannel = vscode.window.createOutputChannel("Sqry");
   context.subscriptions.push(outputChannel);
 
+  // Register `sqry.showOutput` up front, before the LSP-start step below
+  // can bail out. When binary resolution fails, `activate` returns early
+  // (see the `if (!initialized) { ... return; }` block) and never reaches
+  // the main command-registration block. But the failure UI wires its
+  // "View Logs" affordance (status bar + search panel) to `sqry.showOutput`,
+  // so it must be registered before that early return, otherwise clicking it
+  // fails with `command 'sqry.showOutput' not found`.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("sqry.showOutput", () => {
+      outputChannel?.show(true);
+    }),
+  );
+
   // STEP_5 contract: state machine starts in `Activating`. Both UI
   // surfaces (status bar + tree view) are created BEFORE the LSP starts
   // so the user sees the resolving spinner during binary resolution
@@ -375,9 +388,6 @@ export async function activate(
         outputChannel?.appendLine(`[sqry] Failed to refresh stats: ${message}`);
         void vscode.window.showWarningMessage(`sqry: Failed to refresh stats: ${message}`);
       }
-    }),
-    vscode.commands.registerCommand("sqry.showOutput", () => {
-      outputChannel?.show(true);
     }),
     vscode.commands.registerCommand("sqry.editWorkspaceClassification", () =>
       editWorkspaceClassification(),

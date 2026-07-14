@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
@@ -16,6 +16,7 @@ use tree_sitter::{Node, Tree};
 
 use crate::confidence::{ConfidenceLevel, ConfidenceTracker};
 use crate::lifetime_extractor::{LifetimeExtractionResult, LifetimeExtractor};
+use crate::macro_boundaries::expand_cache::{GeneratedSymbol, GeneratedSymbolKind};
 use crate::module_resolver::ModuleResolver;
 use crate::proc_macro_detector::ProcMacroDetector;
 use crate::trait_binder::{BindingResult, TraitMethodBinder};
@@ -311,6 +312,438 @@ impl<'a> BuildContext<'a> {
     }
 }
 
+/// Split raw `--cfg` predicate strings into `(active_cfg_flags, active_features)`
+/// for [`MacroBoundaryConfig`](crate::macro_boundaries::MacroBoundaryConfig).
+///
+/// `CfgPredicate::evaluate` consumes the two axes separately: `feature = "x"`
+/// predicates match against `active_features`, while plain flags (`unix`) and
+/// non-feature `key = value` pairs (`target_arch = "x86_64"`) match against
+/// `active_cfg_flags`. So a `feature=serde` token contributes only its value
+/// (`"serde"`) to the features axis, and every other token passes through as a
+/// raw cfg flag. Surrounding whitespace and quotes on a `feature=` value are
+/// trimmed to match the way cfg tokens are usually written on the command line.
+fn split_cfg_flags(cfg_flags: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut active_cfg_flags = Vec::new();
+    let mut active_features = Vec::new();
+    for token in cfg_flags {
+        if let Some(value) = token.strip_prefix("feature=") {
+            let feature = value.trim().trim_matches('"').to_string();
+            if !feature.is_empty() {
+                active_features.push(feature);
+            }
+        } else {
+            active_cfg_flags.push(token.clone());
+        }
+    }
+    (active_cfg_flags, active_features)
+}
+
+/// Construct the graph-convention `qualified_name` for an item from its in-file
+/// scope chain, optional impl type, simple name, and scope-depth budget.
+///
+/// This is the SINGLE source of truth for Rust node naming, shared by the live
+/// AST visitor (the `visit` walker) and the Phase 1b expand-cache consumer
+/// (`reconstruct_graph_name`). Extracting it guarantees that materialised
+/// macro-generated nodes carry byte-identical names to the ones the live builder
+/// would produce for the same construct (see the F4 design):
+///
+/// - `scope_segments` is the in-file scope chain (the segment NAMES that
+///   `scope_node_name` pushes: `mod` / `struct` / `enum` / `trait` / `type`,
+///   in order), WITHOUT any `file_module_path` prefix and WITHOUT a crate
+///   segment (the live builder never prepends the crate name here).
+/// - `impl_type` is the plain impl-block type text for methods (`Some`), `None`
+///   for free items.
+/// - `max_scope_depth` truncates the free-item scope chain exactly as the live
+///   visitor does; the method branch applies NO truncation, matching the live
+///   code.
+fn build_qualified_name(
+    scope_segments: &[&str],
+    impl_type: Option<&str>,
+    simple_name: &str,
+    max_scope_depth: usize,
+) -> String {
+    match impl_type {
+        // Method branch: NO max_scope_depth truncation (matches the live visitor).
+        Some(impl_type) if scope_segments.is_empty() => format!("{impl_type}::{simple_name}"),
+        Some(impl_type) => {
+            format!(
+                "{}::{}::{}",
+                scope_segments.join("::"),
+                impl_type,
+                simple_name
+            )
+        }
+        // Free-item branch: truncate deep scopes at max_scope_depth.
+        None if scope_segments.is_empty() => simple_name.to_string(),
+        None if scope_segments.len() <= max_scope_depth => {
+            format!("{}::{}", scope_segments.join("::"), simple_name)
+        }
+        None => format!(
+            "{}::{}",
+            scope_segments[..max_scope_depth].join("::"),
+            simple_name
+        ),
+    }
+}
+
+/// Construct the graph-convention `qualified_name` for a Rust DECLARATION
+/// (`struct` / `enum` / `trait` / `type` / `const` / `static` / `mod`) from its
+/// file module path, enclosing inline-module chain, and simple name.
+///
+/// This is the SINGLE source of truth for declaration naming, shared by the live
+/// [`qualify_item_name`] and the Phase 1b expand-cache consumer
+/// (`reconstruct_graph_name`). Declarations follow a DIFFERENT rule to callables:
+/// the live builder names them by walking ONLY `mod_item` ancestors (never
+/// `struct`/`enum`/`trait`/`type`/`impl` scopes), applies NO `max_scope_depth`
+/// truncation, and never folds in an impl type. Extracting the join here
+/// guarantees the consumer produces byte-identical names BY CONSTRUCTION.
+///
+/// - `file_module_path` is the file's crate-relative module path (`None` at the
+///   crate root, matching `ModuleResolver::compute_file_module_path`).
+/// - `module_segments` is the ordered inline-module chain from OUTERMOST to
+///   innermost (the `mod_item` names surrounding the item), WITHOUT the
+///   `file_module_path`.
+/// - `simple_name` is the item's plain identifier.
+fn build_declaration_name(
+    file_module_path: Option<&str>,
+    module_segments: &[&str],
+    simple_name: &str,
+) -> String {
+    let mut parts: Vec<&str> = Vec::with_capacity(module_segments.len() + 2);
+    if let Some(file_mod) = file_module_path {
+        parts.push(file_mod);
+    }
+    parts.extend_from_slice(module_segments);
+    parts.push(simple_name);
+    parts.join("::")
+}
+
+/// Pure-filesystem crate resolution: walk up from `file` to the nearest ancestor
+/// `Cargo.toml` carrying a `[package].name`, returning `(crate_root_dir,
+/// crate_name)`.
+///
+/// This is the execution-free replacement for `cargo metadata` on the index
+/// path (SEC-1 / NFR-1): it never spawns a subprocess. A pure `[workspace]`
+/// manifest (no `[package]`) is not a crate root, so the FIRST ancestor with
+/// `[package].name` wins; a loose file above only a workspace manifest yields
+/// `None` (its symbols are simply not materialised).
+fn resolve_crate(file: &Path) -> Option<(PathBuf, String)> {
+    for dir in file.ancestors().skip(1) {
+        let manifest = dir.join("Cargo.toml");
+        if manifest.is_file()
+            && let Ok(text) = std::fs::read_to_string(&manifest)
+            && let Ok(doc) = toml::from_str::<toml::Value>(&text)
+            && let Some(name) = doc
+                .get("package")
+                .and_then(|pkg| pkg.get("name"))
+                .and_then(toml::Value::as_str)
+        {
+            return Some((dir.to_path_buf(), name.to_string()));
+        }
+    }
+    None
+}
+
+/// Enumerate the crate-relative module paths a single file physically OWNS via
+/// inline `mod x { .. }` declarations (recursively), beyond its own
+/// `file_module_path`.
+///
+/// `this_mod` is the file's `file_module_path` (`""` at the crate root). For an
+/// inline `mod a { mod b { .. } }` in a file whose module path is `foo`, this
+/// returns `{"foo::a", "foo::a::b"}`. A file-backed `mod x;` (no body) is NOT
+/// owned here (that module lives in another file), so only `mod_item` nodes that
+/// HAVE a `body` field are followed. Reuses the already-parsed `tree`; no extra
+/// parse, no subprocess.
+fn inline_module_paths_declared_in(tree: &Tree, content: &[u8], this_mod: &str) -> HashSet<String> {
+    let mut paths = HashSet::new();
+    collect_inline_modules(tree.root_node(), content, this_mod, &mut paths);
+    paths
+}
+
+fn collect_inline_modules(
+    node: Node<'_>,
+    content: &[u8],
+    prefix: &str,
+    paths: &mut HashSet<String>,
+) {
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        if child.kind() == "mod_item" {
+            // Only inline modules (with a body) are owned by this file; `mod x;`
+            // is a file-backed declaration whose items live elsewhere.
+            if let Some(body) = child.child_by_field_name("body")
+                && let Some(name_node) = child.child_by_field_name("name")
+                && let Ok(name) = name_node.utf8_text(content)
+            {
+                let path = if prefix.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{prefix}::{name}")
+                };
+                collect_inline_modules(body, content, &path, paths);
+                paths.insert(path);
+            }
+        } else {
+            // Recurse through non-module nodes so nested inline modules inside
+            // other items (rare) are still found.
+            collect_inline_modules(child, content, prefix, paths);
+        }
+    }
+}
+
+/// Reconstruct the live graph-convention `qualified_name` for a cached generated
+/// symbol so the materialised node's name matches the live builder byte-for-byte.
+///
+/// The live graph has TWO naming paths, and the correct one depends on the
+/// symbol KIND (F4 design):
+///
+/// - CALLABLES (`Function` / `Method`, plus the `Impl` / `Other` fallbacks that
+///   share the callable sink) are named by the live AST visitor via
+///   [`build_qualified_name`]: full scope chain (module AND type segments),
+///   impl-type folding for methods, and `max_scope_depth` truncation on the
+///   free-item branch. This file's own module prefix (`mod_depth` leading
+///   segments, confirmed equal to `file_module_path` by the ownership filter) is
+///   stripped so the remaining segments are exactly the live `current_scope`,
+///   then `file_module_path` is prepended untruncated.
+/// - DECLARATIONS (`Struct` / `Enum` / `Trait` / `TypeAlias` / `Constant` /
+///   `Module`) are named by the live [`qualify_item_name`] via the shared
+///   [`build_declaration_name`]: the enclosing `mod_item` run ONLY (the leading
+///   `is_module` segments), with NO `max_scope_depth` truncation and NO impl
+///   type. Trailing type-run segments (`is_module == false`) are dropped exactly
+///   as the live builder drops them.
+fn reconstruct_graph_name(
+    sym: &GeneratedSymbol,
+    this_mod: &str,
+    mod_depth: usize,
+    max_scope_depth: usize,
+) -> String {
+    match sym.kind {
+        GeneratedSymbolKind::Function
+        | GeneratedSymbolKind::Method
+        | GeneratedSymbolKind::Impl
+        | GeneratedSymbolKind::Other => {
+            let in_file_scope: Vec<&str> = sym
+                .scope_segments
+                .iter()
+                .skip(mod_depth)
+                .map(|seg| seg.name.as_str())
+                .collect();
+            let qualified = build_qualified_name(
+                &in_file_scope,
+                sym.impl_type.as_deref(),
+                &sym.simple_name,
+                max_scope_depth,
+            );
+            if this_mod.is_empty() {
+                qualified
+            } else {
+                format!("{this_mod}::{qualified}")
+            }
+        }
+        GeneratedSymbolKind::Struct
+        | GeneratedSymbolKind::Enum
+        | GeneratedSymbolKind::Trait
+        | GeneratedSymbolKind::TypeAlias
+        | GeneratedSymbolKind::Constant
+        | GeneratedSymbolKind::Module => {
+            // Module-run segments only (the live `qualify_item_name` walks just
+            // `mod_item` ancestors), with this file's own module prefix stripped.
+            let module_run: Vec<&str> = sym
+                .scope_segments
+                .iter()
+                .take_while(|seg| seg.is_module)
+                .skip(mod_depth)
+                .map(|seg| seg.name.as_str())
+                .collect();
+            let file_mod = if this_mod.is_empty() {
+                None
+            } else {
+                Some(this_mod)
+            };
+            build_declaration_name(file_mod, &module_run, &sym.simple_name)
+        }
+    }
+}
+
+/// Materialise one cached generated symbol as a searchable graph node.
+///
+/// Maps the [`GeneratedSymbolKind`] to the matching `GraphBuildHelper` sink
+/// (span `None`, since generated symbols have no byte range in the original
+/// source) and marks it a definition so it is searchable AS a definition,
+/// distinguished from real AST definitions solely by its `macro_generated`
+/// metadata (issue #394 invariant: `is_definition = span.is_some()`, so a
+/// `None`-span node needs the explicit `mark_definition`).
+fn materialise_generated_node(
+    helper: &mut GraphBuildHelper,
+    kind: GeneratedSymbolKind,
+    graph_name: &str,
+) -> NodeId {
+    let node_id = match kind {
+        GeneratedSymbolKind::Function => helper.add_function(graph_name, None, false, false),
+        GeneratedSymbolKind::Method => helper.add_method(graph_name, None, false, false),
+        GeneratedSymbolKind::Struct => helper.add_struct(graph_name, None),
+        GeneratedSymbolKind::Enum => helper.add_enum(graph_name, None),
+        GeneratedSymbolKind::Trait => helper.add_interface(graph_name, None),
+        GeneratedSymbolKind::TypeAlias => helper.add_type(graph_name, None),
+        GeneratedSymbolKind::Constant => helper.add_constant(graph_name, None),
+        GeneratedSymbolKind::Module => helper.add_module(graph_name, None),
+        // Impl / Other have no dedicated declaration node; fall back to function.
+        GeneratedSymbolKind::Impl | GeneratedSymbolKind::Other => {
+            helper.add_function(graph_name, None, false, false)
+        }
+    };
+    helper.mark_definition(node_id);
+    node_id
+}
+
+/// Phase 1b F4 consumer: read the pre-generated expand cache for this file's
+/// crate and materialise the macro-generated symbols it OWNS as searchable graph
+/// nodes, flagged `macro_generated` in `metadata_store`.
+///
+/// Execution-free: reads + validates JSON (size-capped, sanitised), hashes
+/// source files via `walkdir` + `sha2`, and parses `Cargo.toml` via the `toml`
+/// crate. Never runs `cargo` / `rustc`. Any failure degrades to "no cached
+/// symbols for this file" (the cache is optional enrichment) and never fails the
+/// index.
+///
+/// Borrow safety: this uses ONLY `helper.*` and `metadata_store.insert`; it does
+/// NOT touch `staging` directly, so the single `merge_macro_metadata` after
+/// `helper`'s last use covers both Pass 2.5's annotations and these.
+#[allow(clippy::too_many_arguments)]
+fn materialize_expand_cache(
+    helper: &mut GraphBuildHelper,
+    metadata_store: &mut sqry_core::graph::unified::NodeMetadataStore,
+    file: &Path,
+    tree: &Tree,
+    content: &[u8],
+    file_module_path: Option<&str>,
+    max_scope_depth: usize,
+    cache_dir: &Path,
+) {
+    use crate::macro_boundaries::expand_cache::{
+        EXPAND_CACHE_SCHEMA_VERSION, ExpandCache, compute_crate_source_hash,
+    };
+
+    let Some((crate_root, crate_key)) = resolve_crate(file) else {
+        log::warn!(
+            "expand-cache: could not resolve owning crate for {} (no ancestor Cargo.toml with [package].name); skipping",
+            file.display()
+        );
+        return;
+    };
+
+    let cache = match ExpandCache::new(cache_dir.to_path_buf()) {
+        Ok(cache) => cache,
+        Err(err) => {
+            log::warn!(
+                "expand-cache: cannot open cache dir {}: {err}; skipping",
+                cache_dir.display()
+            );
+            return;
+        }
+    };
+
+    let current_hash = match compute_crate_source_hash(&crate_root) {
+        Ok(hash) => hash,
+        Err(err) => {
+            log::warn!(
+                "expand-cache: failed to hash crate source at {}: {err}; skipping",
+                crate_root.display()
+            );
+            return;
+        }
+    };
+
+    match cache.is_fresh(&crate_key, &current_hash) {
+        Ok(true) => {}
+        Ok(false) => {
+            log::warn!(
+                "expand-cache: cache for crate '{crate_key}' is stale or absent (source hash changed); skipping. Re-run `sqry cache expand`."
+            );
+            return;
+        }
+        Err(err) => {
+            log::warn!(
+                "expand-cache: freshness check failed for crate '{crate_key}': {err}; skipping"
+            );
+            return;
+        }
+    }
+
+    let entry = match cache.read(&crate_key) {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return,
+        Err(err) => {
+            log::warn!(
+                "expand-cache: failed to read cache for crate '{crate_key}': {err}; skipping"
+            );
+            return;
+        }
+    };
+
+    if entry.schema_version != EXPAND_CACHE_SCHEMA_VERSION {
+        log::warn!(
+            "expand-cache: schema version mismatch for crate '{crate_key}' (found {}, expected {EXPAND_CACHE_SCHEMA_VERSION}); skipping. Re-run `sqry cache expand`.",
+            entry.schema_version
+        );
+        return;
+    }
+
+    // Module-scoped selection (dedup across the crate's files).
+    let this_mod = file_module_path.unwrap_or("");
+    let mod_depth = if this_mod.is_empty() {
+        0
+    } else {
+        this_mod.split("::").count()
+    };
+    let inline = inline_module_paths_declared_in(tree, content, this_mod);
+
+    let mut materialised = 0usize;
+    for sym in &entry.generated_symbols {
+        // Owning module = leading `is_module` run of the captured scope chain.
+        let module_owner: String = sym
+            .scope_segments
+            .iter()
+            .take_while(|seg| seg.is_module)
+            .map(|seg| seg.name.as_str())
+            .collect::<Vec<_>>()
+            .join("::");
+
+        // Ownership partition: this file owns the symbol iff its owning module is
+        // this file's own module or one of its inline modules.
+        let owned = module_owner == this_mod || inline.contains(&module_owner);
+        if !owned {
+            continue;
+        }
+
+        let graph_name = reconstruct_graph_name(sym, this_mod, mod_depth, max_scope_depth);
+
+        // Skip if a real AST node already carries this name (guard against
+        // double-emission; rare for genuine macro output).
+        if helper.has_node(&graph_name) {
+            continue;
+        }
+
+        let node_id = materialise_generated_node(helper, sym.kind, &graph_name);
+        metadata_store.insert(
+            node_id,
+            sqry_core::graph::unified::MacroNodeMetadata {
+                macro_generated: Some(true),
+                expansion_cached: Some(true),
+                ..sqry_core::graph::unified::MacroNodeMetadata::default()
+            },
+        );
+        materialised += 1;
+    }
+
+    if materialised > 0 {
+        log::debug!(
+            "expand-cache: materialised {materialised} generated symbol(s) for {} (crate '{crate_key}')",
+            file.display()
+        );
+    }
+}
+
 impl GraphBuilder for RustGraphBuilder {
     fn build_graph(
         &self,
@@ -319,6 +752,12 @@ impl GraphBuilder for RustGraphBuilder {
         file: &Path,
         staging: &mut StagingGraph,
     ) -> GraphResult<()> {
+        // Capture the per-file macro / cfg options BEFORE `helper` takes a
+        // mutable borrow of `staging` (Phase 1a `--cfg`). `parse_file` copied
+        // these onto this file's fresh staging graph from
+        // `BuildConfig::macro_options`; empty on a build with no `--cfg`.
+        let macro_options = staging.macro_options().clone();
+
         // Create helper for staging graph population
         let mut helper = GraphBuildHelper::new(staging, file, Language::Rust);
 
@@ -360,7 +799,18 @@ impl GraphBuilder for RustGraphBuilder {
         // Pass 2.5: Macro boundary analysis (4.5a, 4.5b, 4.5c, 4.5e)
         // Runs after the main tree walk so the node_map is fully populated.
         {
-            let macro_config = crate::macro_boundaries::MacroBoundaryConfig::default();
+            // Phase 1a: populate cfg evaluation inputs from `--cfg`. Split
+            // `feature=<name>` tokens into cfg features (consumed by
+            // `CfgPredicate::KeyValue { key: "feature", .. }`); every other
+            // token is a raw cfg flag (`Flag`, or a non-feature `key=value`
+            // such as `target_arch=x86_64`). Empty vecs leave cfg evaluation as
+            // "unknown", exactly as the previous inline `default()` did.
+            let (active_cfg_flags, active_features) = split_cfg_flags(&macro_options.cfg_flags);
+            let macro_config = crate::macro_boundaries::MacroBoundaryConfig {
+                active_cfg_flags,
+                active_features,
+                ..crate::macro_boundaries::MacroBoundaryConfig::default()
+            };
             let mut metadata_store = sqry_core::graph::unified::NodeMetadataStore::new();
             crate::macro_boundaries::analyze_macro_boundaries_in_build_graph(
                 tree,
@@ -370,6 +820,27 @@ impl GraphBuilder for RustGraphBuilder {
                 &macro_config,
                 &build_ctx.node_map,
             );
+
+            // Phase 1b F4: if `--expand-cache <DIR>` is set, materialise the
+            // pre-generated macro symbols this file owns as searchable nodes,
+            // accumulating their `macro_generated` annotations into the SAME
+            // `metadata_store`. This runs BEFORE the single `merge_macro_metadata`
+            // below and touches only `helper` + `metadata_store` (never `staging`
+            // directly), so the borrow ordering stays valid (no E0499) and one
+            // merge carries both Pass 2.5's and F4's annotations.
+            if let Some(cache_dir) = macro_options.expand_cache_dir.as_deref() {
+                materialize_expand_cache(
+                    &mut helper,
+                    &mut metadata_store,
+                    file,
+                    tree,
+                    content,
+                    build_ctx.file_module_path.as_deref(),
+                    self.max_scope_depth,
+                    cache_dir,
+                );
+            }
+
             // Merge metadata into staging if any was produced
             if !metadata_store.is_empty() {
                 log::debug!(
@@ -4233,7 +4704,11 @@ fn qualify_item_name(
         return name.to_string();
     }
 
-    let mut parts = vec![name.to_string()];
+    // Collect enclosing inline-module names, walking child -> parent (innermost
+    // first), then reverse into outermost-first declaration order so the shared
+    // `build_declaration_name` (also used by the Phase 1b expand-cache consumer)
+    // produces a byte-identical result.
+    let mut mod_names: Vec<String> = Vec::new();
     let mut current = node;
     while let Some(parent) = current.parent() {
         if parent.kind() == "mod_item"
@@ -4242,19 +4717,15 @@ fn qualify_item_name(
         {
             let t = text.trim();
             if !t.is_empty() {
-                parts.push(t.to_string());
+                mod_names.push(t.to_string());
             }
         }
         current = parent;
     }
+    mod_names.reverse();
 
-    // Add file module path as outermost prefix
-    if let Some(file_mod) = file_module_path {
-        parts.push(file_mod.to_string());
-    }
-
-    parts.reverse();
-    parts.join("::")
+    let module_segments: Vec<&str> = mod_names.iter().map(String::as_str).collect();
+    build_declaration_name(file_module_path, &module_segments, name)
 }
 
 /// File-level module name for exports/imports.
@@ -4408,24 +4879,16 @@ impl<'a> ASTGraphBuilder<'a> {
             let is_unsafe = is_unsafe_function(node, self.content);
             let is_method = self.current_impl_type.is_some();
 
-            // Build qualified name with impl type context and module scope
-            let qualified_name = if let Some(impl_type) = &self.current_impl_type {
-                // Method inside impl block: include module scope if present
-                // e.g., foo::bar::Type::method instead of just Type::method
-                if self.current_scope.is_empty() {
-                    format!("{impl_type}::{name}")
-                } else {
-                    format!("{}::{}::{}", self.current_scope.join("::"), impl_type, name)
-                }
-            } else if self.current_scope.is_empty() {
-                name.clone()
-            } else if self.current_scope.len() <= self.max_scope_depth {
-                format!("{}::{}", self.current_scope.join("::"), name)
-            } else {
-                // Truncate deep scopes
-                let truncated = &self.current_scope[..self.max_scope_depth];
-                format!("{}::{}", truncated.join("::"), name)
-            };
+            // Build qualified name with impl type context and module scope via
+            // the shared `build_qualified_name` (single source of truth reused by
+            // the Phase 1b expand-cache consumer so materialised names match).
+            let scope_strs: Vec<&str> = self.current_scope.iter().map(AsRef::as_ref).collect();
+            let qualified_name = build_qualified_name(
+                &scope_strs,
+                self.current_impl_type.as_deref(),
+                &name,
+                self.max_scope_depth,
+            );
 
             let context = CallContext {
                 name: Arc::from(name),
@@ -4539,6 +5002,24 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::path::PathBuf;
+
+    #[test]
+    fn split_cfg_flags_separates_features_from_raw_flags() {
+        let (cfg, features) = split_cfg_flags(&[
+            "unix".to_string(),
+            "feature=serde".to_string(),
+            "target_arch=x86_64".to_string(),
+            "feature=\"json\"".to_string(),
+            "feature=".to_string(),
+        ]);
+        // `feature=<name>` tokens contribute only their (trimmed, unquoted)
+        // value to the features axis; everything else stays a raw cfg flag.
+        assert_eq!(
+            cfg,
+            vec!["unix".to_string(), "target_arch=x86_64".to_string()]
+        );
+        assert_eq!(features, vec!["serde".to_string(), "json".to_string()]);
+    }
 
     fn parse_rust(source: &str) -> Tree {
         let mut parser = tree_sitter::Parser::new();

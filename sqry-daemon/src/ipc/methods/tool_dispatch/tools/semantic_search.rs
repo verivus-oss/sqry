@@ -37,6 +37,13 @@ async fn handle_revision_semantic_search(
     args: SemanticSearchArgs,
     target: RevisionQueryTarget,
 ) -> Result<Value, MethodError> {
+    // #566: the revision-target branch canonicalizes `args.path` directly,
+    // bypassing the `resolve_path` funnel, so it needs the same absolute-path
+    // guard: a relative path here would canonicalize against the daemon's CWD.
+    crate::ipc::path_policy::ensure_absolute_workspace_path(std::path::Path::new(&args.path))
+        .map_err(|reason| {
+            MethodError::Daemon(crate::error::DaemonError::InvalidArgument { reason })
+        })?;
     let root = std::path::PathBuf::from(&args.path)
         .canonicalize()
         .map_err(|err| {

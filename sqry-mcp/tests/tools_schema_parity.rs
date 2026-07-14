@@ -77,13 +77,14 @@ fn daemon_supported_tool_names_matches_standalone_subset() {
          get_filtered_tools() inventory (the source of the filter)."
     );
 
-    // Exactly 16 tools (15 + body-shape `structural_similar`, U07) —
-    // belt-and-suspenders for the set-equality proof above.
+    // Exactly 17 tools (15 + body-shape `structural_similar` U07 +
+    // `generate_overview`): belt-and-suspenders for the set-equality proof
+    // above.
     assert_eq!(
         tools.len(),
-        16,
-        "daemon_supported_tools() must return exactly 16 tools under default feature flags \
-         (15 + structural_similar), got {} tools: {:?}",
+        17,
+        "daemon_supported_tools() must return exactly 17 tools under default feature flags \
+         (15 + structural_similar + generate_overview), got {} tools: {:?}",
         tools.len(),
         returned_names
     );

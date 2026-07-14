@@ -276,6 +276,13 @@ pub fn run_graph(
             format,
             verbose,
         ),
+        GraphOperation::Hubs { top, by } => run_hubs_unified(&unified_graph, *top, by, format),
+        GraphOperation::Subsystems { top, group_depth } => {
+            run_subsystems_unified(&unified_graph, *top, *group_depth, format)
+        }
+        GraphOperation::Communities { top, resolution } => {
+            run_communities_unified(&unified_graph, *top, *resolution, format)
+        }
         GraphOperation::Provenance { symbol, json } => {
             // Honor both the per-subcommand `--json` flag and the threaded
             // graph-level `--format json` (resolved upstream by
@@ -2804,7 +2811,7 @@ fn parse_language_filter_for_complexity(languages: Option<&str>) -> Result<Vec<L
 }
 
 /// Calculate complexity metrics for all functions in the unified graph.
-fn calculate_complexity_metrics_unified(
+pub(crate) fn calculate_complexity_metrics_unified(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     target: Option<&str>,
     language_filter: &HashSet<Language>,
@@ -4325,6 +4332,309 @@ fn render_cycle_names(names: &[serde_json::Value]) {
     if let Some(first) = names.first() {
         println!("  → {} (cycle)", first.as_str().unwrap_or("?"));
     }
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// Hubs / Subsystems / Communities (the `sqry overview` analysis primitives,
+// exposed as standalone `sqry graph` subcommands).
+// ─────────────────────────────────────────────────────────────────────────
+
+/// One ranked hub, in the JSON/text row shape.
+#[derive(Debug, serde::Serialize)]
+struct HubRow {
+    name: String,
+    kind: String,
+    file: String,
+    line: u32,
+    fan_in: u32,
+    fan_out: u32,
+}
+
+/// Resolve a hub `NodeId` to its display row (basename file, matching the
+/// existing `complexity`/`nodes` convention of showing basenames by default).
+fn hub_row(
+    snapshot: &UnifiedGraphSnapshot,
+    hub: &sqry_core::graph::unified::analysis::HubRank,
+) -> HubRow {
+    let (name, file, line) = snapshot.get_node(hub.node).map_or_else(
+        || ("?".to_string(), "unknown".to_string(), 0),
+        |entry| {
+            (
+                resolve_node_label(snapshot, entry),
+                resolve_node_file_path(snapshot, entry, false),
+                entry.start_line,
+            )
+        },
+    );
+    HubRow {
+        name,
+        kind: format!("{:?}", hub.kind),
+        file,
+        line,
+        fan_in: hub.fan_in,
+        fan_out: hub.fan_out,
+    }
+}
+
+fn run_hubs_unified(graph: &UnifiedCodeGraph, top: usize, by: &str, format: &str) -> Result<()> {
+    use sqry_core::graph::unified::analysis::{HubMetric, HubOpts, KindMask, rank_hubs};
+
+    let metric = match by {
+        "fan-in" => HubMetric::FanIn,
+        "fan-out" => HubMetric::FanOut,
+        "combined" => HubMetric::Combined,
+        other => bail!("Invalid --by value: {other} (expected: fan-in, fan-out, combined)"),
+    };
+
+    let snapshot = graph.snapshot();
+    let hubs = rank_hubs(
+        &snapshot,
+        &HubOpts {
+            top,
+            by: metric,
+            kinds: KindMask::default(),
+        },
+    );
+    let rows: Vec<HubRow> = hubs.iter().map(|h| hub_row(&snapshot, h)).collect();
+
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+    } else {
+        println!("Load-bearing hubs (by {by}): {} shown", rows.len());
+        println!();
+        for (i, row) in rows.iter().enumerate() {
+            println!(
+                "{:>3}. {} [{}]  fan_in={} fan_out={}  {}:{}",
+                i + 1,
+                row.name,
+                row.kind,
+                row.fan_in,
+                row.fan_out,
+                row.file,
+                row.line
+            );
+        }
+        if rows.is_empty() {
+            println!("No hubs found.");
+        }
+    }
+    Ok(())
+}
+
+/// One subsystem, in the JSON/text row shape.
+#[derive(Debug, serde::Serialize)]
+struct SubsystemRow {
+    key: String,
+    size: u32,
+    internal_edges: u64,
+    representative: String,
+}
+
+/// One directed coupling, in the JSON/text row shape.
+#[derive(Debug, serde::Serialize)]
+struct CouplingRow {
+    from: String,
+    to: String,
+    kind: String,
+    count: u32,
+}
+
+fn run_subsystems_unified(
+    graph: &UnifiedCodeGraph,
+    top: usize,
+    group_depth: usize,
+    format: &str,
+) -> Result<()> {
+    use sqry_core::graph::unified::analysis::{SubsystemOpts, aggregate_subsystems};
+
+    let snapshot = graph.snapshot();
+    let (subsystems, couplings) =
+        aggregate_subsystems(&snapshot, &SubsystemOpts { top, group_depth });
+
+    let sub_rows: Vec<SubsystemRow> = subsystems
+        .iter()
+        .map(|s| SubsystemRow {
+            key: s.key.clone(),
+            size: s.size,
+            internal_edges: s.internal_edges,
+            representative: snapshot
+                .get_node(s.representative)
+                .map_or_else(|| "?".to_string(), |e| resolve_node_label(&snapshot, e)),
+        })
+        .collect();
+    let coup_rows: Vec<CouplingRow> = couplings
+        .iter()
+        .map(|c| CouplingRow {
+            from: c.from.clone(),
+            to: c.to.clone(),
+            kind: format!("{:?}", c.kind),
+            count: c.count,
+        })
+        .collect();
+
+    if format == "json" {
+        let out = serde_json::json!({
+            "subsystems": sub_rows,
+            "couplings": coup_rows,
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!("Subsystems (by path/package, group-depth {group_depth}):");
+        println!();
+        for (i, row) in sub_rows.iter().enumerate() {
+            println!(
+                "{:>3}. {}  ({} symbols, {} internal edges)  rep: {}",
+                i + 1,
+                row.key,
+                row.size,
+                row.internal_edges,
+                row.representative
+            );
+        }
+        if sub_rows.is_empty() {
+            println!("No subsystems found.");
+        }
+        println!();
+        println!("Couplings (sparse-but-high-fan first):");
+        println!();
+        for row in &coup_rows {
+            println!(
+                "  {} -> {}  [{}] x{}",
+                row.from, row.to, row.kind, row.count
+            );
+        }
+        if coup_rows.is_empty() {
+            println!("No cross-subsystem couplings found.");
+        }
+    }
+    Ok(())
+}
+
+/// One detected community, in the JSON/text row shape.
+#[derive(Debug, serde::Serialize)]
+struct CommunityRow {
+    representative: Option<String>,
+    size: u32,
+    symbol_count: u32,
+    internal_edges: u64,
+    files: Vec<String>,
+}
+
+/// Convert a positive, finite gamma into an exact rational [`Resolution`].
+fn resolution_from_f64(gamma: f64) -> Result<sqry_core::graph::unified::analysis::Resolution> {
+    use sqry_core::graph::unified::analysis::Resolution;
+    if !gamma.is_finite() || gamma <= 0.0 {
+        bail!("--resolution must be a positive, finite number (got {gamma})");
+    }
+    // Represent gamma as num/1_000_000; the accept test is evaluated exactly
+    // over this rational, so the approximation is fixed and deterministic.
+    let den: u64 = 1_000_000;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let num = (gamma * den as f64).round() as u64;
+    if num == 0 {
+        bail!("--resolution {gamma} rounds to zero at the working precision");
+    }
+    Resolution::new(num, den)
+        .ok_or_else(|| anyhow::anyhow!("failed to build resolution from {gamma}"))
+}
+
+fn run_communities_unified(
+    graph: &UnifiedCodeGraph,
+    top: usize,
+    resolution: f64,
+    format: &str,
+) -> Result<()> {
+    use sqry_core::graph::unified::analysis::{
+        CommunityGate, CommunityOpts, CommunityOutcome, detect_communities,
+    };
+
+    let resolution = resolution_from_f64(resolution)?;
+    let snapshot = graph.snapshot();
+    let report = detect_communities(
+        &snapshot,
+        &CommunityOpts {
+            top,
+            resolution,
+            gate: CommunityGate::default(),
+        },
+    );
+
+    match &report.outcome {
+        CommunityOutcome::Partition(communities) => {
+            let rows: Vec<CommunityRow> = communities
+                .iter()
+                .map(|c| CommunityRow {
+                    representative: c.representative.and_then(|n| {
+                        snapshot
+                            .get_node(n)
+                            .map(|e| resolve_node_label(&snapshot, e))
+                    }),
+                    size: c.size,
+                    symbol_count: c.symbol_count,
+                    internal_edges: c.internal_edges,
+                    files: c
+                        .files
+                        .iter()
+                        .filter_map(|&f| {
+                            snapshot.files().resolve(f).map(|p| {
+                                p.file_name()
+                                    .and_then(|n| n.to_str())
+                                    .unwrap_or("unknown")
+                                    .to_string()
+                            })
+                        })
+                        .collect(),
+                })
+                .collect();
+
+            if format == "json" {
+                let out = serde_json::json!({
+                    "outcome": "partition",
+                    "algorithm_version": report.algorithm_version,
+                    "communities": rows,
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!(
+                    "Dense dependency clusters (undirected modularity): {} shown",
+                    rows.len()
+                );
+                println!();
+                for (i, row) in rows.iter().enumerate() {
+                    println!(
+                        "{:>3}. {}  ({} files, {} symbols, {} internal edges)",
+                        i + 1,
+                        row.representative.as_deref().unwrap_or("<unnamed>"),
+                        row.size,
+                        row.symbol_count,
+                        row.internal_edges
+                    );
+                }
+                if rows.is_empty() {
+                    println!("No communities found.");
+                }
+            }
+        }
+        CommunityOutcome::TooLarge(verdict) => {
+            if format == "json" {
+                let out = serde_json::json!({
+                    "outcome": "too_large",
+                    "algorithm_version": report.algorithm_version,
+                    "file_nodes": verdict.file_nodes,
+                    "coarsened_edges": verdict.coarsened_edges,
+                    "work_units": verdict.work_units.to_string(),
+                });
+                println!("{}", serde_json::to_string_pretty(&out)?);
+            } else {
+                println!(
+                    "Graph too large for community detection ({} coarsened file nodes, {} edges).",
+                    verdict.file_nodes, verdict.coarsened_edges
+                );
+                println!("Raise --resolution to fragment further, or narrow the search path.");
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -250,13 +250,20 @@ impl ServerHandler for DaemonMcpHandler {
         // against an already-loaded graph. It drives
         // `WorkspaceManager::get_or_load` (and optionally `unload` for
         // force) rather than `classify_and_execute`. Handle it on a
-        // dedicated path BEFORE the generic `path`-argument check below
-        // — standalone `RebuildIndexParams::path` is optional and
-        // defaults to `"."` (see `sqry-mcp/src/tools/params.rs:1629`),
-        // so a request that omits `path` must succeed here too.
+        // dedicated path BEFORE the generic `path`-argument check below.
+        //
+        // #566: standalone `RebuildIndexParams::path` defaults to `"."`
+        // (see `default_path()` at `sqry-mcp/src/tools/params.rs:1587`),
+        // which standalone resolves against the client's launch directory
+        // via the MCP `roots/list` callback. The daemon has no such client
+        // directory, so an omitted or relative `path` cannot be resolved
+        // correctly (it would canonicalize against the daemon's own CWD,
+        // silently targeting the wrong workspace). Require an explicit
+        // absolute path instead: omitted `path` is rejected here, and a
+        // present-but-relative `path` is rejected in `handle_rebuild_index`.
         //
         // Strictness: if `path` is PRESENT but not a string, fail with
-        // `InvalidArgument` — matching standalone serde rejection of
+        // `InvalidArgument`, matching standalone serde rejection of
         // `{"path": 42}` shaped requests.
         if name == "rebuild_index" {
             let path = match args_value.as_object().and_then(|m| m.get("path")) {
@@ -265,7 +272,14 @@ impl ServerHandler for DaemonMcpHandler {
                         reason: format!("rebuild_index: `path` must be a string, got: {raw}"),
                     })
                 })?,
-                None => ".".to_string(),
+                None => {
+                    return Err(daemon_err_to_mcp(DaemonError::InvalidArgument {
+                        reason: "rebuild_index: workspace `path` is required in daemon mode; \
+                                 the daemon has no client working directory to default to. \
+                                 Pass an absolute path."
+                            .to_string(),
+                    }));
+                }
             };
             return self.handle_rebuild_index(&path, &args_value).await;
         }
@@ -414,6 +428,23 @@ impl DaemonMcpHandler {
             })?,
             None => true,
         };
+
+        // #566: reject a relative `path` before canonicalizing. `rebuild_index`
+        // bypasses `resolve_path` (it drives `WorkspaceManager::get_or_load`
+        // directly, per the mutating-rebuild contract), so it needs its own
+        // absolute-path guard: `std::fs::canonicalize` on a relative path
+        // resolves it against the daemon's process CWD ($HOME), silently
+        // targeting the wrong workspace. The daemon has no client working
+        // directory to resolve a relative path against.
+        if !std::path::Path::new(path).is_absolute() {
+            return Err(daemon_err_to_mcp(DaemonError::InvalidArgument {
+                reason: format!(
+                    "rebuild_index: workspace `path` must be absolute in daemon mode; received \
+                     relative path {path:?}. The daemon has no client working directory to \
+                     resolve it against. Pass an absolute path."
+                ),
+            }));
+        }
 
         // Canonicalise the target. Standalone accepts file paths and
         // rebuilds the parent directory; do the same here.

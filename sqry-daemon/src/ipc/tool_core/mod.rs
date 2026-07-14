@@ -237,6 +237,12 @@ pub(crate) fn resolve_path_for_acquisition(raw: &Path) -> Result<PathBuf, Daemon
 }
 
 fn resolve_path(raw: &Path) -> Result<PathBuf, DaemonError> {
+    // #566: reject a relative path before it can be joined onto the daemon's
+    // own process CWD ($HOME). Shared with the other daemon-side resolvers via
+    // `path_policy::ensure_absolute_workspace_path` so every surface returns the
+    // same contract and message.
+    crate::ipc::path_policy::ensure_absolute_workspace_path(raw)
+        .map_err(|reason| DaemonError::InvalidArgument { reason })?;
     let absolutised =
         absolutize_without_resolution(raw).map_err(|e| DaemonError::InvalidArgument {
             reason: format!("path_policy: index_root absolutise: {e}"),
@@ -728,6 +734,45 @@ mod tests {
         assert!(
             !got.contains("last error"),
             "None last_error must omit the clause entirely, got: {got}"
+        );
+    }
+
+    // ----- resolve_path absolute-path enforcement (#566) ---------------
+
+    #[test]
+    fn resolve_path_rejects_relative_path() {
+        // A relative path in daemon mode has no client working directory to
+        // resolve against; it must be rejected, not joined onto the daemon's
+        // own CWD (which would silently select the wrong workspace).
+        let err = super::resolve_path(std::path::Path::new("some/relative/dir"))
+            .expect_err("relative path must be rejected");
+        match err {
+            DaemonError::InvalidArgument { reason } => assert!(
+                reason.contains("absolute"),
+                "reason must mention the absolute-path requirement, got: {reason}"
+            ),
+            other => panic!("expected InvalidArgument, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_path_rejects_dot() {
+        let err = super::resolve_path(std::path::Path::new("."))
+            .expect_err("`.` must be rejected in daemon mode");
+        assert!(
+            matches!(err, DaemonError::InvalidArgument { .. }),
+            "`.` must yield InvalidArgument, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn resolve_path_accepts_absolute_existing_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolved = super::resolve_path(tmp.path()).expect("absolute existing dir must resolve");
+        let expected = sqry_core::project::canonicalize_path(tmp.path()).unwrap();
+        assert_eq!(
+            resolved, expected,
+            "absolute path must canonicalize unchanged"
         );
     }
 

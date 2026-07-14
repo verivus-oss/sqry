@@ -151,6 +151,15 @@ pub(crate) trait NodeIdBearing {
     /// with duplicates permitted (the residue check uses
     /// `HashSet::contains`). The iterator borrows from `self` and may
     /// hold internal locks for the duration of iteration.
+    ///
+    /// The sole caller is the tombstone-residue check
+    /// (`CodeGraph::assert_no_tombstone_residue_for`, gated
+    /// `#[cfg(any(debug_assertions, test))]`), so every release build (the
+    /// `rebuild-internals` feature gates other hooks, not this method) has no
+    /// caller. The `cfg_attr` silences the release-only `dead_code` warning
+    /// while keeping the lint active in debug/test. `retain_nodes` below stays
+    /// ungated: it is called on the finalize compaction path in every build.
+    #[cfg_attr(not(any(debug_assertions, test)), allow(dead_code))]
     fn all_node_ids(&self) -> Box<dyn Iterator<Item = NodeId> + '_>;
 
     /// Remove every reference whose `keep` predicate returns `false`.

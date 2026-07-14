@@ -704,9 +704,6 @@ pub fn run_index(
     add_to_gitignore: bool,
     no_incremental: bool,
     cache_dir: Option<&str>,
-    enable_macro_expansion: bool,
-    cfg_flags: &[String],
-    expand_cache: Option<&std::path::Path>,
     classpath: bool,
     _no_classpath: bool,
     classpath_depth: crate::args::ClasspathDepthArg,
@@ -714,6 +711,8 @@ pub fn run_index(
     build_system: Option<&str>,
     force_classpath: bool,
     allow_nested: bool,
+    cfg_flags: &[String],
+    expand_cache: Option<&Path>,
 ) -> Result<()> {
     if let Some(0) = threads {
         anyhow::bail!("--threads must be >= 1");
@@ -743,13 +742,6 @@ pub fn run_index(
         anyhow::bail!("{e}");
     }
 
-    // Log macro boundary analysis configuration
-    if enable_macro_expansion || !cfg_flags.is_empty() || expand_cache.is_some() {
-        log::info!(
-            "Macro boundary config: expansion={enable_macro_expansion}, cfg_flags={cfg_flags:?}, expand_cache={expand_cache:?}",
-        );
-    }
-
     print_index_build_banner(root_path, threads);
 
     let start = Instant::now();
@@ -758,7 +750,7 @@ pub fn run_index(
     let (progress_bar, progress) = create_progress_reporter(cli);
 
     // Build unified graph using the consolidated pipeline
-    let build_config = create_build_config(cli, root_path, threads)?;
+    let build_config = create_build_config(cli, root_path, threads, cfg_flags, expand_cache)?;
     let resolved_plugins =
         plugin_defaults::resolve_plugin_selection(cli, root_path, PluginSelectionMode::FreshWrite)?;
     let classpath_opts = ClasspathCliOptions {
@@ -1105,6 +1097,8 @@ pub(crate) fn create_build_config(
     cli: &Cli,
     root_path: &Path,
     threads: Option<usize>,
+    cfg_flags: &[String],
+    expand_cache: Option<&Path>,
 ) -> Result<sqry_core::graph::unified::build::BuildConfig> {
     Ok(sqry_core::graph::unified::build::BuildConfig {
         max_depth: if cli.max_depth == 0 {
@@ -1118,6 +1112,13 @@ pub(crate) fn create_build_config(
         label_budget: sqry_core::graph::unified::analysis::resolve_label_budget_config(
             root_path, None, None, None, false,
         )?,
+        // Phase 1a/1b: thread `--cfg` predicate strings and the `--expand-cache`
+        // directory into the Rust plugin's macro-boundary analysis. Empty/None
+        // (the `sqry update` path) leaves today's behaviour unchanged.
+        macro_options: sqry_core::graph::unified::build::MacroBuildOptions {
+            cfg_flags: cfg_flags.to_vec(),
+            expand_cache_dir: expand_cache.map(std::path::Path::to_path_buf),
+        },
         ..sqry_core::graph::unified::build::BuildConfig::default()
     })
 }
@@ -1196,8 +1197,9 @@ pub fn run_update(
 
     let (progress_bar, progress) = create_progress_reporter(cli);
 
-    // Update graph using consolidated pipeline
-    let build_config = create_build_config(cli, root_path, threads)?;
+    // Update graph using consolidated pipeline. Phase 1c: `sqry update` does not
+    // yet carry `--cfg` / `--expand-cache`, so it rebuilds with defaults.
+    let build_config = create_build_config(cli, root_path, threads, &[], None)?;
     let resolved_plugins = plugin_defaults::resolve_plugin_selection(
         cli,
         root_path,
@@ -1753,9 +1755,6 @@ mod tests {
             false,
             false,
             None,
-            false, // enable_macro_expansion
-            &[],  // cfg_flags
-            None, // expand_cache
             false,
             false,
             crate::args::ClasspathDepthArg::Full,
@@ -1763,6 +1762,8 @@ mod tests {
             None,
             false,
             false, // allow_nested
+            &[],   // cfg_flags
+            None,  // expand_cache
         );
         assert!(result.is_ok());
 
@@ -1793,9 +1794,6 @@ mod tests {
             false,
             false,
             None,
-            false, // enable_macro_expansion
-            &[],   // cfg_flags
-            None,  // expand_cache
             false,
             false,
             crate::args::ClasspathDepthArg::Full,
@@ -1803,6 +1801,8 @@ mod tests {
             None,
             false,
             false, // allow_nested
+            &[],   // cfg_flags
+            None,  // expand_cache
         )
         .unwrap();
 
@@ -1815,9 +1815,6 @@ mod tests {
             false,
             false,
             None,
-            false, // enable_macro_expansion
-            &[],   // cfg_flags
-            None,  // expand_cache
             false,
             false,
             crate::args::ClasspathDepthArg::Full,
@@ -1825,6 +1822,8 @@ mod tests {
             None,
             false,
             false, // allow_nested
+            &[],   // cfg_flags
+            None,  // expand_cache
         );
         assert!(result.is_ok());
 
@@ -1837,9 +1836,6 @@ mod tests {
             false,
             false,
             None,
-            false, // enable_macro_expansion
-            &[],   // cfg_flags
-            None,  // expand_cache
             false,
             false,
             crate::args::ClasspathDepthArg::Full,
@@ -1847,6 +1843,8 @@ mod tests {
             None,
             false,
             false, // allow_nested
+            &[],   // cfg_flags
+            None,  // expand_cache
         );
         assert!(result.is_ok());
     }
@@ -1928,9 +1926,6 @@ mod tests {
             false,
             false,
             None,
-            false, // enable_macro_expansion
-            &[],   // cfg_flags
-            None,  // expand_cache
             false,
             false,
             crate::args::ClasspathDepthArg::Full,
@@ -1938,6 +1933,8 @@ mod tests {
             None,
             false,
             false, // allow_nested
+            &[],   // cfg_flags
+            None,  // expand_cache
         )
         .unwrap();
 
@@ -1984,9 +1981,6 @@ mod tests {
             false,
             false,
             None,
-            false, // enable_macro_expansion
-            &[],   // cfg_flags
-            None,  // expand_cache
             false,
             false,
             crate::args::ClasspathDepthArg::Full,
@@ -1994,6 +1988,8 @@ mod tests {
             None,
             false,
             false, // allow_nested
+            &[],   // cfg_flags
+            None,  // expand_cache
         )
         .unwrap();
 
@@ -2040,15 +2036,14 @@ mod tests {
             false,
             None,
             false,
-            &[],
-            None,
-            false,
             false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // allow_nested
+            &[],   // cfg_flags
+            None,  // expand_cache
         )
         .expect("initial build should succeed");
 
@@ -2070,15 +2065,14 @@ mod tests {
             true,  // no_incremental = true ← drives the full-rebuild path
             None,
             false,
-            &[],
-            None,
-            false,
             false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // allow_nested
+            &[],   // cfg_flags
+            None,  // expand_cache
         )
         .expect("--no-incremental must rebuild even when snapshot exists");
 
@@ -2141,15 +2135,14 @@ mod tests {
             false,
             None,
             false,
-            &[],
-            None,
-            false,
             false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // allow_nested
+            &[],   // cfg_flags
+            None,  // expand_cache
         )
         .expect("initial build for prometheus test must succeed");
 
@@ -2195,15 +2188,14 @@ mod tests {
             false,
             None,
             false,
-            &[],
-            None,
-            false,
             false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // allow_nested = false → guard fires
+            &[],   // cfg_flags
+            None,  // expand_cache
         );
         let err = result.expect_err("nested creation must error without --allow-nested");
         let msg = err.to_string();

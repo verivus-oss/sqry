@@ -43,20 +43,20 @@ use super::{
     WorkspaceContext, execute_complexity_metrics_for_daemon, execute_dependency_impact_for_daemon,
     execute_direct_callees_for_daemon, execute_direct_callers_for_daemon,
     execute_export_graph_for_daemon, execute_find_cycles_for_daemon,
-    execute_find_unused_for_daemon, execute_is_node_in_cycle_for_daemon,
-    execute_relation_query_for_daemon, execute_semantic_diff_for_daemon,
-    execute_semantic_search_for_daemon, execute_show_dependencies_for_daemon,
-    execute_structural_similar_for_daemon, execute_subgraph_for_daemon,
-    execute_trace_path_for_daemon, tool_response_json,
+    execute_find_unused_for_daemon, execute_generate_overview_for_daemon,
+    execute_is_node_in_cycle_for_daemon, execute_relation_query_for_daemon,
+    execute_semantic_diff_for_daemon, execute_semantic_search_for_daemon,
+    execute_show_dependencies_for_daemon, execute_structural_similar_for_daemon,
+    execute_subgraph_for_daemon, execute_trace_path_for_daemon, tool_response_json,
 };
 
 use crate::daemon_params::{
     params_to_complexity_metrics_args, params_to_dependency_impact_args,
     params_to_direct_callees_args, params_to_direct_callers_args, params_to_export_graph_args,
-    params_to_find_cycles_args, params_to_find_unused_args, params_to_is_node_in_cycle_args,
-    params_to_relation_query_args, params_to_semantic_diff_args, params_to_semantic_search_args,
-    params_to_show_dependencies_args, params_to_structural_similar_args, params_to_subgraph_args,
-    params_to_trace_path_args,
+    params_to_find_cycles_args, params_to_find_unused_args, params_to_generate_overview_args,
+    params_to_is_node_in_cycle_args, params_to_relation_query_args, params_to_semantic_diff_args,
+    params_to_semantic_search_args, params_to_show_dependencies_args,
+    params_to_structural_similar_args, params_to_subgraph_args, params_to_trace_path_args,
 };
 
 /// Dispatch a named tool call against a pre-resolved
@@ -167,6 +167,12 @@ pub fn dispatch_by_name(
             let args = params_to_complexity_metrics_args(args_value.clone())
                 .map_err(anyhow::Error::from)?;
             let exec = execute_complexity_metrics_for_daemon(wctx, &args)?;
+            tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
+        }
+        "generate_overview" => {
+            let args = params_to_generate_overview_args(args_value.clone())
+                .map_err(anyhow::Error::from)?;
+            let exec = execute_generate_overview_for_daemon(wctx, &args)?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "semantic_diff" => {

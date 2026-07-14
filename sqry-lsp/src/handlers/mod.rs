@@ -176,11 +176,24 @@ fn byte_position_to_lsp(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // `TEST_DELAY_MS` is a process-global shared by every test in this binary,
+    // and the two tests below both mutate it. `cargo test` runs them on parallel
+    // threads, so without serialization they race: a parallel `store(0)` can land
+    // between this test's `store(42)` and its load, so the load observes 0 and the
+    // assertion fails (the historical flake). Any test that configures the delay
+    // must hold this lock for as long as it relies on the value, so at most one
+    // delay-mutating test touches the global at a time.
+    static DELAY_LOCK: Mutex<()> = Mutex::new(());
 
     // ── configure_test_delay_ms / pause_for_test ─────────────────────────────
 
     #[test]
     fn configure_test_delay_stores_and_loads() {
+        let _serialized = DELAY_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // Store a value and verify it is retrievable
         configure_test_delay_ms(42);
         let loaded = TEST_DELAY_MS.load(Ordering::SeqCst);
@@ -191,6 +204,9 @@ mod tests {
 
     #[test]
     fn pause_for_test_with_zero_delay_returns_quickly() {
+        let _serialized = DELAY_LOCK
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         configure_test_delay_ms(0);
         // Should return immediately without sleeping
         pause_for_test();

@@ -9,7 +9,7 @@ rust-version.workspace = true
 description = "Rust language plugin for sqry"
 
 [dependencies]
-sqry-core = { version = "28.0.3", path = "../sqry-core" }
+sqry-core = { version = "29.0.2", path = "../sqry-core" }
 anyhow.workspace = true
 tree-sitter.workspace = true
 tree-sitter-rust.workspace = true
@@ -19,6 +19,10 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 lsp-types = "0.97"
 log.workspace = true
+toml.workspace = true
+walkdir.workspace = true
+sha2.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 sqry-core = { path = "../sqry-core", features = ["test-support"] }

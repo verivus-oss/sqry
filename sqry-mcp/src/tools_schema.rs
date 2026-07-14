@@ -1,17 +1,17 @@
 //! Daemon-hosted MCP tool surface.
 //!
-//! The sqryd daemon hosts a 16-tool MCP subset via the shim byte-pump
+//! The sqryd daemon hosts a 17-tool MCP subset via the shim byte-pump
 //! transport. Standalone `sqry-mcp` (no daemon) exposes the full
-//! 38-tool runtime MCP standalone surface via
+//! 39-tool runtime MCP standalone surface via
 //! [`crate::server::SqryServer::get_filtered_tools`]. These two are
 //! intentionally NOT identical: 22 standalone-only tools are
 //! unavailable when connecting through the daemon (per Codex iter-0 B3:
 //! "the daemon-hosted MCP surface is finally honest").
 //!
-//! Users wanting the full 38-tool inventory continue to invoke
+//! Users wanting the full 39-tool inventory continue to invoke
 //! `sqry-mcp` without `--daemon`.
 
-/// Names of the 16 tools that the daemon MCP host exposes via
+/// Names of the 17 tools that the daemon MCP host exposes via
 /// `tools/list` and that [`crate::daemon_adapter::dispatch::dispatch_by_name`]
 /// can route. Alphabetical order for stable assertions.
 ///
@@ -27,6 +27,7 @@ pub const DAEMON_SUPPORTED_TOOL_NAMES: &[&str] = &[
     "export_graph",
     "find_cycles",
     "find_unused",
+    "generate_overview",
     "is_node_in_cycle",
     "rebuild_index",
     "relation_query",
@@ -38,17 +39,17 @@ pub const DAEMON_SUPPORTED_TOOL_NAMES: &[&str] = &[
     "trace_path",
 ];
 
-/// Return the rmcp Tool schema list filtered to only the 16
+/// Return the rmcp Tool schema list filtered to only the 17
 /// daemon-supported tools. The daemon MCP host
 /// (`sqry-daemon::mcp_host`, Phase 8c U8) calls this in its
 /// `ServerHandler::list_tools`.
 ///
 /// Delegates to [`crate::server::SqryServer::get_filtered_tools`] then
 /// filters by [`DAEMON_SUPPORTED_TOOL_NAMES`]. The feature-flag filter
-/// still applies — daemon-host tools are additionally subject to
+/// still applies, daemon-host tools are additionally subject to
 /// [`crate::feature_flags::FeatureFlags::from_env`]. When a feature
-/// flag disables one of the 16 names, the returned vec will be
-/// shorter than 16.
+/// flag disables one of the 17 names, the returned vec will be
+/// shorter than 17.
 #[must_use]
 pub fn daemon_supported_tools() -> Vec<rmcp::model::Tool> {
     use crate::feature_flags::FeatureFlags;
@@ -66,16 +67,17 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    /// `DAEMON_SUPPORTED_TOOL_NAMES` must contain exactly 16 names and
+    /// `DAEMON_SUPPORTED_TOOL_NAMES` must contain exactly 17 names and
     /// they must be sorted / deduplicated. Assertion guards against
     /// accidental addition or duplication that would desync from
-    /// sqry-daemon's `dispatch_tool` match. (15 + `structural_similar`, U07.)
+    /// sqry-daemon's `dispatch_tool` match. (15 + `structural_similar` U07 +
+    /// `generate_overview`.)
     #[test]
-    fn daemon_supported_tool_names_is_exactly_16_sorted_unique() {
+    fn daemon_supported_tool_names_is_exactly_17_sorted_unique() {
         assert_eq!(
             DAEMON_SUPPORTED_TOOL_NAMES.len(),
-            16,
-            "DAEMON_SUPPORTED_TOOL_NAMES must contain exactly 16 tools"
+            17,
+            "DAEMON_SUPPORTED_TOOL_NAMES must contain exactly 17 tools"
         );
 
         // Sorted.
@@ -96,21 +98,21 @@ mod tests {
         );
     }
 
-    /// With default feature flags (no env flags set), all 16 names must
+    /// With default feature flags (no env flags set), all 17 names must
     /// appear in `daemon_supported_tools()`. If the test harness sets
-    /// `SQRY_MCP_FLAGS` env vars that disable one of the 16, this
-    /// assertion may need narrowing — but the intent of the default
-    /// daemon surface is exactly 16.
+    /// `SQRY_MCP_FLAGS` env vars that disable one of the 17, this
+    /// assertion may need narrowing, but the intent of the default
+    /// daemon surface is exactly 17.
     #[test]
-    fn daemon_supported_tools_returns_exact_16_under_default_flags() {
+    fn daemon_supported_tools_returns_exact_17_under_default_flags() {
         let tools = daemon_supported_tools();
         let names: HashSet<&str> = tools.iter().map(|t| t.name.as_ref()).collect();
         let expected: HashSet<&str> = DAEMON_SUPPORTED_TOOL_NAMES.iter().copied().collect();
         assert_eq!(
             names,
             expected,
-            "daemon_supported_tools must return exactly the 16 DAEMON_SUPPORTED_TOOL_NAMES \
-             (default feature flags). Got {} tools, expected 16.",
+            "daemon_supported_tools must return exactly the 17 DAEMON_SUPPORTED_TOOL_NAMES \
+             (default feature flags). Got {} tools, expected 17.",
             tools.len()
         );
     }
@@ -118,8 +120,8 @@ mod tests {
     /// C045: exact-gap pin between the standalone and daemon tool
     /// surfaces. With C091 enabling `expand_cache_status`, T3 Cluster G
     /// adding `context_propagation`, and P5U10 adding `rules_run` at
-    /// runtime, the standalone inventory is **38 tools** and the daemon
-    /// subset is **16 tools** (per `DAEMON_SUPPORTED_TOOL_NAMES`), giving
+    /// runtime, the standalone inventory is **39 tools** and the daemon
+    /// subset is **17 tools** (per `DAEMON_SUPPORTED_TOOL_NAMES`), giving
     /// a strict gap of **22 standalone-only tools**. `rules_run` is
     /// deliberately NOT added to the daemon subset in this iter: daemon
     /// dispatch wiring requires a lockstep update to sqry-daemon's
@@ -136,7 +138,7 @@ mod tests {
 
     /// Every `DAEMON_SUPPORTED_TOOL_NAMES` entry must appear in the
     /// standalone `SqryServer::get_filtered_tools()` inventory: the
-    /// daemon subset is a STRICT subset of the standalone 38-tool
+    /// daemon subset is a STRICT subset of the standalone 39-tool
     /// surface. Also verifies the standalone inventory is strictly
     /// larger by exactly [`EXPECTED_STANDALONE_ONLY_COUNT`] (= 22)
     /// tools; the strict gap is pinned to guard against silent
