@@ -1689,13 +1689,13 @@ jobs:
 
           validate_repo_push_access() {
             local token="$1"
-            GH_TOKEN="$token" gh api repos/verivus-oss/sqry --jq '.full_name' | grep -q '^verivus-oss/sqry$' || return 1
-            GH_TOKEN="$token" gh api repos/verivus-oss/sqry --jq '.permissions.push' | grep -q '^true$' || return 1
+            GH_TOKEN="$token" GITHUB_TOKEN='' gh api repos/verivus-oss/sqry --jq '.full_name' | grep -q '^verivus-oss/sqry$' || return 1
+            GH_TOKEN="$token" GITHUB_TOKEN='' gh api repos/verivus-oss/sqry --jq '.permissions.push' | grep -q '^true$' || return 1
           }
 
           validate_public_workflow_active() {
             local token="$1"
-            GH_TOKEN="$token" gh api repos/verivus-oss/sqry/actions/workflows/release-distribute.yml --jq '.state' | grep -q '^active$' || return 1
+            GH_TOKEN="$token" GITHUB_TOKEN='' gh api repos/verivus-oss/sqry/actions/workflows/release-distribute.yml --jq '.state' | grep -q '^active$' || return 1
           }
 
           validate_mirror_app_token() {
@@ -1708,13 +1708,17 @@ jobs:
             local token login
             token="${PUBLIC_RELEASE_OPERATOR_TOKEN:-}"
             if [[ -z "$token" ]]; then
-              token="$(gh auth token -u verivusOSS-releases || true)"
+              token="$(
+                env -u GH_TOKEN -u GITHUB_TOKEN \
+                  GH_CONFIG_DIR="${SQRY_RELEASE_GH_CONFIG_DIR_VERIVUSOSS_RELEASES:-$HOME/.config/gh-verivusOSS-releases}" \
+                  gh auth token -u verivusOSS-releases || true
+              )"
             fi
             if [[ -z "$token" ]]; then
               echo "FATAL: no public release credential available for verivusOSS-releases; set PUBLIC_RELEASE_OPERATOR_TOKEN or configure gh auth for verivusOSS-releases" >&2
               exit 1
             fi
-            login="$(GH_TOKEN="$token" gh api user --jq '.login')"
+            login="$(GH_TOKEN="$token" GITHUB_TOKEN='' gh api user --jq '.login')"
             if [[ "$login" != "verivusOSS-releases" ]]; then
               echo "FATAL: fallback token resolved to '$login', expected 'verivusOSS-releases'" >&2
               exit 1
