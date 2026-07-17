@@ -123,7 +123,7 @@ public = [
     ".github/workflows/publish-homebrew-tap.yml",
     # P0 #1 of docs/reviews/test-strategy-audit-2026-04-30/CATALOGUE.md.
     # cargo-mutants gate (PR changed-lines + master baseline rotation).
-    # Strategy ref: /srv/repos/Verivus_Test_Strategy.md §2.4, §7.1 #7.
+    # Strategy ref: docs/reviews/test-strategy-audit-2026-04-30/CATALOGUE.md §2.4, §7.1 #7.
     ".github/workflows/mutation-gate.yml",
     # U_WS1_13_FUZZ: nightly cargo-fuzz target on sqry-db planner::parse.
     # Nightly-only (schedule + workflow_dispatch); not triggered on PRs.

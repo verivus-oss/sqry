@@ -2,7 +2,7 @@
 #
 # Wired to `.github/workflows/mutation-gate.yml` (PR-time changed-lines
 # gate + master baseline rotation). Strategy reference:
-# /srv/repos/Verivus_Test_Strategy.md §2.4, §7.1 #7, §7.4 #4.
+# docs/reviews/test-strategy-audit-2026-04-30/CATALOGUE.md §2.4, §7.1 #7, §7.4 #4.
 #
 # Phase A (warm-up, current): jobs run with `continue-on-error: true`
 # and publish survivor counts as artifacts. The thresholds in §7.1 #7

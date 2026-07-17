@@ -3,7 +3,7 @@
 GITHUB_STEP_SUMMARY.
 
 Wired by `.github/workflows/mutation-gate.yml`. Strategy reference:
-/srv/repos/Verivus_Test_Strategy.md §2.4, §7.1 #7, §7.4 #4.
+docs/reviews/test-strategy-audit-2026-04-30/CATALOGUE.md §2.4, §7.1 #7, §7.4 #4.
 
 Output is two sections:
 
