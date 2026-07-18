@@ -1068,7 +1068,7 @@ pub enum Command {
         #[arg(long, short = 's', help_heading = headings::INDEX_CONFIGURATION, display_order = 20)]
         status: bool,
 
-        /// Automatically add .sqry-index/ to .gitignore if not already present.
+        /// Automatically add .sqry/ to .gitignore if not already present.
         #[arg(long, help_heading = headings::INDEX_CONFIGURATION, display_order = 30)]
         add_to_gitignore: bool,
 

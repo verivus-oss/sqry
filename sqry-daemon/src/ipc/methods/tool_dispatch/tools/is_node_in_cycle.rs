@@ -12,7 +12,7 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
     let args = params_to_is_node_in_cycle_args(params).map_err(rpc_error_to_method_error)?;
     let path = args.path.clone();
     classify_and_build(ctx, "is_node_in_cycle", &path, move |wctx, _cancel| {
-        execute_is_node_in_cycle_for_daemon(wctx, &args)
+        execute_is_node_in_cycle_for_daemon(wctx, &args, std::time::Instant::now())
     })
     .await
 }

@@ -19,6 +19,21 @@ fn test_search_help_mentions_query() {
 }
 
 #[test]
+fn test_index_help_add_to_gitignore_names_current_path() {
+    // #614: `--add-to-gitignore` help must name the current `.sqry/` artifact
+    // directory, not the legacy `.sqry-index/` path.
+    let path = sqry_bin();
+    Command::new(path)
+        .arg("index")
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains(".sqry/").and(predicate::str::contains(".sqry-index").not()),
+        );
+}
+
+#[test]
 fn test_query_help_mentions_search() {
     // Cluster-F (IMP-F §3.2) rewrote the cross-reference: `sqry query`
     // help now points users at `sqry search` for the regex / literal

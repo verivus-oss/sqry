@@ -118,13 +118,16 @@ impl std::fmt::Debug for WorkspaceContext {
 // the same inner body, so behaviour (and therefore test surface) is
 // identical.
 //
-// Timing: each wrapper samples `Instant::now()` itself before calling the
-// inner fn, EXCEPT `relation_query`, whose inner body preserves its legacy
-// anchor taken immediately before the snapshot acquisition (see
-// `relations_inner::execute_relation_query`). The rmcp path also samples
-// the instant immediately before the inner call (see `execute_semantic_search`
-// etc. in the per-tool modules), so the two transports measure the same
-// execution window.
+// Timing: each wrapper takes a caller-supplied `start: Instant` and threads it
+// into the inner fn, so the standalone path can anchor timing before its graph
+// acquisition (preserving the legacy pre-resolution anchor) while the daemon
+// dispatcher samples `Instant::now()` inside its `classify_and_build` execution
+// closure, right before the wrapper call (after the resident context is
+// selected), matching the pre-collapse daemon timing. Two exceptions keep their
+// own anchor: `relation_query` (its inner body samples the instant immediately
+// before the snapshot acquisition) and `semantic_search` (it samples after
+// canonicalizing its `search_root`). Both transports therefore measure the same
+// window.
 // ---------------------------------------------------------------------
 
 /// Daemon-path wrapper for `semantic_search`.
@@ -171,8 +174,8 @@ pub fn execute_relation_query_for_daemon(
 pub fn execute_structural_similar_for_daemon(
     ctx: &WorkspaceContext,
     args: &StructuralSimilarArgs,
+    start: Instant,
 ) -> Result<ToolExecution<StructuralSimilarData>> {
-    let start = Instant::now();
     search_inner::execute_structural_similar(ctx, args, start)
 }
 
@@ -184,8 +187,8 @@ pub fn execute_structural_similar_for_daemon(
 pub fn execute_direct_callers_for_daemon(
     ctx: &WorkspaceContext,
     args: &DirectCallersArgs,
+    start: Instant,
 ) -> Result<ToolExecution<DirectCallersData>> {
-    let start = Instant::now();
     analysis_inner::execute_direct_callers(ctx, args, start)
 }
 
@@ -197,8 +200,8 @@ pub fn execute_direct_callers_for_daemon(
 pub fn execute_direct_callees_for_daemon(
     ctx: &WorkspaceContext,
     args: &DirectCalleesArgs,
+    start: Instant,
 ) -> Result<ToolExecution<DirectCalleesData>> {
-    let start = Instant::now();
     analysis_inner::execute_direct_callees(ctx, args, start)
 }
 
@@ -210,8 +213,8 @@ pub fn execute_direct_callees_for_daemon(
 pub fn execute_find_unused_for_daemon(
     ctx: &WorkspaceContext,
     args: &FindUnusedArgs,
+    start: Instant,
 ) -> Result<ToolExecution<FindUnusedData>> {
-    let start = Instant::now();
     analysis_inner::execute_find_unused(ctx, args, start)
 }
 
@@ -220,12 +223,17 @@ pub fn execute_find_unused_for_daemon(
 /// # Errors
 ///
 /// Returns an error if cycle analysis cannot be executed for `args`.
+///
+/// `start` is supplied by the caller so the standalone path can anchor timing
+/// before graph acquisition (preserving its legacy pre-resolution `Instant`),
+/// while the daemon dispatcher samples it inside its `classify_and_build`
+/// closure before this call (after the resident context is selected).
 #[must_use]
 pub fn execute_find_cycles_for_daemon(
     ctx: &WorkspaceContext,
     args: &FindCyclesArgs,
+    start: Instant,
 ) -> ToolExecution<FindCyclesData> {
-    let start = Instant::now();
     analysis_inner::execute_find_cycles(ctx, args, start)
 }
 
@@ -237,8 +245,8 @@ pub fn execute_find_cycles_for_daemon(
 pub fn execute_is_node_in_cycle_for_daemon(
     ctx: &WorkspaceContext,
     args: &IsNodeInCycleArgs,
+    start: Instant,
 ) -> Result<ToolExecution<NodeInCycleData>> {
-    let start = Instant::now();
     analysis_inner::execute_is_node_in_cycle(ctx, args, start)
 }
 
@@ -250,8 +258,8 @@ pub fn execute_is_node_in_cycle_for_daemon(
 pub fn execute_trace_path_for_daemon(
     ctx: &WorkspaceContext,
     args: &TracePathArgs,
+    start: Instant,
 ) -> Result<ToolExecution<TracePathData>> {
-    let start = Instant::now();
     trace_inner::execute_trace_path(ctx, args, start)
 }
 
@@ -263,8 +271,8 @@ pub fn execute_trace_path_for_daemon(
 pub fn execute_subgraph_for_daemon(
     ctx: &WorkspaceContext,
     args: &SubgraphArgs,
+    start: Instant,
 ) -> Result<ToolExecution<DependencyGraphData>> {
-    let start = Instant::now();
     graph_inner::execute_subgraph(ctx, args, start)
 }
 
@@ -276,8 +284,8 @@ pub fn execute_subgraph_for_daemon(
 pub fn execute_export_graph_for_daemon(
     ctx: &WorkspaceContext,
     args: &ExportGraphArgs,
+    start: Instant,
 ) -> Result<ToolExecution<DependencyGraphData>> {
-    let start = Instant::now();
     graph_inner::execute_export_graph(ctx, args, start)
 }
 
@@ -289,8 +297,8 @@ pub fn execute_export_graph_for_daemon(
 pub fn execute_generate_overview_for_daemon(
     ctx: &WorkspaceContext,
     args: &GenerateOverviewArgs,
+    start: Instant,
 ) -> Result<ToolExecution<GenerateOverviewData>> {
-    let start = Instant::now();
     overview_inner::execute_generate_overview(ctx, args, start)
 }
 
@@ -303,8 +311,8 @@ pub fn execute_generate_overview_for_daemon(
 pub fn execute_complexity_metrics_for_daemon(
     ctx: &WorkspaceContext,
     args: &ComplexityMetricsArgs,
+    start: Instant,
 ) -> Result<ToolExecution<ComplexityMetricsData>> {
-    let start = Instant::now();
     introspection_inner::execute_complexity_metrics(ctx, args, start)
 }
 
@@ -320,8 +328,8 @@ pub fn execute_complexity_metrics_for_daemon(
 pub fn execute_semantic_diff_for_daemon(
     ctx: &WorkspaceContext,
     args: &SemanticDiffArgs,
+    start: Instant,
 ) -> Result<ToolExecution<SemanticDiffData>> {
-    let start = Instant::now();
     analysis_inner::execute_semantic_diff(ctx, args, start)
 }
 
@@ -333,8 +341,8 @@ pub fn execute_semantic_diff_for_daemon(
 pub fn execute_dependency_impact_for_daemon(
     ctx: &WorkspaceContext,
     args: &DependencyImpactArgs,
+    start: Instant,
 ) -> Result<ToolExecution<DependencyImpactData>> {
-    let start = Instant::now();
     analysis_inner::execute_dependency_impact(ctx, args, start)
 }
 
@@ -351,8 +359,8 @@ pub fn execute_dependency_impact_for_daemon(
 pub fn execute_show_dependencies_for_daemon(
     ctx: &WorkspaceContext,
     args: &ShowDependenciesArgs,
+    start: Instant,
 ) -> Result<ToolExecution<DependencyGraphData>> {
-    let start = Instant::now();
     graph_inner::execute_get_dependencies(ctx, args, start)
 }
 

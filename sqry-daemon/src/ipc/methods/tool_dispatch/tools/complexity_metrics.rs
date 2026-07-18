@@ -12,7 +12,7 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
     let args = params_to_complexity_metrics_args(params).map_err(rpc_error_to_method_error)?;
     let path = args.path.clone();
     classify_and_build(ctx, "complexity_metrics", &path, move |wctx, _cancel| {
-        execute_complexity_metrics_for_daemon(wctx, &args)
+        execute_complexity_metrics_for_daemon(wctx, &args, std::time::Instant::now())
     })
     .await
 }

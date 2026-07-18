@@ -113,84 +113,89 @@ pub fn dispatch_by_name(
         "structural_similar" => {
             let args = params_to_structural_similar_args(args_value.clone())
                 .map_err(anyhow::Error::from)?;
-            let exec = execute_structural_similar_for_daemon(wctx, &args)?;
+            let exec =
+                execute_structural_similar_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "direct_callers" => {
             let args =
                 params_to_direct_callers_args(args_value.clone()).map_err(anyhow::Error::from)?;
-            let exec = execute_direct_callers_for_daemon(wctx, &args)?;
+            let exec = execute_direct_callers_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "direct_callees" => {
             let args =
                 params_to_direct_callees_args(args_value.clone()).map_err(anyhow::Error::from)?;
-            let exec = execute_direct_callees_for_daemon(wctx, &args)?;
+            let exec = execute_direct_callees_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "find_unused" => {
             let args =
                 params_to_find_unused_args(args_value.clone()).map_err(anyhow::Error::from)?;
-            let exec = execute_find_unused_for_daemon(wctx, &args)?;
+            let exec = execute_find_unused_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "find_cycles" => {
             let args =
                 params_to_find_cycles_args(args_value.clone()).map_err(anyhow::Error::from)?;
-            let exec = execute_find_cycles_for_daemon(wctx, &args);
+            let exec = execute_find_cycles_for_daemon(wctx, &args, std::time::Instant::now());
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "is_node_in_cycle" => {
             let args =
                 params_to_is_node_in_cycle_args(args_value.clone()).map_err(anyhow::Error::from)?;
-            let exec = execute_is_node_in_cycle_for_daemon(wctx, &args)?;
+            let exec = execute_is_node_in_cycle_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "trace_path" => {
             let args =
                 params_to_trace_path_args(args_value.clone()).map_err(anyhow::Error::from)?;
-            let exec = execute_trace_path_for_daemon(wctx, &args)?;
+            let exec = execute_trace_path_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "subgraph" => {
             let args = params_to_subgraph_args(args_value.clone()).map_err(anyhow::Error::from)?;
-            let exec = execute_subgraph_for_daemon(wctx, &args)?;
+            let exec = execute_subgraph_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "export_graph" => {
             let args =
                 params_to_export_graph_args(args_value.clone()).map_err(anyhow::Error::from)?;
-            let exec = execute_export_graph_for_daemon(wctx, &args)?;
+            let exec = execute_export_graph_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "complexity_metrics" => {
             let args = params_to_complexity_metrics_args(args_value.clone())
                 .map_err(anyhow::Error::from)?;
-            let exec = execute_complexity_metrics_for_daemon(wctx, &args)?;
+            let exec =
+                execute_complexity_metrics_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "generate_overview" => {
             let args = params_to_generate_overview_args(args_value.clone())
                 .map_err(anyhow::Error::from)?;
-            let exec = execute_generate_overview_for_daemon(wctx, &args)?;
+            let exec =
+                execute_generate_overview_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "semantic_diff" => {
             let args =
                 params_to_semantic_diff_args(args_value.clone()).map_err(anyhow::Error::from)?;
-            let exec = execute_semantic_diff_for_daemon(wctx, &args)?;
+            let exec = execute_semantic_diff_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "dependency_impact" => {
             let args = params_to_dependency_impact_args(args_value.clone())
                 .map_err(anyhow::Error::from)?;
-            let exec = execute_dependency_impact_for_daemon(wctx, &args)?;
+            let exec =
+                execute_dependency_impact_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         "show_dependencies" => {
             let args = params_to_show_dependencies_args(args_value.clone())
                 .map_err(anyhow::Error::from)?;
-            let exec = execute_show_dependencies_for_daemon(wctx, &args)?;
+            let exec =
+                execute_show_dependencies_for_daemon(wctx, &args, std::time::Instant::now())?;
             tool_response_json(exec).map_err(|e| anyhow!("response build: {e:?}"))
         }
         // `rebuild_index` is in DAEMON_SUPPORTED_TOOL_NAMES but is NOT

@@ -11,7 +11,6 @@
 //! - Cross-language detection via `FileRegistry.language_for_file()`
 
 use std::collections::{HashSet, VecDeque};
-use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
@@ -20,7 +19,7 @@ use sqry_core::graph::unified::edge::EdgeKind;
 use sqry_core::graph::unified::materialize::find_nodes_by_name;
 use sqry_core::graph::unified::node::NodeId;
 
-use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace, get_graph_identity};
+use crate::engine::get_graph_identity;
 use crate::tools::TracePathArgs;
 
 use crate::execution::graph_builders::build_graph_metadata;
@@ -31,18 +30,6 @@ use crate::execution::types::{
     TracePathData,
 };
 use crate::execution::utils::duration_to_ms;
-
-/// Execute the `trace_path` tool to find call paths between symbols.
-/// Resolve workspace path from args.path parameter.
-///
-/// If path is "." (default), returns None to trigger discovery.
-/// Otherwise returns Some(path) for explicit workspace resolution.
-fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
-    // Issue #394: resolve a subdirectory `path` to its owning workspace instead
-    // of failing as if it were a workspace root. Subtree scoping for list/scan
-    // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
-}
 
 /// Execute the `trace_path` MCP tool (`direction` NodeId-anchored).
 ///
@@ -94,23 +81,11 @@ fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
 /// Returns an error if workspace resolution, graph acquisition, endpoint
 /// resolution, or path tracing fails.
 pub fn execute_trace_path(args: &TracePathArgs) -> Result<ToolExecution<TracePathData>> {
-    // Pre-refactor timing started here — before engine resolution. Preserve
-    // by capturing `start` in the wrapper and threading it into `inner::`.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _base = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
-    // Require unified graph for path tracing
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_trace_path(&ctx, args, start)
+    let (ctx, _base) = crate::engine::acquire_workspace_context(&args.path)?;
+    crate::daemon_adapter::execute_trace_path_for_daemon(&ctx, args, start)
 }
 
 pub(crate) mod inner {

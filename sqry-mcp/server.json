@@ -1,14 +1,222 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.verivus-oss/sqry",
-  "description": "AST-based semantic code search — understands code structure and relationships across 35 languages.",
-  "title": "sqry — Semantic Code Search",
-  "version": "13.0.14",
-  "websiteUrl": "https://github.com/verivus-oss/sqry",
+  "title": "sqry - Semantic Code Search",
+  "description": "AST-based semantic code search: 39 tools across 37 languages, with call tracing, dependency-impact, and cross-language edge analysis. Runs fully local (stdio).",
   "repository": {
     "url": "https://github.com/verivus-oss/sqry",
     "source": "github",
-    "id": "1083528058",
     "subfolder": "sqry-mcp"
-  }
+  },
+  "version": "29.0.5",
+  "websiteUrl": "https://github.com/verivus-oss/sqry",
+  "packages": [
+    {
+      "registryType": "cargo",
+      "registryBaseUrl": "https://crates.io",
+      "identifier": "sqry-mcp",
+      "version": "28.0.0",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--no-daemon",
+          "description": "Run the MCP server standalone, skipping the optional sqryd daemon probe"
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "SQRY_MCP_WORKSPACE_ROOT",
+          "description": "Absolute path to the repository sqry should index and search",
+          "isRequired": false,
+          "format": "filepath"
+        }
+      ]
+    },
+    {
+      "registryType": "oci",
+      "registryBaseUrl": "https://ghcr.io",
+      "identifier": "ghcr.io/verivus-oss/sqry-mcp:v29.0.5",
+      "version": "v29.0.5",
+      "runtimeArguments": [
+        {
+          "type": "named",
+          "name": "--mount",
+          "description": "Bind mount the host workspace into the container",
+          "value": "type=bind,src={source_path},dst=/workspace",
+          "isRequired": true,
+          "variables": {
+            "source_path": {
+              "description": "Workspace path on the host",
+              "format": "filepath",
+              "isRequired": true
+            }
+          }
+        }
+      ],
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ],
+  "tools": [
+    {
+      "name": "call_hierarchy",
+      "description": "Get call hierarchy as a tree (incoming or outgoing)"
+    },
+    {
+      "name": "complexity_metrics",
+      "description": "Estimate function complexity from call graph and line count"
+    },
+    {
+      "name": "context_propagation",
+      "description": "Detect Go call-sites that leak context.Context propagation: callers with ctx + ctx-accepting callees where ctx is not threaded. Modes: break_site (sync), unthreaded_goroutine (go f), http_handler_leak (http.HandlerFunc shape)."
+    },
+    {
+      "name": "cross_language_edges",
+      "description": "List cross-language call edges where caller/callee languages differ"
+    },
+    {
+      "name": "dependency_impact",
+      "description": "Analyze what would break if a symbol is changed or removed (reverse dependency analysis)"
+    },
+    {
+      "name": "direct_callees",
+      "description": "Find immediate callees of a symbol (depth=1)"
+    },
+    {
+      "name": "direct_callers",
+      "description": "Find immediate callers of a symbol (depth=1)"
+    },
+    {
+      "name": "expand_cache_status",
+      "description": "Get the status of the macro expansion cache (.sqry/expand-cache/)"
+    },
+    {
+      "name": "explain_code",
+      "description": "Explain a symbol with optional context and relations"
+    },
+    {
+      "name": "export_graph",
+      "description": "Export a dependency subgraph as JSON, DOT, D2, or Mermaid"
+    },
+    {
+      "name": "find_cycles",
+      "description": "Find circular dependencies in calls, imports, or modules"
+    },
+    {
+      "name": "find_duplicates",
+      "description": "Find duplicate functions, signatures, or structs"
+    },
+    {
+      "name": "find_unused",
+      "description": "Find unreachable or unused symbols"
+    },
+    {
+      "name": "generate_overview",
+      "description": "One-call repository orientation map: summary + health, load-bearing hubs, path/package subsystems, complexity hotspots, potential issues, and ready-to-run sqry queries"
+    },
+    {
+      "name": "get_definition",
+      "description": "Find where a symbol is defined"
+    },
+    {
+      "name": "get_document_symbols",
+      "description": "Get all symbols (functions, classes, etc.) defined in a specific file."
+    },
+    {
+      "name": "get_graph_stats",
+      "description": "Get node, edge, file counts and language breakdown"
+    },
+    {
+      "name": "get_hover_info",
+      "description": "Get symbol signature, documentation, and type info"
+    },
+    {
+      "name": "get_index_status",
+      "description": "Get the current status and metadata of the symbol index"
+    },
+    {
+      "name": "get_insights",
+      "description": "Get codebase health metrics including cycle and quality indicators"
+    },
+    {
+      "name": "get_references",
+      "description": "Find all references to a symbol"
+    },
+    {
+      "name": "get_workspace_symbols",
+      "description": "Search symbols by name across the workspace"
+    },
+    {
+      "name": "hierarchical_search",
+      "description": "Search symbols with results grouped by file and container for RAG"
+    },
+    {
+      "name": "is_node_in_cycle",
+      "description": "Check if a specific symbol participates in a cycle"
+    },
+    {
+      "name": "list_files",
+      "description": "List indexed files, optionally filtered by language"
+    },
+    {
+      "name": "list_symbols",
+      "description": "List indexed symbols, filterable by kind and language"
+    },
+    {
+      "name": "pattern_search",
+      "description": "Find symbols by substring match on name"
+    },
+    {
+      "name": "rebuild_index",
+      "description": "Rebuild the code graph index from source files"
+    },
+    {
+      "name": "relation_query",
+      "description": "Query callers, callees, imports, exports, or returns for a symbol"
+    },
+    {
+      "name": "rules_run",
+      "description": "Run a declarative rule-layer rule or pack against the workspace graph: resolves a shipped Rust DSL rule/pack by stable id (e.g. bbnty.recipes, bbnty.intake, bbnty.all) or a TOML rule pack by workspace path, runs the production rule engine, and returns each rule's structured output plus witness. Rules needing cross-snapshot or similarity routes are reported as unsupported until the coordinator surface lands."
+    },
+    {
+      "name": "search_similar",
+      "description": "Find symbols similar to a reference symbol using fuzzy matching"
+    },
+    {
+      "name": "semantic_diff",
+      "description": "Compare symbol-level changes between git refs"
+    },
+    {
+      "name": "semantic_search",
+      "description": "Search symbols by name, kind, visibility, and language. Phase A C indirect-call precision (U18.1) adds three C-scoped predicates: `address_taken:true|false`, `resolved_via:direct|type_match|binding_plane`, and `callsite_promiscuous:true|false`. These are populated by the C plugin only; on non-C nodes they evaluate to false. For incremental cache behaviour and structural-IR query authoring, prefer `sqry_query`."
+    },
+    {
+      "name": "show_dependencies",
+      "description": "Show dependency tree for a file or symbol"
+    },
+    {
+      "name": "sqry_query",
+      "description": "Execute a structural query via the sqry-db planner: parses a predicate-chain text syntax (kind:function has:caller ...), runs it against the unified graph, and returns matching nodes with file+line metadata"
+    },
+    {
+      "name": "structural_similar",
+      "description": "Find functions structurally similar to a reference function via the identifier-blind body-shape descriptor (control-flow shape + MinHash); reports exact shape_hash identity plus approximate Jaccard. Distinct from name-based search_similar."
+    },
+    {
+      "name": "subgraph",
+      "description": "Extract a focused subgraph around seed symbols for RAG retrieval"
+    },
+    {
+      "name": "trace_path",
+      "description": "Find ranked call paths between two symbols with cross-language support"
+    },
+    {
+      "name": "workspace_status",
+      "description": "Return the aggregate WorkspaceIndexStatus for the active logical workspace, with workspace identity and structure projection"
+    }
+  ]
 }

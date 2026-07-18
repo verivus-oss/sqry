@@ -203,7 +203,7 @@ fn daemon_hosted_generate_overview_returns_same_sections() -> Result<()> {
 
     let args = params_to_generate_overview_args(json!({ "path": ws.to_string_lossy() }))
         .map_err(|e| anyhow::anyhow!("args conversion failed: {e:?}"))?;
-    let exec = execute_generate_overview_for_daemon(&ctx, &args)?;
+    let exec = execute_generate_overview_for_daemon(&ctx, &args, std::time::Instant::now())?;
     let payload =
         tool_response_json(exec).map_err(|e| anyhow::anyhow!("response build failed: {e:?}"))?;
 

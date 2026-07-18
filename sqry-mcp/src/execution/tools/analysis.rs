@@ -724,13 +724,10 @@ fn collect_impacted_callers_bfs(
 pub fn execute_dependency_impact(
     args: &DependencyImpactArgs,
 ) -> Result<ToolExecution<DependencyImpactData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
+    let (ctx, _search_root) = crate::engine::acquire_workspace_context(&args.path)?;
     tracing::debug!(
         symbol = %args.symbol,
         max_depth = args.max_depth,
@@ -738,16 +735,7 @@ pub fn execute_dependency_impact(
         include_indirect = args.include_indirect,
         "Executing dependency_impact tool"
     );
-
-    // Require the unified graph
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_dependency_impact(&ctx, args, start)
+    crate::daemon_adapter::execute_dependency_impact_for_daemon(&ctx, args, start)
 }
 
 /// Execute the `semantic_diff` tool to compare code between git refs.
@@ -775,25 +763,17 @@ pub fn execute_dependency_impact(
 /// Returns an error if git worktree materialization, graph building, diff
 /// execution, or result pagination fails.
 pub fn execute_semantic_diff(args: &SemanticDiffArgs) -> Result<ToolExecution<SemanticDiffData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-
     // NOTE: `semantic_diff` builds its own per-worktree graphs in the inner
-    // body and does not consume `ctx.graph` or `ctx.executor`. We still call
-    // `ensure_graph` here so every public `execute_*` emits the same
-    // `WorkspaceContext` shape required by the daemon path (Task 4).
-    // `ctx.graph` therefore reflects the workspace's CURRENT index, not either
-    // of the git refs being diffed.
-    let graph = engine.ensure_graph()?;
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_semantic_diff(&ctx, args, start)
+    // body and does not consume `ctx.graph`/`ctx.executor`; the unenforced
+    // acquire still materializes the workspace's CURRENT index so every public
+    // `execute_*` emits the same `WorkspaceContext` shape the daemon path
+    // requires. Historically this path skips workspace-boundary enforcement,
+    // preserved by `acquire_workspace_context_unenforced`.
+    let ctx = crate::engine::acquire_workspace_context_unenforced(&args.path)?;
+    crate::daemon_adapter::execute_semantic_diff_for_daemon(&ctx, args, start)
 }
 
 /// Convert sqry-db [`sqry_db::EdgeDelta`] records into the MCP wire-format
@@ -1264,22 +1244,13 @@ fn convert_cycles_to_output(
 /// Returns an error if workspace resolution, graph acquisition, or cycle-query
 /// execution fails.
 pub fn execute_find_cycles(args: &FindCyclesArgs) -> Result<ToolExecution<FindCyclesData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
-    // Require the unified graph
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    Ok(inner::execute_find_cycles(&ctx, args, start))
+    let (ctx, _search_root) = crate::engine::acquire_workspace_context(&args.path)?;
+    Ok(crate::daemon_adapter::execute_find_cycles_for_daemon(
+        &ctx, args, start,
+    ))
 }
 
 // ============================================================================
@@ -1375,22 +1346,11 @@ fn mcp_scope_to_core_superset(scope: UnusedScope) -> sqry_core::query::UnusedSco
 /// Returns an error if workspace resolution, graph acquisition, or unused-symbol
 /// query execution fails.
 pub fn execute_find_unused(args: &FindUnusedArgs) -> Result<ToolExecution<FindUnusedData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
-    // Require the unified graph
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_find_unused(&ctx, args, start)
+    let (ctx, _search_root) = crate::engine::acquire_workspace_context(&args.path)?;
+    crate::daemon_adapter::execute_find_unused_for_daemon(&ctx, args, start)
 }
 
 // ============================================================================
@@ -1479,22 +1439,11 @@ use crate::tools::{DirectCalleesArgs, DirectCallersArgs, IsNodeInCycleArgs, Patt
 pub fn execute_is_node_in_cycle(
     args: &IsNodeInCycleArgs,
 ) -> Result<ToolExecution<NodeInCycleData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
-    // Require the unified graph
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_is_node_in_cycle(&ctx, args, start)
+    let (ctx, _search_root) = crate::engine::acquire_workspace_context(&args.path)?;
+    crate::daemon_adapter::execute_is_node_in_cycle_for_daemon(&ctx, args, start)
 }
 
 /// Execute the `pattern_search` tool to find symbols by pattern.
@@ -1705,22 +1654,11 @@ fn decorate_single_symbol_lookup_error(
 pub fn execute_direct_callers(
     args: &DirectCallersArgs,
 ) -> Result<ToolExecution<DirectCallersData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
-    // Require the unified graph
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_direct_callers(&ctx, args, start)
+    let (ctx, _search_root) = crate::engine::acquire_workspace_context(&args.path)?;
+    crate::daemon_adapter::execute_direct_callers_for_daemon(&ctx, args, start)
 }
 
 /// Execute the `direct_callees` tool to find direct callees of a symbol.
@@ -1737,22 +1675,11 @@ pub fn execute_direct_callers(
 pub fn execute_direct_callees(
     args: &DirectCalleesArgs,
 ) -> Result<ToolExecution<DirectCalleesData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
-    // Require the unified graph
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_direct_callees(&ctx, args, start)
+    let (ctx, _search_root) = crate::engine::acquire_workspace_context(&args.path)?;
+    crate::daemon_adapter::execute_direct_callees_for_daemon(&ctx, args, start)
 }
 
 /// Build `CallerCalleeData` rows for a sqry-db result set, looking up

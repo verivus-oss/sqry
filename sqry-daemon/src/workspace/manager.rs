@@ -929,6 +929,29 @@ impl WorkspaceManager {
             }
         };
 
+        // --- Step 5b: compact edges (delta -> CSR) before publish ---
+        //
+        // `build_unified_graph` (via the builder) leaves every edge in the
+        // delta buffer; compaction lives only in the persist transaction, which
+        // this cold-load path does not run. Without compacting, `edges_from` /
+        // `edges_to` rescan the whole delta on every call, so per-node graph
+        // traversals (find_cycles, is_node_in_cycle, complexity_metrics,
+        // generate_overview) are O(N x |delta|) on the resident graph and time
+        // out. Compacting here makes `edges_from` O(1). The CPU-heavy CSR build
+        // runs before we take `workspaces.read()`, so no manager lock is held.
+        // Fail closed on error, mirroring the build-failure arm above.
+        if let Err(err) = sqry_core::graph::unified::compaction::compact_edges_in_place(&graph) {
+            drop(reservation);
+            let compact_err = DaemonError::WorkspaceBuildFailed {
+                root: key.source_root.clone(),
+                reason: format!("edge compaction failed: {err}"),
+            };
+            ws.record_failure(clone_err(&compact_err));
+            loading.armed = false;
+            ws.store_state(WorkspaceState::Failed);
+            return Err(compact_err);
+        }
+
         // --- Step 6+7: atomic re-check + publish -------------
         //
         // Hold `workspaces.read()` across the final cancellation

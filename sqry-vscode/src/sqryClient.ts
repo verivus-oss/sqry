@@ -42,11 +42,13 @@ import {
   SqryWorkspaceStatusParams,
 } from "./lspProtocol";
 
+const INITIALIZATION_TIMEOUT_MS = 10_000;
+
 interface ActiveRequest {
-  /** Cancellation source — disposed when the request resolves. */
+  /** Cancellation source — disposed when the local request lifecycle settles. */
   readonly source: CancellationTokenSource;
-  /** Timeout watchdog — cleared when the request resolves. */
-  readonly timer: NodeJS.Timeout | null;
+  /** Settles the caller locally while cancelling the protocol request best effort. */
+  readonly abort: (reason: Error) => void;
 }
 
 /**
@@ -131,9 +133,17 @@ export class SqryClient implements vscode.Disposable {
   private languageClient: LanguageClient | null = null;
   private currentBinaryPath: string | null = null;
   private downloadedBinaryPath: string | null = null;
+  /** Once disposed, delayed request continuations must never restart or use the LSP. */
+  private isDisposed = false;
+  /** Active only while `initialize` owns configuration/client startup. */
+  private initializationSource: CancellationTokenSource | undefined;
+  /** Candidate-start owner, retained until the local client is assigned or stopped. */
+  private activeStartSource: CancellationTokenSource | undefined;
+  /** Serialize every stop/start transaction so local candidates cannot race. */
+  private restartTail: Promise<void> = Promise.resolve();
   /**
    * In-flight request set. Each request owns its own cancellation
-   * token + timer pair, so concurrent requests do NOT race on a
+   * token + local settlement pair, so concurrent requests do NOT race on a
    * shared `currentRequest` slot. `dispose()` cancels every member.
    *
    * STEP_5 acceptance criterion 6 — concurrent status requests must
@@ -147,7 +157,10 @@ export class SqryClient implements vscode.Disposable {
 
   public readonly onDidChangeConfig = this.onDidChangeConfigEmitter.event;
 
-  constructor(outputChannel: vscode.OutputChannel) {
+  constructor(
+    outputChannel: vscode.OutputChannel,
+    private readonly initializationTimeoutMs = INITIALIZATION_TIMEOUT_MS,
+  ) {
     this.outputChannel = outputChannel;
 
     const configListener = vscode.workspace.onDidChangeConfiguration(async (event) => {
@@ -191,11 +204,19 @@ export class SqryClient implements vscode.Disposable {
   public async initialize(): Promise<void> {
     this.outputChannel.appendLine("[sqry] Initializing language client...");
 
+    const initializationSource = new CancellationTokenSource();
+    this.initializationSource = initializationSource;
+    let initializationTimer: NodeJS.Timeout | undefined;
     try {
-      // Resolve configuration with explicit timeout
-      const configPromise = this.refreshConfig();
+      // Resolve configuration with an owned timeout token. A late resolver or
+      // LSP start must not outlive a failed activation and create a client
+      // after the caller has already seen the initialization timeout.
+      const configPromise = this.refreshConfig(initializationSource.token);
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Configuration timeout after 10s")), 10000)
+        initializationTimer = setTimeout(() => {
+          initializationSource.cancel();
+          reject(new Error("Configuration timeout after 10s"));
+        }, this.initializationTimeoutMs),
       );
 
       await Promise.race([configPromise, timeoutPromise]);
@@ -217,10 +238,24 @@ export class SqryClient implements vscode.Disposable {
       const message = error instanceof Error ? error.message : String(error);
       this.outputChannel.appendLine(`[sqry] Initialization failed: ${message}`);
       throw error;
+    } finally {
+      if (initializationTimer) {
+        clearTimeout(initializationTimer);
+      }
+      if (this.initializationSource === initializationSource) {
+        this.initializationSource = undefined;
+      }
+      initializationSource.dispose();
     }
   }
 
   public dispose(): void {
+    if (this.isDisposed) {
+      return;
+    }
+    this.isDisposed = true;
+    this.initializationSource?.cancel();
+    this.activeStartSource?.cancel();
     this.cancelAllRequests();
     void this.stopLanguageClient();
     this.disposables.forEach((disposable) => disposable.dispose());
@@ -235,8 +270,10 @@ export class SqryClient implements vscode.Disposable {
     this.initializationOptions = { ...options };
   }
 
-  public async refreshConfig(): Promise<void> {
+  public async refreshConfig(cancellationToken?: vscode.CancellationToken): Promise<void> {
+    this.throwIfRequestCannotProceed(cancellationToken);
     const newConfig = await resolveConfig(this.downloadedBinaryPath ?? undefined);
+    this.throwIfRequestCannotProceed(cancellationToken);
     const binaryChanged =
       this.config?.resolvedBinaryPath !== newConfig.resolvedBinaryPath;
     this.config = newConfig;
@@ -247,7 +284,7 @@ export class SqryClient implements vscode.Disposable {
     }
 
     if (!this.languageClient || binaryChanged) {
-      await this.restartLanguageClient(newConfig);
+      await this.restartLanguageClient(newConfig, cancellationToken);
     }
   }
 
@@ -702,19 +739,41 @@ export class SqryClient implements vscode.Disposable {
   }
 
   public async restart(): Promise<void> {
+    this.throwIfRequestCannotProceed();
     const config = await resolveConfig(this.downloadedBinaryPath ?? undefined);
+    this.throwIfRequestCannotProceed();
     this.config = config;
     await this.restartLanguageClient(config);
   }
 
-  private async restartLanguageClient(config: ResolvedSqryConfig): Promise<void> {
-    await this.stopLanguageClient();
-    await this.startLanguageClient(config);
+  private restartLanguageClient(
+    config: ResolvedSqryConfig,
+    cancellationToken?: vscode.CancellationToken,
+  ): Promise<void> {
+    const restart = async (): Promise<void> => {
+      this.throwIfRequestCannotProceed(cancellationToken);
+      await this.stopLanguageClient();
+      this.throwIfRequestCannotProceed(cancellationToken);
+      await this.startLanguageClient(config, cancellationToken);
+    };
+
+    // A configuration update, explicit restart, initialization, and a
+    // request-triggered recovery all converge here. Running the complete
+    // stop/start transaction through one tail means a previous local
+    // candidate is stopped before a later candidate can exist or assign.
+    const queuedRestart = this.restartTail.then(restart, restart);
+    this.restartTail = queuedRestart.catch(() => undefined);
+    return queuedRestart;
   }
 
   private async startLanguageClient(
     config: ResolvedSqryConfig,
+    cancellationToken?: vscode.CancellationToken,
   ): Promise<void> {
+    this.throwIfRequestCannotProceed(cancellationToken);
+    if (this.activeStartSource) {
+      throw new Error("sqry language client start overlap violated the restart queue invariant.");
+    }
     const serverOptions: ServerOptions = {
       run: {
         command: config.resolvedBinaryPath,
@@ -757,24 +816,63 @@ export class SqryClient implements vscode.Disposable {
       ...(initializationOptions ? { initializationOptions } : {}),
     };
 
+    let startTimer: NodeJS.Timeout | undefined;
+    const startCancellationDisposables: vscode.Disposable[] = [];
     const languageClient = new LanguageClient(
       "sqryLanguageServer",
       "Sqry Language Server",
       serverOptions,
       clientOptions,
     );
-
+    const startSource = new CancellationTokenSource();
+    this.activeStartSource = startSource;
     try {
-      // Add timeout to prevent indefinite hanging
+      // Keep the candidate local until its startup owner is still live. A
+      // request timeout, initialization timeout, or extension disposal must
+      // stop a delayed candidate immediately instead of letting it run until
+      // this independent 30s watchdog eventually fires.
       const startPromise = languageClient.start();
       const timeoutPromise = new Promise<never>((_, reject) =>
-        setTimeout(
+        startTimer = setTimeout(
           () => reject(new Error("Language server failed to start within 30 seconds")),
           30000
-        )
+        ),
       );
+      const pendingStarts: Array<Promise<void>> = [startPromise, timeoutPromise];
+      const addCancellationRace = (
+        token: vscode.CancellationToken,
+        message: string,
+      ): void => {
+        const cancellationPromise = new Promise<never>((_resolve, reject) => {
+          const rejectForCancellation = (): void => {
+            reject(new Error(message));
+          };
+          if (token.isCancellationRequested) {
+            rejectForCancellation();
+            return;
+          }
+          const cancellationDisposable = token.onCancellationRequested(rejectForCancellation);
+          startCancellationDisposables.push(cancellationDisposable);
+          if (token.isCancellationRequested) {
+            cancellationDisposable.dispose();
+            rejectForCancellation();
+          }
+        });
+        pendingStarts.push(cancellationPromise);
+      };
+      addCancellationRace(
+        startSource.token,
+        "sqry language client was cancelled because the extension is deactivating.",
+      );
+      if (cancellationToken) {
+        addCancellationRace(
+          cancellationToken,
+          "sqry request was cancelled while starting the language client.",
+        );
+      }
 
-      await Promise.race([startPromise, timeoutPromise]);
+      await Promise.race(pendingStarts);
+      this.throwIfRequestCannotProceed(cancellationToken);
     } catch (error) {
       this.outputChannel.appendLine(
         `[sqry] Failed to start language server: ${
@@ -788,6 +886,17 @@ export class SqryClient implements vscode.Disposable {
         // Ignore errors during cleanup
       }
       throw error;
+    } finally {
+      if (startTimer) {
+        clearTimeout(startTimer);
+      }
+      for (const cancellationDisposable of startCancellationDisposables) {
+        cancellationDisposable.dispose();
+      }
+      if (this.activeStartSource === startSource) {
+        this.activeStartSource = undefined;
+      }
+      startSource.dispose();
     }
 
     this.languageClient = languageClient;
@@ -831,15 +940,20 @@ export class SqryClient implements vscode.Disposable {
     this.currentBinaryPath = null;
   }
 
-  private async getLanguageClient(): Promise<LanguageClient> {
-    const cfg = await this.ensureConfig();
+  private async getLanguageClient(
+    cancellationToken?: vscode.CancellationToken,
+  ): Promise<LanguageClient> {
+    this.throwIfRequestCannotProceed(cancellationToken);
+    const cfg = await this.ensureConfig(cancellationToken);
+    this.throwIfRequestCannotProceed(cancellationToken);
     if (
       !this.languageClient ||
       this.currentBinaryPath !== cfg.resolvedBinaryPath
     ) {
-      await this.restartLanguageClient(cfg);
+      await this.restartLanguageClient(cfg, cancellationToken);
     }
 
+    this.throwIfRequestCannotProceed(cancellationToken);
     if (!this.languageClient) {
       throw new Error("sqry language client is not available.");
     }
@@ -851,36 +965,20 @@ export class SqryClient implements vscode.Disposable {
     params: unknown,
     cfg: ResolvedSqryConfig,
   ): Promise<T> {
-    const client = await this.getLanguageClient();
     this.outputChannel.appendLine(
       `[sqry] Request ${method} (${this.describeParams(params)})`,
     );
-    // STEP_5 acceptance criterion 6: each request owns its own
-    // cancellation source. Concurrent requests do not race here.
-    const source = new CancellationTokenSource();
-    const timer = setTimeout(() => {
-      source.cancel();
-    }, cfg.timeoutMs);
-    const request: ActiveRequest = { source, timer };
-    this.activeRequests.add(request);
-
-    try {
-      const result = await client.sendRequest<T>(method, params, source.token);
-      return result;
-    } catch (error) {
-      if (source.token.isCancellationRequested) {
-        throw new Error(
-          `sqry request timed out after ${cfg.timeoutMs}ms. Increase \`sqry.timeoutMs\` in settings.`,
-        );
-      }
-      throw error;
-    } finally {
-      if (timer) {
-        clearTimeout(timer);
-      }
-      source.dispose();
-      this.activeRequests.delete(request);
-    }
+    return this.withLocalDeadline(
+      cfg.timeoutMs,
+      () => new Error(
+        `sqry request timed out after ${cfg.timeoutMs}ms. Increase \`sqry.timeoutMs\` in settings.`,
+      ),
+      async (token) => {
+        const client = await this.getLanguageClient(token);
+        this.throwIfRequestCannotProceed(token);
+        return client.sendRequest<T>(method, params, token);
+      },
+    );
   }
 
   private async sendExecuteCommand(
@@ -889,43 +987,82 @@ export class SqryClient implements vscode.Disposable {
     cfg: ResolvedSqryConfig,
     timeoutMs?: number,
   ): Promise<void> {
-    const client = await this.getLanguageClient();
     const timeout = timeoutMs ?? cfg.timeoutMs;
     this.outputChannel.appendLine(
       `[sqry] Command ${command} (${args.map(String).join(" ")})`,
     );
+    const settingName = timeoutMs === cfg.indexTimeoutMs
+      ? "sqry.indexTimeoutMs"
+      : "sqry.timeoutMs";
+    await this.withLocalDeadline(
+      timeout,
+      () => new Error(
+        `sqry command timed out after ${timeout}ms. Increase \`${settingName}\` in settings.`,
+      ),
+      async (token) => {
+        const client = await this.getLanguageClient(token);
+        this.throwIfRequestCannotProceed(token);
+        await client.sendRequest(
+          ExecuteCommandRequest.type,
+          {
+            command,
+            arguments: args,
+          },
+          token,
+        );
+      },
+    );
+  }
+
+  /**
+   * Give an LSP request a locally enforced lifetime.
+   *
+   * JSON-RPC cancellation is advisory: a peer may retain the original
+   * request promise after receiving `$/cancelRequest`. The caller must still
+   * settle on timeout and during extension disposal, so the local promise
+   * races the transport work and owns its cleanup independently. The
+   * transport promise is deliberately observed after local settlement to
+   * avoid an unhandled late rejection from a stopped client.
+   */
+  private async withLocalDeadline<T>(
+    timeoutMs: number,
+    timeoutError: () => Error,
+    operation: (token: vscode.CancellationToken) => Promise<T>,
+  ): Promise<T> {
     const source = new CancellationTokenSource();
-    const timer = setTimeout(() => {
+    let rejectLocally: (reason: Error) => void = () => undefined;
+    let locallySettled = false;
+    const localSettlement = new Promise<never>((_resolve, reject) => {
+      rejectLocally = reject;
+    });
+    const abort = (reason: Error): void => {
+      if (locallySettled) {
+        return;
+      }
+      locallySettled = true;
+      // Reject before signalling cancellation so the stable, actionable local
+      // error wins even if the transport rejects synchronously in response.
+      rejectLocally(reason);
       source.cancel();
-    }, timeout);
-    const request: ActiveRequest = { source, timer };
+    };
+    const request: ActiveRequest = { source, abort };
+    const timer = setTimeout(() => {
+      abort(timeoutError());
+    }, timeoutMs);
     this.activeRequests.add(request);
 
     try {
-      await client.sendRequest(
-        ExecuteCommandRequest.type,
-        {
-          command,
-          arguments: args,
-        },
-        source.token,
-      );
-    } catch (error) {
-      if (source.token.isCancellationRequested) {
-        const settingName = timeoutMs === cfg.indexTimeoutMs
-          ? 'sqry.indexTimeoutMs'
-          : 'sqry.timeoutMs';
-        throw new Error(
-          `sqry command timed out after ${timeout}ms. Increase \`${settingName}\` in settings.`,
-        );
-      }
-      throw error;
+      const transport = operation(source.token);
+      // Promise.race registers a rejection handler, but retaining an explicit
+      // observer makes the late-settlement contract clear and robust if this
+      // helper changes later.
+      void transport.catch(() => undefined);
+      return await Promise.race([transport, localSettlement]);
     } finally {
-      if (timer) {
-        clearTimeout(timer);
-      }
-      source.dispose();
+      locallySettled = true;
+      clearTimeout(timer);
       this.activeRequests.delete(request);
+      source.dispose();
     }
   }
 
@@ -980,21 +1117,33 @@ export class SqryClient implements vscode.Disposable {
    * was renamed to make the "cancel everything" semantics explicit.
    */
   private cancelAllRequests(): void {
-    for (const request of this.activeRequests) {
-      request.source.cancel();
-      if (request.timer) {
-        clearTimeout(request.timer);
-      }
-      request.source.dispose();
+    for (const request of [...this.activeRequests]) {
+      request.abort(
+        new Error("sqry request cancelled because the extension is deactivating."),
+      );
     }
-    this.activeRequests.clear();
   }
 
-  private async ensureConfig(): Promise<ResolvedSqryConfig> {
+  private throwIfRequestCannotProceed(
+    cancellationToken?: vscode.CancellationToken,
+  ): void {
+    if (this.isDisposed) {
+      throw new Error("sqry language client is disposed.");
+    }
+    if (cancellationToken?.isCancellationRequested) {
+      throw new Error("sqry request was cancelled before it could be sent.");
+    }
+  }
+
+  private async ensureConfig(
+    cancellationToken?: vscode.CancellationToken,
+  ): Promise<ResolvedSqryConfig> {
+    this.throwIfRequestCannotProceed(cancellationToken);
     if (this.config) {
       return this.config;
     }
-    await this.refreshConfig();
+    await this.refreshConfig(cancellationToken);
+    this.throwIfRequestCannotProceed(cancellationToken);
     if (!this.config) {
       throw new Error(
         "sqry configuration is unavailable. Ensure 'sqry' binary is in PATH or set 'sqry.path' in settings.",

@@ -1,6 +1,7 @@
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as https from "node:https";
+import type { ClientRequest, IncomingMessage } from "node:http";
 import * as path from "node:path";
 import * as url from "node:url";
 import * as vscode from "vscode";
@@ -16,8 +17,40 @@ const SIGSTORE_VERIFY_TIMEOUT_MS = 30_000;
 const SIGSTORE_TUF_CACHE_DIR = "sigstore-tuf-cache";
 const CHECKSUM_ASSET_NAMES = ["SHA256SUMS.txt", "CHECKSUMS.sha256"] as const;
 const ATTESTATION_BUNDLE_NAMES = ["release-artifacts.attestation.json"] as const;
+const DEFAULT_DOWNLOAD_TIMEOUTS = {
+  responseTimeoutMs: 30_000,
+  idleTimeoutMs: 30_000,
+} as const;
 
 class ReleaseAssetUnavailableError extends Error {}
+
+/** Bounded transport waits used by binary-download lifecycle tests and production. */
+export interface DownloadTimeouts {
+  /** Maximum time for the complete redirect chain to produce final response headers. */
+  readonly responseTimeoutMs: number;
+  /** Maximum quiet interval between final-response body chunks. */
+  readonly idleTimeoutMs: number;
+}
+
+/** Raised when the caller cancels binary download before it can complete. */
+export class DownloadCancelledError extends Error {
+  constructor() {
+    super("Download cancelled");
+    this.name = "DownloadCancelledError";
+  }
+}
+
+/** Raised when a download cannot make required transport progress. */
+export class DownloadTimeoutError extends Error {
+  constructor(stage: "response" | "idle") {
+    super(
+      stage === "response"
+        ? "Download timed out waiting for response headers"
+        : "Download timed out waiting for body progress",
+    );
+    this.name = "DownloadTimeoutError";
+  }
+}
 
 export interface PlatformInfo {
   /**
@@ -204,139 +237,318 @@ export async function downloadWithProgress(
   onProgress?: (downloaded: number, total: number) => void,
   cancellationToken?: vscode.CancellationToken,
   maxRedirects = 5,
+  timeouts: DownloadTimeouts = DEFAULT_DOWNLOAD_TIMEOUTS,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
-    if (cancellationToken?.isCancellationRequested) {
-      reject(new Error("Download cancelled"));
-      return;
-    }
+    let settled = false;
+    let completedSuccessfully = false;
+    // Redirects create more than one live request/response pair. Keep every
+    // hop owned until its stream closes so a terminal timeout or cancellation
+    // cannot leave a drained parent request running after its child starts.
+    const activeRequests = new Set<ClientRequest>();
+    const activeResponses = new Set<IncomingMessage>();
+    const redirectRequests = new Set<ClientRequest>();
+    const redirectResponses = new Set<IncomingMessage>();
+    let fileStream: fs.WriteStream | undefined;
+    let cancelDisposable: vscode.Disposable | undefined;
+    let responseTimer: NodeJS.Timeout | undefined;
+    let idleTimer: NodeJS.Timeout | undefined;
+    let failureFinished = false;
 
-    const parsed = new url.URL(downloadUrl);
-
-    if (parsed.protocol !== "https:") {
-      reject(new Error(`Refusing non-HTTPS download URL: ${downloadUrl}`));
-      return;
-    }
-
-    if (!isAllowedHost(parsed.hostname)) {
-      reject(new Error(`Download host not in allowlist: ${parsed.hostname}`));
-      return;
-    }
-
-    const proxyUrl = getConfiguredProxyUrl();
-
-    let requestOptions: https.RequestOptions = {
-      hostname: parsed.hostname,
-      path: parsed.pathname + parsed.search,
-      headers: { "User-Agent": "sqry-vscode" },
+    const clearTimers = (): void => {
+      if (responseTimer) {
+        clearTimeout(responseTimer);
+        responseTimer = undefined;
+      }
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = undefined;
+      }
     };
 
-    if (proxyUrl) {
+    const disposeCancellation = (): void => {
+      cancelDisposable?.dispose();
+      cancelDisposable = undefined;
+    };
+
+    const finishFailure = (error: Error): void => {
+      if (failureFinished) {
+        return;
+      }
+      failureFinished = true;
+      if (fileStream) {
+        cleanupFile(destPath);
+      }
+      reject(error);
+    };
+
+    const failOnce = (error: Error): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      clearTimers();
+      disposeCancellation();
+
+      const stream = fileStream;
+      if (stream && !stream.closed) {
+        // Windows can reject unlink while the write handle remains open. The
+        // public promise must not reject (and let outer cleanup race) until
+        // close has released the handle and the partial file is removed.
+        stream.once("close", () => finishFailure(error));
+      }
+
+      // The local error is already authoritative. Destroy without passing it
+      // back into Node streams so a synchronous redirect/HTTP-error path
+      // cannot emit an unhandled secondary `error` event before listeners are
+      // attached.
+      for (const request of activeRequests) {
+        request.destroy();
+      }
+      for (const response of activeResponses) {
+        response.destroy();
+      }
+      stream?.destroy();
+
+      if (!stream || stream.closed) {
+        finishFailure(error);
+      }
+    };
+
+    const closeIncompleteRedirectHops = (): void => {
+      // `response.resume()` only drains a redirect parent. A misbehaving
+      // transport can leave that parent open forever even after the redirected
+      // child has completed successfully. The terminal asset is already fully
+      // written when this runs, so close only still-live redirect parents and
+      // leave the completed final response alone.
+      for (const request of [...redirectRequests]) {
+        request.destroy();
+      }
+      for (const response of [...redirectResponses]) {
+        response.destroy();
+      }
+    };
+
+    const succeedOnce = (): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      completedSuccessfully = true;
+      clearTimers();
+      disposeCancellation();
+      closeIncompleteRedirectHops();
+      resolve();
+    };
+
+    const resetIdleTimer = (): void => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+      }
+      idleTimer = setTimeout(() => {
+        failOnce(new DownloadTimeoutError("idle"));
+      }, timeouts.idleTimeoutMs);
+    };
+
+    const buildRequestOptions = (parsed: url.URL): https.RequestOptions => {
+      const requestOptions: https.RequestOptions = {
+        hostname: parsed.hostname,
+        path: parsed.pathname + parsed.search,
+        headers: { "User-Agent": "sqry-vscode" },
+      };
+      const proxyUrl = getConfiguredProxyUrl();
+      if (proxyUrl) {
+        try {
+          // Dynamic require to allow the module to load even without the dep.
+          const proxyAgentModule = require("https-proxy-agent");
+          requestOptions.agent = new proxyAgentModule.HttpsProxyAgent(proxyUrl);
+        } catch {
+          // Fall through without a proxy if agent creation fails.
+        }
+      }
+      return requestOptions;
+    };
+
+    const startHop = (currentUrl: string, redirectsRemaining: number): void => {
+      if (settled) {
+        return;
+      }
+      let parsed: url.URL;
       try {
-        // Dynamic require to allow the module to load even without the dep
-        const proxyAgentModule = require("https-proxy-agent");
-        requestOptions.agent = new proxyAgentModule.HttpsProxyAgent(proxyUrl);
+        parsed = new url.URL(currentUrl);
       } catch {
-        // Fall through without proxy if agent creation fails
+        failOnce(new Error(`Invalid download URL: ${currentUrl}`));
+        return;
       }
+
+      if (parsed.protocol !== "https:") {
+        failOnce(new Error(`Refusing non-HTTPS download URL: ${currentUrl}`));
+        return;
+      }
+      if (!isAllowedHost(parsed.hostname)) {
+        failOnce(new Error(`Download host not in allowlist: ${parsed.hostname}`));
+        return;
+      }
+
+      let request: ClientRequest | undefined;
+      let isRedirectHop = false;
+      try {
+        request = https.get(buildRequestOptions(parsed), (response) => {
+          // A redirect parent is still a live Node stream after resume().
+          // Attach lifecycle listeners before any branch drains it, so a late
+          // error/abort is owned and terminal cleanup reaches every hop.
+          activeResponses.add(response);
+          response.once("close", () => {
+            activeResponses.delete(response);
+            redirectResponses.delete(response);
+          });
+          response.on("error", (error) => {
+            failOnce(error);
+          });
+          response.on("aborted", () => {
+            failOnce(new Error("Network response aborted before download completed"));
+          });
+
+          if (settled) {
+            response.destroy();
+            return;
+          }
+
+          if (
+            response.statusCode &&
+            response.statusCode >= 300 &&
+            response.statusCode < 400 &&
+            response.headers.location
+          ) {
+            isRedirectHop = true;
+            redirectResponses.add(response);
+            if (request) {
+              redirectRequests.add(request);
+            }
+            response.resume();
+            if (redirectsRemaining <= 0) {
+              failOnce(new Error("Too many redirects"));
+              return;
+            }
+
+            let redirectUrl: string;
+            try {
+              redirectUrl = new url.URL(response.headers.location, currentUrl).toString();
+            } catch {
+              failOnce(new Error(`Invalid redirect URL: ${response.headers.location}`));
+              return;
+            }
+            startHop(redirectUrl, redirectsRemaining - 1);
+            return;
+          }
+
+          if (response.statusCode === 404) {
+            response.resume();
+            failOnce(new ReleaseAssetUnavailableError("HTTP 404: Release asset not found"));
+            return;
+          }
+          if (!response.statusCode || response.statusCode >= 400) {
+            response.resume();
+            failOnce(new Error(`HTTP error: ${response.statusCode}`));
+            return;
+          }
+
+          const contentLength = parseContentLengthHeader(response.headers["content-length"]);
+          if (contentLength > MAX_DOWNLOAD_SIZE) {
+            response.resume();
+            failOnce(
+              new Error(
+                `Download rejected: file exceeds expected size limit (${contentLength} bytes > ${MAX_DOWNLOAD_SIZE} bytes)`,
+              ),
+            );
+            return;
+          }
+
+          if (responseTimer) {
+            clearTimeout(responseTimer);
+            responseTimer = undefined;
+          }
+          try {
+            fileStream = fs.createWriteStream(destPath);
+          } catch (error) {
+            failOnce(error instanceof Error ? error : new Error(String(error)));
+            return;
+          }
+
+          let downloaded = 0;
+          resetIdleTimer();
+          response.on("data", (chunk: Buffer) => {
+            if (settled) {
+              return;
+            }
+            resetIdleTimer();
+            downloaded += chunk.length;
+            if (downloaded > MAX_DOWNLOAD_SIZE) {
+              failOnce(new Error("Download rejected: file exceeds expected size limit"));
+              return;
+            }
+            if (onProgress && contentLength > 0) {
+              try {
+                onProgress(downloaded, contentLength);
+              } catch (error) {
+                failOnce(error instanceof Error ? error : new Error(String(error)));
+              }
+            }
+          });
+          fileStream.on("error", (error) => failOnce(error));
+          fileStream.on("finish", succeedOnce);
+          response.pipe(fileStream);
+        });
+      } catch (error) {
+        failOnce(error instanceof Error ? error : new Error(String(error)));
+        return;
+      }
+
+      if (!request) {
+        failOnce(new Error("HTTPS request was not created"));
+        return;
+      }
+
+      activeRequests.add(request);
+      if (isRedirectHop) {
+        redirectRequests.add(request);
+      }
+      request.once("close", () => {
+        activeRequests.delete(request);
+        redirectRequests.delete(request);
+      });
+      request.on("error", (error) => {
+        failOnce(
+          new Error(
+            `Network error: ${error.message}. Check your internet connection and proxy settings.`,
+          ),
+        );
+      });
+      if (settled && (!completedSuccessfully || isRedirectHop)) {
+        // A synchronous test transport can invoke its callback and finish the
+        // final body before `https.get()` returns its request. A successful
+        // final request is already complete in that case; only a failed hop
+        // or a redirect parent still needs explicit destruction here.
+        request.destroy();
+      }
+    };
+
+    if (cancellationToken?.isCancellationRequested) {
+      failOnce(new DownloadCancelledError());
+      return;
     }
-
-    const req = https.get(requestOptions, (res) => {
-      // Handle redirects
-      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-        res.resume(); // Drain the response
-
-        if (maxRedirects <= 0) {
-          reject(new Error("Too many redirects"));
-          return;
-        }
-
-        const redirectUrl = res.headers.location;
-        const redirectParsed = new url.URL(redirectUrl);
-
-        if (redirectParsed.protocol !== "https:") {
-          reject(new Error(`Refusing non-HTTPS redirect to: ${redirectUrl}`));
-          return;
-        }
-
-        if (!isAllowedHost(redirectParsed.hostname)) {
-          reject(new Error(`Redirect host not in allowlist: ${redirectParsed.hostname}`));
-          return;
-        }
-
-        downloadWithProgress(redirectUrl, destPath, onProgress, cancellationToken, maxRedirects - 1)
-          .then(resolve)
-          .catch(reject);
-        return;
-      }
-
-      if (res.statusCode === 404) {
-        res.resume();
-        reject(new ReleaseAssetUnavailableError("HTTP 404: Release asset not found"));
-        return;
-      }
-
-      if (!res.statusCode || res.statusCode >= 400) {
-        res.resume();
-        reject(new Error(`HTTP error: ${res.statusCode}`));
-        return;
-      }
-
-      const contentLength = parseContentLengthHeader(res.headers["content-length"]);
-      if (contentLength > MAX_DOWNLOAD_SIZE) {
-        res.resume();
-        reject(new Error(`Download rejected: file exceeds expected size limit (${contentLength} bytes > ${MAX_DOWNLOAD_SIZE} bytes)`));
-        return;
-      }
-
-      const fileStream = fs.createWriteStream(destPath);
-      let downloaded = 0;
-
-      const onCancel = cancellationToken?.onCancellationRequested(() => {
-        res.destroy();
-        fileStream.destroy();
-        cleanupFile(destPath);
-        reject(new Error("Download cancelled"));
-      });
-
-      res.on("data", (chunk: Buffer) => {
-        downloaded += chunk.length;
-        if (downloaded > MAX_DOWNLOAD_SIZE) {
-          res.destroy();
-          fileStream.destroy();
-          cleanupFile(destPath);
-          reject(new Error(`Download rejected: file exceeds expected size limit`));
-          return;
-        }
-        if (onProgress && contentLength > 0) {
-          onProgress(downloaded, contentLength);
-        }
-      });
-
-      res.pipe(fileStream);
-
-      fileStream.on("finish", () => {
-        onCancel?.dispose();
-        resolve();
-      });
-
-      fileStream.on("error", (err) => {
-        onCancel?.dispose();
-        cleanupFile(destPath);
-        reject(err);
-      });
-
-      res.on("error", (err) => {
-        onCancel?.dispose();
-        fileStream.destroy();
-        cleanupFile(destPath);
-        reject(err);
-      });
+    const registeredCancellation = cancellationToken?.onCancellationRequested(() => {
+      failOnce(new DownloadCancelledError());
     });
-
-    req.on("error", (err) => {
-      reject(new Error(`Network error: ${err.message}. Check your internet connection and proxy settings.`));
-    });
+    cancelDisposable = registeredCancellation;
+    if (settled) {
+      disposeCancellation();
+      return;
+    }
+    responseTimer = setTimeout(() => {
+      failOnce(new DownloadTimeoutError("response"));
+    }, timeouts.responseTimeoutMs);
+    startHop(downloadUrl, maxRedirects);
   });
 }
 
@@ -681,11 +893,19 @@ async function downloadReleaseAsset(
       return assetName;
     } catch (error) {
       cleanupFile(destPath);
+      if (
+        error instanceof DownloadCancelledError ||
+        cancellationToken?.isCancellationRequested
+      ) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
       failures.push(`${assetName}: ${message}`);
-      if (!(error instanceof ReleaseAssetUnavailableError)) {
-        sawOnlyMissingAssets = false;
+      if (error instanceof ReleaseAssetUnavailableError) {
+        continue;
       }
+      sawOnlyMissingAssets = false;
+      throw error;
     }
   }
 

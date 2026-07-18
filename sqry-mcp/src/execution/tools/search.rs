@@ -645,18 +645,20 @@ pub fn execute_find_similar(args: &SearchSimilarArgs) -> Result<ToolExecution<Fi
 pub fn execute_structural_similar(
     args: &StructuralSimilarArgs,
 ) -> Result<ToolExecution<StructuralSimilarData>> {
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
+    // This path historically skips workspace-boundary enforcement, preserved by
+    // `acquire_workspace_context_unenforced`.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let graph = engine.ensure_graph()?;
-    let snapshot = std::sync::Arc::new(graph.snapshot());
-    structural_similar_from_snapshot(&snapshot, &workspace_root, args, start)
+    let ctx = crate::engine::acquire_workspace_context_unenforced(&args.path)?;
+    crate::daemon_adapter::execute_structural_similar_for_daemon(&ctx, args, start)
 }
 
-/// Shared core for `structural_similar`, reached by BOTH the standalone rmcp
-/// path ([`execute_structural_similar`]) and the daemon-hosted path
-/// (`daemon_adapter::execute_structural_similar_for_daemon`). Operating on an
+/// Shared core for `structural_similar`. Both transports reach it through
+/// `daemon_adapter::execute_structural_similar_for_daemon` (the standalone
+/// [`execute_structural_similar`] acquires its context, then delegates to that
+/// wrapper; the daemon path calls the wrapper directly), which forwards to
+/// `search_inner::execute_structural_similar` and lands here. Operating on an
 /// already-acquired snapshot keeps the two transports behaviourally identical.
 ///
 /// # Errors

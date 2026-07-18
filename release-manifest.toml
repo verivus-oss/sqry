@@ -88,6 +88,9 @@ public = [
     "CONTRIBUTING.md",
     "deny.toml",
     "ERRATA.md",
+    # Glama MCP-directory maintainer file. Ships to the public mirror so Glama
+    # can verify org ownership and build the packaging/docker/Dockerfile.
+    "glama.json",
     "LICENSE",
     "QUICKSTART.md",
     "README.md",
@@ -147,6 +150,9 @@ public = [
     "scripts/install.ps1",
     "scripts/release/render-homebrew-formula.sh",
     "scripts/sync-versions.sh",
+    # MCP-registry publisher. Runs in verivus-oss/sqry (publish-container.yml,
+    # on release: published) to register io.github.verivus-oss/sqry via OIDC.
+    "scripts/release/register-mcp-registry.sh",
     # STEP_11 (workspace-aware-cross-repo) CI gate scripts. These run in
     # .github/workflows/ci.yml and are referenced by branch-protection.
     "scripts/ci/check_claim_traceability.sh",
@@ -175,6 +181,11 @@ public = [
 # workflow can render against it.
 public = [
     "packaging/homebrew/sqry.rb",
+    # sqry-mcp container image (alpine + git, static musl binary). Ships public
+    # so the Glama build check and the release pipeline can build it from the
+    # mirror.
+    "packaging/docker/Dockerfile",
+    "packaging/podman/Containerfile",
 ]
 
 [selection.dirs]
@@ -285,13 +296,7 @@ required_public = [
 ]
 
 [sanitization.forbidden_patterns]
-strings = [
-    "verivus-oss",
-    "verivus-oss",
-    "sqry.dev",
-    "@sqry.dev",
-    "REDACTED",
-]
+strings = []
 path_patterns = [
     ".claude/",
     ".codex",
@@ -312,8 +317,10 @@ allowed_extensions = [
     ".R", ".ex", ".groovy", ".hs", ".lua", ".pkb", ".pl", ".pp", ".svelte", ".tf",
     ".vue", ".xml",
 ]
-allowed_dotfiles = [".gitignore", ".gitattributes", ".cargo", ".editorconfig"]
+allowed_dotfiles = [".gitignore", ".gitattributes", ".cargo", ".editorconfig", ".vscodeignore"]
 	allowed_basenames = [
+    "Dockerfile",
+    "Containerfile",
     "LICENSE",
     "LICENSE-*",
     "COPYING",

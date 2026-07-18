@@ -989,8 +989,18 @@ fn build_graph_status(storage: &GraphStorage) -> Result<IndexStatus> {
     let trigram_path = storage.graph_dir().join("trigram.idx");
     let has_trigram = trigram_path.exists();
 
+    // Derive the per-language breakdown from the authoritative manifest
+    // `file_count` map (populated by the builder at build time). This works for
+    // manifests already on disk, so no reindex is needed. The `languages` list
+    // is sorted for a stable, deterministic array. Note: `file_count` counts
+    // first-party indexed files only (external files are excluded at build
+    // time), so these grouped counts may not sum to the header-derived total
+    // `file_count` above, which can include external files.
+    let mut languages: Vec<String> = manifest.file_count.keys().cloned().collect();
+    languages.sort();
+
     // Build status (map graph data to IndexStatus for compatibility)
-    Ok(IndexStatus::from_index(
+    let mut builder = IndexStatus::from_index(
         storage.graph_dir().display().to_string(),
         manifest.built_at.clone(),
         age_seconds,
@@ -999,7 +1009,11 @@ fn build_graph_status(storage: &GraphStorage) -> Result<IndexStatus> {
     .file_count_opt(total_files)
     .has_relations(manifest.edge_count > 0)
     .has_trigram(has_trigram)
-    .build())
+    .languages(languages);
+    if !manifest.file_count.is_empty() {
+        builder = builder.file_counts_by_language(manifest.file_count.clone());
+    }
+    Ok(builder.build())
 }
 
 fn write_graph_status_text(
@@ -1023,6 +1037,13 @@ fn write_graph_status_text(
         }
         if let Some(count) = status.file_count {
             streams.write_result(&format!("  Files: {count}\n"))?;
+        }
+        // Render from `status.languages` (already sorted) so the human-readable
+        // and JSON surfaces agree on a single source of truth.
+        if let Some(languages) = &status.languages
+            && !languages.is_empty()
+        {
+            streams.write_result(&format!("  Languages: {}\n", languages.join(", ")))?;
         }
         if status.supports_relations {
             streams.write_result("  Relations: ✓ Available\n")?;
@@ -1555,21 +1576,40 @@ pub fn run_graph_status_with_format(cli: &Cli, path: &str, json_from_format: boo
     streams.finish_checked()
 }
 
+/// The canonical `.gitignore` entry for the current index artifact directory.
+///
+/// The index is written under `.sqry/` (see `GRAPH_DIR_NAME` = `.sqry/graph`);
+/// `.sqry-index/` is a dead legacy artifact name that no longer matches
+/// anything on disk.
+const GITIGNORE_SQRY_ENTRY: &str = ".sqry/";
+
+/// Whether a `.gitignore` line already ignores the `.sqry/` artifact directory.
+///
+/// Matches the four canonical spellings of the directory exactly, after
+/// trailing-only whitespace normalization (git treats only trailing spaces as
+/// insignificant; leading spaces are significant). Deliberately does NOT treat
+/// the legacy `.sqry-index/` or the sibling `.sqry-cache/` as a match (they are
+/// distinct artifacts), and does NOT interpret negation (`!.sqry/`) or
+/// last-match-wins ordering; those are out of scope for this presence check.
+fn line_ignores_sqry_dir(line: &str) -> bool {
+    matches!(line.trim_end(), ".sqry" | ".sqry/" | "/.sqry" | "/.sqry/")
+}
+
 /// Handles the .gitignore check and modification.
 fn handle_gitignore(path: &Path, add_to_gitignore: bool) {
     if let Some(root) = find_git_root(path) {
         let gitignore_path = root.join(".gitignore");
-        let entry = ".sqry-index/";
+        let entry = GITIGNORE_SQRY_ENTRY;
         let mut is_already_indexed = false;
 
         if gitignore_path.exists()
             && let Ok(file) = fs::File::open(&gitignore_path)
         {
             let reader = BufReader::new(file);
-            if reader.lines().any(|line| {
-                line.map(|l| l.trim() == ".sqry-index" || l.trim() == ".sqry-index/")
-                    .unwrap_or(false)
-            }) {
+            if reader
+                .lines()
+                .any(|line| line.map(|l| line_ignores_sqry_dir(&l)).unwrap_or(false))
+            {
                 is_already_indexed = true;
             }
         }
@@ -1593,7 +1633,9 @@ fn handle_gitignore(path: &Path, add_to_gitignore: bool) {
 fn find_git_root(path: &Path) -> Option<&Path> {
     let mut current = path;
     loop {
-        if current.join(".git").is_dir() {
+        // A repo root has `.git` as a directory (normal checkout) or as a file
+        // (a linked worktree / submodule gitdir pointer), so accept either.
+        if current.join(".git").exists() {
             return Some(current);
         }
         if let Some(parent) = current.parent() {
@@ -1607,7 +1649,7 @@ fn find_git_root(path: &Path) -> Option<&Path> {
 /// Prints a standard warning message about .gitignore.
 fn print_gitignore_warning() {
     eprintln!(
-        "\n\u{26a0}\u{fe0f} Warning: It is recommended to add the '.sqry-index/' directory to your .gitignore file."
+        "\n\u{26a0}\u{fe0f} Warning: It is recommended to add the '.sqry/' directory to your .gitignore file."
     );
     eprintln!("This is a generated cache and can become large.\n");
 }
@@ -1957,6 +1999,242 @@ mod tests {
         // Load index and verify it has the symbol
         let manifest = storage.load_manifest().unwrap();
         assert_eq!(manifest.node_count, 1, "Should have 1 symbol");
+    }
+    }
+
+    // ---- #614: `--add-to-gitignore` writes the current `.sqry/` path ----
+
+    /// The presence check matches only the four canonical spellings of the
+    /// current `.sqry/` artifact directory, and treats legacy/sibling artifacts
+    /// and whitespace variants correctly.
+    #[test]
+    fn line_ignores_sqry_dir_matches_only_canonical_spellings() {
+        // Positive: the four canonical spellings, with trailing whitespace
+        // (git ignores only trailing spaces) still matching.
+        for line in [
+            ".sqry", ".sqry/", "/.sqry", "/.sqry/", ".sqry/  ", ".sqry/\t",
+        ] {
+            assert!(line_ignores_sqry_dir(line), "should match: {line:?}");
+        }
+        // Negative: legacy and sibling artifacts are distinct; leading
+        // whitespace is significant in git, so it is a non-match; unrelated
+        // patterns do not match.
+        for line in [
+            ".sqry-index",
+            ".sqry-index/",
+            ".sqry-cache/",
+            ".sqrying/",
+            " .sqry/",
+            "!.sqry/",
+            "src/.sqry/",
+            "",
+        ] {
+            assert!(!line_ignores_sqry_dir(line), "should NOT match: {line:?}");
+        }
+    }
+
+    /// `--add-to-gitignore` appends the current `.sqry/` entry exactly once,
+    /// is idempotent across repeated runs, and never writes the legacy path.
+    #[test]
+    fn handle_gitignore_writes_current_sqry_dir_idempotently() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join(".git")).unwrap();
+
+        handle_gitignore(tmp.path(), true);
+        let contents = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert_eq!(
+            contents.matches(".sqry/").count(),
+            1,
+            "should add `.sqry/` exactly once, got: {contents:?}"
+        );
+        assert!(
+            !contents.contains(".sqry-index"),
+            "must not write the legacy `.sqry-index` path: {contents:?}"
+        );
+
+        // Second run is a no-op (still exactly one entry).
+        handle_gitignore(tmp.path(), true);
+        let contents = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert_eq!(
+            contents.matches(".sqry/").count(),
+            1,
+            "repeat run must not duplicate the entry: {contents:?}"
+        );
+    }
+
+    /// An existing canonical entry (any spelling) is recognized, so no second
+    /// entry is appended.
+    #[test]
+    fn handle_gitignore_recognizes_existing_variants() {
+        for existing in ["/.sqry/\n", ".sqry\n", "  # note\n/.sqry\n"] {
+            let tmp = TempDir::new().unwrap();
+            fs::create_dir(tmp.path().join(".git")).unwrap();
+            fs::write(tmp.path().join(".gitignore"), existing).unwrap();
+
+            handle_gitignore(tmp.path(), true);
+            let contents = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+            assert_eq!(
+                contents, existing,
+                "existing entry {existing:?} must suppress a second append"
+            );
+        }
+    }
+
+    /// A stale legacy `.sqry-index/` entry must NOT suppress adding the correct
+    /// `.sqry/` entry (they ignore different directories).
+    #[test]
+    fn handle_gitignore_legacy_entry_does_not_suppress_current() {
+        let tmp = TempDir::new().unwrap();
+        fs::create_dir(tmp.path().join(".git")).unwrap();
+        fs::write(tmp.path().join(".gitignore"), ".sqry-index/\n").unwrap();
+
+        handle_gitignore(tmp.path(), true);
+        let contents = fs::read_to_string(tmp.path().join(".gitignore")).unwrap();
+        assert!(
+            contents.contains(".sqry-index/"),
+            "legacy entry preserved: {contents:?}"
+        );
+        assert_eq!(
+            contents.matches("\n.sqry/").count() + usize::from(contents.starts_with(".sqry/")),
+            1,
+            "current `.sqry/` entry appended exactly once: {contents:?}"
+        );
+    }
+
+    /// `find_git_root` accepts `.git` as a file (linked worktree / submodule
+    /// gitdir pointer), not only as a directory.
+    #[test]
+    fn find_git_root_accepts_git_file_worktree() {
+        let tmp = TempDir::new().unwrap();
+        // Linked worktrees have a `.git` FILE pointing at the real gitdir.
+        fs::write(
+            tmp.path().join(".git"),
+            "gitdir: /somewhere/.git/worktrees/wt\n",
+        )
+        .unwrap();
+        assert_eq!(
+            find_git_root(tmp.path()),
+            Some(tmp.path()),
+            "`.git` as a file must be recognized as a repo root"
+        );
+    }
+
+    /// End-to-end proof that the written entry actually causes git to ignore the
+    /// real artifact directory. Best-effort: skipped when `git` is unavailable.
+    #[test]
+    fn handle_gitignore_entry_actually_ignores_snapshot() {
+        use std::process::Command as StdCommand;
+
+        let tmp = TempDir::new().unwrap();
+        if StdCommand::new("git")
+            .arg("init")
+            .current_dir(tmp.path())
+            .output()
+            .map(|o| !o.status.success())
+            .unwrap_or(true)
+        {
+            eprintln!("git unavailable; skipping check-ignore assertion");
+            return;
+        }
+
+        handle_gitignore(tmp.path(), true);
+        // Create the real artifact the flag is meant to hide.
+        fs::create_dir_all(tmp.path().join(".sqry/graph")).unwrap();
+        fs::write(tmp.path().join(".sqry/graph/snapshot.sqry"), b"x").unwrap();
+
+        let out = StdCommand::new("git")
+            .args(["check-ignore", ".sqry/graph/snapshot.sqry"])
+            .current_dir(tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git check-ignore should report the snapshot as ignored; stdout={:?} stderr={:?}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    // ---- #615: index status reports the per-language breakdown ----
+
+    large_stack_test! {
+    #[test]
+    fn build_graph_status_reports_sorted_languages() {
+        use crate::args::Cli;
+        use clap::Parser;
+
+        let tmp = TempDir::new().unwrap();
+        // A multi-language corpus (all Fast-tier plugins, included by default).
+        fs::write(tmp.path().join("lib.rs"), "pub fn r() {}\n").unwrap();
+        fs::write(tmp.path().join("app.py"), "def p():\n    pass\n").unwrap();
+        fs::write(tmp.path().join("main.js"), "function j() {}\n").unwrap();
+
+        let cli = Cli::parse_from(["sqry", "index"]);
+        run_index(
+            &cli,
+            tmp.path().to_str().unwrap(),
+            false,
+            None,
+            false,
+            false,
+            None,
+            false,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
+            false,
+            &[],
+            None,
+        )
+        .unwrap();
+
+        let storage = GraphStorage::new(tmp.path());
+        let status = build_graph_status(&storage).unwrap();
+
+        let languages = status
+            .languages
+            .clone()
+            .expect("languages should be populated for a built index");
+        // The three-language corpus must surface exactly its three languages,
+        // sorted. Asserting the full set (not merely non-empty / rust-present)
+        // keeps the sort assertion meaningful and would catch a discovery
+        // regression that collapsed to a single language.
+        assert_eq!(
+            languages,
+            vec![
+                "javascript".to_string(),
+                "python".to_string(),
+                "rust".to_string()
+            ],
+            "expected the sorted three-language set, got {languages:?}"
+        );
+
+        // Per-language counts must be present and their keys must match the
+        // languages list exactly (single source of truth), one file each.
+        let counts = status
+            .file_counts_by_language
+            .expect("file_counts_by_language should be populated");
+        let mut count_keys: Vec<String> = counts.keys().cloned().collect();
+        count_keys.sort();
+        assert_eq!(
+            count_keys, languages,
+            "file_counts_by_language keys must equal the languages list"
+        );
+        assert_eq!(counts.get("rust"), Some(&1), "one rust file: {counts:?}");
+        assert_eq!(counts.get("python"), Some(&1), "one python file: {counts:?}");
+        assert_eq!(
+            counts.get("javascript"),
+            Some(&1),
+            "one javascript file: {counts:?}"
+        );
+        // Counts must agree with the authoritative manifest.
+        let manifest = storage.load_manifest().unwrap();
+        assert_eq!(
+            counts, manifest.file_count,
+            "grouped counts must equal manifest.file_count"
+        );
     }
     }
 

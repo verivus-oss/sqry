@@ -1714,7 +1714,6 @@ pub fn persist_durable_graph_transaction(
 ) -> Result<(CodeGraph, BuildResult)> {
     use crate::graph::unified::analysis::csr::CsrAdjacency;
     use crate::graph::unified::analysis::{AnalysisIdentity, GraphAnalyses, compute_node_id_hash};
-    use crate::graph::unified::compaction::{Direction, build_compacted_csr, snapshot_edges};
     use crate::graph::unified::persistence::manifest::write_manifest_bytes_atomic;
     use crate::graph::unified::persistence::{
         BuildProvenance, GraphStorage, MANIFEST_SCHEMA_VERSION, Manifest, SNAPSHOT_FORMAT_VERSION,
@@ -1780,39 +1779,24 @@ pub fn persist_durable_graph_transaction(
     });
     let compaction_start = std::time::Instant::now();
 
-    // Snapshot both edge stores (sequential — holds read locks briefly)
-    let forward_compaction_snapshot = {
+    // Snapshot + build both CSRs (parallel, CPU-intensive, no locks held) and
+    // atomically swap them in, clearing the deltas. This is the same sequence
+    // the daemon cold-load path runs via `compact_edges_in_place`; sharing it
+    // keeps a single compaction implementation.
+    crate::graph::unified::compaction::compact_edges_in_place(&graph)
+        .context("Failed to compact edge stores for persistence")?;
+
+    // Build analysis adjacency from the now-installed forward CSR. Equivalent to
+    // building it from `forward_csr` before the swap (it is the same CSR), and
+    // replaces the expensive build_from_snapshot merge+sort (~11s on kernel).
+    let adjacency = {
         let forward_store = graph.edges().forward();
-        snapshot_edges(&forward_store, node_count)
+        CsrAdjacency::from_csr_graph(
+            forward_store
+                .csr()
+                .expect("edges just compacted; forward CSR must be present"),
+        )
     };
-    let reverse_compaction_snapshot = {
-        let reverse_store = graph.edges().reverse();
-        snapshot_edges(&reverse_store, node_count)
-    };
-
-    // Build both CSRs in parallel (CPU-intensive, no locks held)
-    let (forward_result, reverse_result) = rayon::join(
-        || build_compacted_csr(&forward_compaction_snapshot, Direction::Forward),
-        || build_compacted_csr(&reverse_compaction_snapshot, Direction::Reverse),
-    );
-
-    let (forward_csr, _forward_build_stats) =
-        forward_result.context("Failed to build forward CSR for persistence compaction")?;
-    let (reverse_csr, _reverse_build_stats) =
-        reverse_result.context("Failed to build reverse CSR for persistence compaction")?;
-
-    // Drop snapshots — no longer needed
-    drop(forward_compaction_snapshot);
-    drop(reverse_compaction_snapshot);
-
-    // Build analysis adjacency from forward CSR before it's consumed by swap.
-    // This replaces the expensive build_from_snapshot merge+sort (~11s on kernel).
-    let adjacency = CsrAdjacency::from_csr_graph(&forward_csr);
-
-    // Atomic mutation phase: swap both CSRs and clear both deltas
-    graph
-        .edges()
-        .swap_csrs_and_clear_deltas(forward_csr, reverse_csr);
 
     progress.report(IndexProgress::StageCompleted {
         stage_name: "Compacting edge stores for persistence",

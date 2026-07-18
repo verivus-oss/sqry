@@ -542,6 +542,97 @@ pub fn engine_for_workspace(explicit_path: Option<&PathBuf>) -> Result<Arc<Engin
     engine_for_workspace_root(&workspace_root)
 }
 
+/// Build a [`crate::daemon_adapter::WorkspaceContext`] from a resolved engine.
+///
+/// Shared tail of the three `acquire_workspace_context*` helpers: materialize
+/// the unified graph and assemble the context the daemon-path cores consume.
+///
+/// # Errors
+///
+/// Returns an error if the unified graph cannot be built.
+fn context_for_engine(engine: &Arc<Engine>) -> Result<crate::daemon_adapter::WorkspaceContext> {
+    let workspace_root = engine.workspace_root().to_path_buf();
+    let graph = engine.ensure_graph()?;
+    Ok(crate::daemon_adapter::WorkspaceContext {
+        workspace_root,
+        graph,
+        executor: engine.executor_arc(),
+    })
+}
+
+/// Acquire a graph-backed context for a standalone tool call, enforcing the
+/// workspace boundary on `explicit_path`.
+///
+/// This is the single home for the acquisition that the majority of standalone
+/// graph-backed `execute_*` entrypoints used to repeat inline: resolve the
+/// workspace path, load the engine, enforce the workspace boundary, and
+/// materialize the unified graph. Returns the context alongside the
+/// boundary-enforced `search_root` (a few callers use it; most only need the
+/// enforcement side effect).
+///
+/// The daemon path never calls this: `sqryd` already holds a resident context
+/// and injects it directly. Both paths then converge on the same
+/// `execute_*_for_daemon` core, so each tool's analysis body exists once.
+///
+/// # Errors
+///
+/// Returns an error if the workspace cannot be resolved, `explicit_path`
+/// escapes the workspace, or the unified graph cannot be built.
+pub fn acquire_workspace_context(
+    explicit_path: &str,
+) -> Result<(crate::daemon_adapter::WorkspaceContext, PathBuf)> {
+    // Matches the per-tool `resolve_workspace_path` helpers this replaces:
+    // issue-#394 subdir scoping via the enforced selector, NOT the plain
+    // `path_resolver::resolve_workspace_path`.
+    let selector =
+        crate::execution::workspace_scope::resolve_workspace_selector_enforced(explicit_path)?;
+    let engine = engine_for_workspace(selector.as_ref())?;
+    let workspace_root = engine.workspace_root().to_path_buf();
+    let search_root = canonicalize_in_workspace_enforced(explicit_path, &workspace_root)?;
+    Ok((context_for_engine(&engine)?, search_root))
+}
+
+/// Acquire a graph-backed context WITHOUT the workspace-boundary enforcement.
+///
+/// For the two tools whose standalone path historically skips
+/// `canonicalize_in_workspace_enforced` (`semantic_diff`, which builds its own
+/// per-git-ref graphs, and `structural_similar`). Preserves that behavior
+/// exactly rather than silently adding a boundary check.
+///
+/// # Errors
+///
+/// Returns an error if the workspace cannot be resolved or the unified graph
+/// cannot be built.
+pub fn acquire_workspace_context_unenforced(
+    explicit_path: &str,
+) -> Result<crate::daemon_adapter::WorkspaceContext> {
+    // Same enforced-selector resolution as `acquire_workspace_context`; the only
+    // difference is that this variant skips the `canonicalize_in_workspace_enforced`
+    // path-boundary check (see the doc comment above).
+    let selector =
+        crate::execution::workspace_scope::resolve_workspace_selector_enforced(explicit_path)?;
+    let engine = engine_for_workspace(selector.as_ref())?;
+    context_for_engine(&engine)
+}
+
+/// Acquire a graph-backed context via the issue-#394 scope resolver, which maps
+/// a subdir `path` to a workspace selector (rejecting escaping subdirs) instead
+/// of falling back to the whole workspace.
+///
+/// For `generate_overview` and `complexity_metrics`.
+///
+/// # Errors
+///
+/// Returns an error if the scope cannot be resolved or the unified graph cannot
+/// be built.
+pub fn acquire_workspace_context_scoped(
+    explicit_path: &str,
+) -> Result<crate::daemon_adapter::WorkspaceContext> {
+    let selector = crate::execution::workspace_scope::resolve_workspace_selector(explicit_path)?;
+    let engine = engine_for_workspace(selector.as_ref())?;
+    context_for_engine(&engine)
+}
+
 fn engine_for_workspace_root(workspace_root: &Path) -> Result<Arc<Engine>> {
     // Canonicalization guarantee: workspace_root is always canonical
     // (WorkspaceResolver already canonicalizes)

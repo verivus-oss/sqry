@@ -12,7 +12,7 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
     let args = params_to_dependency_impact_args(params).map_err(rpc_error_to_method_error)?;
     let path = args.path.clone();
     classify_and_build(ctx, "dependency_impact", &path, move |wctx, _cancel| {
-        execute_dependency_impact_for_daemon(wctx, &args)
+        execute_dependency_impact_for_daemon(wctx, &args, std::time::Instant::now())
     })
     .await
 }

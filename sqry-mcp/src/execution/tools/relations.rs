@@ -81,20 +81,10 @@ fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
 pub fn execute_relation_query(
     args: &RelationQueryArgs,
 ) -> Result<ToolExecution<RelationQueryData>> {
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _search_root = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
-    // Require unified graph for relation queries
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_relation_query(&ctx, args)
+    // No pre-acquisition `start` here: the shared core anchors its own `Instant`
+    // at snapshot time, so this path only acquires context and delegates.
+    let (ctx, _search_root) = crate::engine::acquire_workspace_context(&args.path)?;
+    crate::daemon_adapter::execute_relation_query_for_daemon(&ctx, args)
 }
 
 pub(crate) mod inner {

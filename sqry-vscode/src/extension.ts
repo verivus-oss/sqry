@@ -29,6 +29,17 @@ import {
   isManualRebuildGateTimeout,
 } from "./manualRebuildGate";
 import { emitWorkspaceResolutionTelemetry as sharedEmitWorkspaceResolutionTelemetry } from "./workspaceTelemetry";
+import {
+  bindSqryReadyContext,
+  registerStartupCommands,
+  type ReadinessContextBinding,
+  type WorkspaceStatusRefreshResult,
+} from "./startupCommands";
+import {
+  completeInitialWorkspaceResolution,
+  deactivateStartupResources,
+  disposeStartupClient,
+} from "./startupLifecycle";
 
 // STEP_12 — re-export the formatter + shared emitter so callers that
 // imported them from `extension.ts` previously continue to compile.
@@ -46,6 +57,7 @@ let searchPanel: SearchPanel | undefined;
 let statusBar: SqryStatusBar | undefined;
 let diagnosticsProvider: SqryDiagnosticsProvider | undefined;
 let loadingState: LoadingStateMachine | undefined;
+let readinessContextBinding: ReadinessContextBinding | undefined;
 /**
  * Activation-scoped reference to the singleton [`AutoIndexManager`].
  *
@@ -55,6 +67,19 @@ let loadingState: LoadingStateMachine | undefined;
  * assigned during `activate` and cleared by `deactivate`.
  */
 let autoIndexManagerRef: AutoIndexManager | undefined;
+
+/**
+ * Release the activation-owned client on every terminal startup path.
+ *
+ * Clearing the global first keeps later permanent command dispatchers and
+ * delayed callbacks from observing a client that has already failed. Disposal
+ * synchronously cancels LSP work and unregisters its configuration listener.
+ */
+function disposeTerminalStartupClient(): void {
+  const failedClient = client;
+  client = undefined;
+  disposeStartupClient(failedClient);
+}
 
 export async function activate(
   context: vscode.ExtensionContext,
@@ -81,6 +106,50 @@ export async function activate(
   // and the language-server boot — never an empty / "no index" view.
   loadingState = new LoadingStateMachine();
   context.subscriptions.push({ dispose: () => loadingState?.dispose() });
+
+  // Every public manifest command is registered before anything can await.
+  // The dispatcher is phase-safe even if a stale VS Code context key remains
+  // visible after a host-side `setContext(false)` failure.
+  const startupCommands = registerStartupCommands({
+    getLoadingState: () => loadingState,
+    getOutputChannel: () => outputChannel,
+  });
+  context.subscriptions.push(startupCommands);
+
+  try {
+    // The initial false context write is an activation barrier. Until it has
+    // succeeded, no LSP/client work can start and no real public handler is
+    // attached. Runtime write failures transition the existing state machine
+    // to Failed, while permanent dispatchers remain locally actionable.
+    readinessContextBinding = await bindSqryReadyContext(
+      loadingState,
+      outputChannel,
+      (error) => {
+        const activeLoadingState = loadingState;
+        if (!activeLoadingState) {
+          return;
+        }
+        if (!activeLoadingState.isFailed()) {
+          const reason = `sqry command readiness update failed: ${error.message}`;
+          outputChannel?.appendLine(`[sqry] ${reason}`);
+          activeLoadingState.transition("Failed", { reason, viewLogsAction: true });
+        }
+        disposeTerminalStartupClient();
+      },
+    );
+    context.subscriptions.push(readinessContextBinding);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const reason = "sqry could not establish command readiness; see Sqry output";
+    outputChannel.appendLine(`[sqry] ${reason}: ${message}`);
+    loadingState.transition("Failed", { reason, viewLogsAction: true });
+    void vscode.window.showErrorMessage(`${reason}: ${message}`, "View Logs").then((selection) => {
+      if (selection === "View Logs") {
+        outputChannel?.show(true);
+      }
+    });
+    return;
+  }
 
   client = new SqryClient(outputChannel);
   context.subscriptions.push(client);
@@ -182,6 +251,7 @@ export async function activate(
         viewLogsAction: true,
       });
     }
+    disposeTerminalStartupClient();
     return;
   }
   loadingState.transition("WorkspaceResolving");
@@ -279,13 +349,13 @@ export async function activate(
     codeLensProvider,
     // Note: When triggered from tree view menu icons, VSCode passes context objects
     // instead of undefined. We need to validate that preset is actually a string.
-    vscode.commands.registerCommand("sqry.query", (preset?: unknown) =>
+    startupCommands.registerHandler("sqry.query", (preset?: unknown) =>
       runQuery(typeof preset === "string" ? preset : undefined),
     ),
     vscode.commands.registerCommand("sqry.runQueryInternal", (preset: string) =>
       runQuery(preset),
     ),
-    vscode.commands.registerCommand("sqry.searchWorkspace", async () => {
+    startupCommands.registerHandler("sqry.searchWorkspace", async () => {
       const activeClient = client;
       if (!activeClient) {
         return;
@@ -319,7 +389,7 @@ export async function activate(
         },
       );
     }),
-    vscode.commands.registerCommand("sqry.findReferences", async () => {
+    startupCommands.registerHandler("sqry.findReferences", async () => {
       const activeClient = client;
       if (!activeClient) {
         return;
@@ -374,30 +444,39 @@ export async function activate(
         },
       );
     }),
-    vscode.commands.registerCommand("sqry.index", () => handleIndexCommand()),
-    vscode.commands.registerCommand("sqry.refreshStats", async () => {
+    startupCommands.registerHandler("sqry.index", () => handleIndexCommand()),
+    startupCommands.registerHandler("sqry.refreshStats", async () => {
       const activeClient = client;
       if (!activeClient) {
+        const message = "sqry is not ready to refresh index stats. Select View Logs for details.";
+        outputChannel?.appendLine(`[sqry] ${message}`);
+        void vscode.window.showWarningMessage(message, "View Logs").then((selection) => {
+          if (selection === "View Logs") {
+            outputChannel?.show(true);
+          }
+        });
         return;
       }
-      try {
-        await refreshWorkspaceStatus(activeClient);
+
+      const result = await refreshWorkspaceStatus(activeClient);
+      if (result.ok) {
         outputChannel?.appendLine("[sqry] Refreshed index stats for all workspace roots");
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        outputChannel?.appendLine(`[sqry] Failed to refresh stats: ${message}`);
-        void vscode.window.showWarningMessage(`sqry: Failed to refresh stats: ${message}`);
+        return;
       }
+
+      const message = result.error.message;
+      outputChannel?.appendLine(`[sqry] Failed to refresh stats: ${message}`);
+      void vscode.window.showWarningMessage(`sqry: Failed to refresh stats: ${message}`);
     }),
-    vscode.commands.registerCommand("sqry.editWorkspaceClassification", () =>
+    startupCommands.registerHandler("sqry.editWorkspaceClassification", () =>
       editWorkspaceClassification(),
     ),
-    vscode.commands.registerCommand("sqry.clearResults", () => {
+    startupCommands.registerHandler("sqry.clearResults", () => {
       if (searchPanel) {
         searchPanel.clearResults();
       }
     }),
-    vscode.commands.registerCommand("sqry.searchHistory", async () => {
+    startupCommands.registerHandler("sqry.searchHistory", async () => {
       const history = context.workspaceState.get<SearchHistoryEntry[]>(HISTORY_STATE_KEY, []);
       if (history.length === 0) {
         void vscode.window.showInformationMessage("No search history yet");
@@ -432,7 +511,7 @@ export async function activate(
 
       await runQuery(selected.value);
     }),
-    vscode.commands.registerCommand("sqry.scanWorkspace", async () => {
+    startupCommands.registerHandler("sqry.scanWorkspace", async () => {
       if (!diagnosticsProvider) {
         return;
       }
@@ -456,7 +535,7 @@ export async function activate(
         () => provider.scanWorkspace(selectedWorkspace),
       );
     }),
-    vscode.commands.registerCommand("sqry.restartLsp", async () => {
+    startupCommands.registerHandler("sqry.restartLsp", async () => {
       const activeClient = client;
       if (!activeClient) {
         return;
@@ -474,7 +553,7 @@ export async function activate(
         void vscode.window.showErrorMessage(`sqry: Failed to restart language server: ${message}`);
       }
     }),
-    vscode.commands.registerCommand("sqry.rebuildIndex", async () => {
+    startupCommands.registerHandler("sqry.rebuildIndex", async () => {
       const activeClient = client;
       if (!activeClient) {
         return;
@@ -515,7 +594,7 @@ export async function activate(
         await searchPanel.loadMore(itemType, nextOffset, language, rootPath);
       },
     ),
-    vscode.commands.registerCommand("sqry.showCallGraph", async () => {
+    startupCommands.registerHandler("sqry.showCallGraph", async () => {
       const activeClient = client;
       if (!activeClient) {
         return;
@@ -588,7 +667,7 @@ export async function activate(
         graphPanel.sendError(error instanceof Error ? error.message : String(error));
       }
     }),
-    vscode.commands.registerCommand("sqry.showDependencies", async () => {
+    startupCommands.registerHandler("sqry.showDependencies", async () => {
       const activeClient = client;
       if (!activeClient) {
         return;
@@ -625,7 +704,7 @@ export async function activate(
         graphPanel.sendError(error instanceof Error ? error.message : String(error));
       }
     }),
-    vscode.commands.registerCommand("sqry.filterResults", async () => {
+    startupCommands.registerHandler("sqry.filterResults", async () => {
       if (!searchPanel) {
         return;
       }
@@ -670,7 +749,7 @@ export async function activate(
         void vscode.window.showInformationMessage(`sqry: ${summary}`);
       }
     }),
-    vscode.commands.registerCommand("sqry.sortResults", async () => {
+    startupCommands.registerHandler("sqry.sortResults", async () => {
       if (!searchPanel) {
         return;
       }
@@ -691,7 +770,7 @@ export async function activate(
         searchPanel.setSortOrder(selected.value as Parameters<typeof searchPanel.setSortOrder>[0]);
       }
     }),
-    vscode.commands.registerCommand("sqry.exportResults", async () => {
+    startupCommands.registerHandler("sqry.exportResults", async () => {
       if (!searchPanel) {
         return;
       }
@@ -817,28 +896,35 @@ export async function activate(
   // Ready — the UI is gated on at least one successful round-trip so
   // the tree view never flips to "no index" because of a transient
   // post-LSP-start race.
-  if (client) {
-    await refreshWorkspaceStatus(client);
+  const activeClient = client;
+  const activeLoadingState = loadingState;
+  if (!activeClient || !activeLoadingState) {
+    const reason = "sqry language client is unavailable after initialization";
+    outputChannel?.appendLine(`[sqry] ${reason}`);
+    if (activeLoadingState && !activeLoadingState.isFailed()) {
+      activeLoadingState.transition("Failed", { reason, viewLogsAction: true });
+    }
+    disposeTerminalStartupClient();
+    return;
   }
 
-  // STEP_12 telemetry — emit ONE aggregate startup line that summarises
-  // the resolved logical workspace. The line goes to the existing
-  // `Sqry` outputChannel; format is the DAG-spec verbatim:
-  //   [sqry] Resolved workspace <id-short> with N source roots, M members, K exclusions
-  // Per the DAG, the short hex (16 chars) is for human eyes; the full
-  // hex digest is reachable through `sqry/workspaceStatus`'s
-  // `workspace_id_full` field for forensic identity comparisons.
-  if (client && outputChannel) {
-    await emitWorkspaceResolutionTelemetry(client, outputChannel);
+  const completedInitialWorkspaceResolution = await completeInitialWorkspaceResolution({
+    activeClient,
+    loadingState: activeLoadingState,
+    refreshWorkspaceStatus,
+    // STEP_12 telemetry — emit ONE aggregate startup line only after Ready.
+    // It is intentionally not awaited by the startup-resolution coordinator.
+    emitTelemetry: () => outputChannel
+      ? emitWorkspaceResolutionTelemetry(activeClient, outputChannel)
+      : Promise.resolve(),
+    // Auto-index runs only after Ready — by definition, the LSP has already
+    // told us which source roots are missing.
+    maybeAutoIndex,
+    log: (line) => outputChannel?.appendLine(line),
+  });
+  if (!completedInitialWorkspaceResolution) {
+    disposeTerminalStartupClient();
   }
-
-  if (loadingState && !loadingState.isFailed()) {
-    loadingState.transition("Ready");
-  }
-
-  // Auto-index runs only after Ready — by definition, the LSP has
-  // already told us which source roots are missing.
-  await maybeAutoIndex();
 }
 
 async function handleIndexCommand(): Promise<void> {
@@ -1170,9 +1256,15 @@ async function tryDownloadBinary(
   }
 }
 
-export function deactivate(): void {
-  client?.dispose();
+export async function deactivate(): Promise<void> {
+  const binding = readinessContextBinding;
+  readinessContextBinding = undefined;
+  const activeClient = client;
   client = undefined;
+  await deactivateStartupResources({
+    activeClient,
+    readinessContextBinding: binding,
+  });
 }
 
 /**
@@ -1586,7 +1678,9 @@ async function handleError(error: unknown): Promise<void> {
  * (`onDidChangeWorkspaceFolders`, `onDidChangeConfiguration("sqry")`,
  * `sqry.refreshStats`, post-rebuild) calls this exactly once.
  */
-async function refreshWorkspaceStatus(activeClient: SqryClient): Promise<void> {
+async function refreshWorkspaceStatus(
+  activeClient: SqryClient,
+): Promise<WorkspaceStatusRefreshResult> {
   try {
     const status = await activeClient.getWorkspaceStatus();
     searchPanel?.setWorkspaceStatus(status);
@@ -1602,10 +1696,12 @@ async function refreshWorkspaceStatus(activeClient: SqryClient): Promise<void> {
         outputChannel?.appendLine(`[sqry] Failed to hydrate index stats: ${message}`);
       }
     }
+    return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     outputChannel?.appendLine(`[sqry] Failed to refresh workspace status: ${message}`);
     statusBar?.update(null);
+    return { ok: false, error: new Error(message) };
   }
 }
 

@@ -144,6 +144,30 @@ check_version_in_file() {
     fi
 }
 
+# The MCP registry manifest is kept in two places that must stay byte-identical:
+# `.mcp/server.json` (the repo-root discovery copy that this script
+# version-syncs) and `sqry-mcp/server.json` (the copy
+# scripts/release/register-mcp-registry.sh actually publishes to the registry).
+# Publishing a stale/divergent copy is exactly how the live entry drifted to a
+# no-packages state, so treat any divergence as an error.
+MCP_SERVER_JSON_SRC=".mcp/server.json"
+MCP_SERVER_JSON_MIRROR="sqry-mcp/server.json"
+
+check_mcp_server_json_mirror() {
+    local label="mirror: ${MCP_SERVER_JSON_MIRROR}"
+    if [ ! -f "$MCP_SERVER_JSON_SRC" ] || [ ! -f "$MCP_SERVER_JSON_MIRROR" ]; then
+        printf "⚠️  %-50s a server.json copy is missing\n" "$label"
+        WARNINGS=$((WARNINGS + 1))
+        return
+    fi
+    if diff -q "$MCP_SERVER_JSON_SRC" "$MCP_SERVER_JSON_MIRROR" >/dev/null; then
+        printf "✅ %-50s in sync with %s\n" "$label" "$MCP_SERVER_JSON_SRC"
+    else
+        printf "❌ %-50s diverged from %s\n" "$label" "$MCP_SERVER_JSON_SRC"
+        ERRORS=$((ERRORS + 1))
+    fi
+}
+
 # Check package.json: both .version and .binaryVersion must match.
 check_package_json() {
     local file="$1"
@@ -445,6 +469,10 @@ for f in "${VERSION_DATE_FILES[@]}"; do
 done
 
 echo ""
+echo "--- MCP registry manifest mirror ---"
+check_mcp_server_json_mirror
+
+echo ""
 echo "--- JSON files ---"
 check_package_json "$VSCODE_JSON"
 
@@ -551,6 +579,16 @@ if $FIX_MODE && [ $ERRORS -gt 0 ]; then
             fi
         fi
     done
+
+    # Force the published registry manifest to mirror the version-synced source.
+    # Runs after the version-only fixes so .mcp/server.json is already at the
+    # workspace version before the copy.
+    if [ -f "$MCP_SERVER_JSON_SRC" ] && [ -f "$MCP_SERVER_JSON_MIRROR" ] \
+        && ! diff -q "$MCP_SERVER_JSON_SRC" "$MCP_SERVER_JSON_MIRROR" >/dev/null; then
+        cp "$MCP_SERVER_JSON_SRC" "$MCP_SERVER_JSON_MIRROR"
+        FIXED=$((FIXED + 1))
+        printf "🔧 %-50s mirrored from %s\n" "$MCP_SERVER_JSON_MIRROR" "$MCP_SERVER_JSON_SRC"
+    fi
 
     # Fix version+date files
     for f in "${VERSION_DATE_FILES[@]}"; do

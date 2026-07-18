@@ -10,7 +10,7 @@
 //! - `show_dependencies`: Uses `GraphSnapshot` for dependency tree traversal
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Instant;
 
 use anyhow::{Result, bail};
@@ -22,7 +22,7 @@ use sqry_core::graph::unified::node::NodeId;
 use sqry_core::graph::unified::node::kind::NodeKind;
 use url::Url;
 
-use crate::engine::{canonicalize_in_workspace_enforced, engine_for_workspace, get_graph_identity};
+use crate::engine::{canonicalize_in_workspace_enforced, get_graph_identity};
 use crate::tools::{ExportGraphArgs, ShowDependenciesArgs, SubgraphArgs};
 use sqry_core::visualization::unified::{
     D2Config, DotConfig, MermaidConfig, UnifiedD2Exporter, UnifiedDotExporter,
@@ -41,17 +41,6 @@ use crate::execution::utils::{duration_to_ms, paginate};
 /// Execute the `get_dependencies` tool to find symbol dependencies.
 ///
 /// Uses `CodeGraph` exclusively for dependency analysis.
-/// Resolve workspace path from args.path parameter.
-///
-/// If path is "." (default), returns None to trigger discovery.
-/// Otherwise returns Some(path) for explicit workspace resolution.
-fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
-    // Issue #394: resolve a subdirectory `path` to its owning workspace instead
-    // of failing as if it were a workspace root. Subtree scoping for list/scan
-    // tools is applied separately via `resolve_workspace_scope`.
-    crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
-}
-
 /// Execute the `show_dependencies` tool to walk a symbol's bidirectional
 /// dependency graph.
 ///
@@ -90,13 +79,10 @@ fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
 pub fn execute_get_dependencies(
     args: &ShowDependenciesArgs,
 ) -> Result<ToolExecution<DependencyGraphData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _base = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
+    let (ctx, _base) = crate::engine::acquire_workspace_context(&args.path)?;
     tracing::debug!(
         file_path = args.file_path.as_deref(),
         symbol = args.symbol_name.as_deref(),
@@ -104,16 +90,7 @@ pub fn execute_get_dependencies(
         max_results = args.max_results,
         "Executing get_dependencies tool"
     );
-
-    // Require the unified graph
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_get_dependencies(&ctx, args, start)
+    crate::daemon_adapter::execute_show_dependencies_for_daemon(&ctx, args, start)
 }
 
 /// Compute dependencies using the unified graph.
@@ -325,22 +302,11 @@ fn call_edge_metadata(edge_kind: &EdgeKind) -> Option<Value> {
 /// Returns an error if workspace resolution, graph acquisition, seed
 /// resolution, graph traversal, or export rendering fails.
 pub fn execute_export_graph(args: &ExportGraphArgs) -> Result<ToolExecution<DependencyGraphData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _base = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
-    // Require the unified graph
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_export_graph(&ctx, args, start)
+    let (ctx, _base) = crate::engine::acquire_workspace_context(&args.path)?;
+    crate::daemon_adapter::execute_export_graph_for_daemon(&ctx, args, start)
 }
 
 /// Collect seed nodes from a specific file.
@@ -823,22 +789,11 @@ fn build_archify_rendered(
 /// Returns an error if workspace resolution, graph acquisition, seed
 /// resolution, or subgraph materialization fails.
 pub fn execute_subgraph(args: &SubgraphArgs) -> Result<ToolExecution<DependencyGraphData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let workspace_path = resolve_workspace_path(&args.path)?;
-    let engine = engine_for_workspace(workspace_path.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-    let _base = canonicalize_in_workspace_enforced(&args.path, &workspace_root)?;
-
-    // Require the unified graph
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_subgraph(&ctx, args, start)
+    let (ctx, _base) = crate::engine::acquire_workspace_context(&args.path)?;
+    crate::daemon_adapter::execute_subgraph_for_daemon(&ctx, args, start)
 }
 
 fn compute_subgraph_data(

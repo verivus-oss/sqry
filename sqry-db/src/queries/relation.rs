@@ -61,6 +61,7 @@
 //! direction (the contract MCP tool consumers expect) while the planner
 //! cache contract is preserved.
 
+use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -69,6 +70,7 @@ use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::edge::kind::EdgeKind;
 #[cfg(test)]
 use sqry_core::graph::unified::edge::kind::ResolvedVia;
+use sqry_core::graph::unified::edge::store::StoreEdgeRef;
 use sqry_core::graph::unified::node::id::NodeId;
 use sqry_core::graph::unified::storage::arena::NodeEntry;
 use sqry_core::query::executor::graph_eval::{
@@ -229,21 +231,125 @@ pub fn compute_relation_source_set(
     let (direction, role) = traversal_for(relation);
     let mut results: Vec<NodeId> = Vec::new();
 
+    // Pass 1 (O(N), no edge access). Three jobs, none of which touch the edge
+    // store:
+    //   1. Build an index -> live `NodeId` table. `all_live_forward_edges`
+    //      synthesizes CSR edge sources at generation 0 (see
+    //      `EdgeStore::all_live_forward_edges`), so both endpoints of every
+    //      scanned edge are re-resolved to their live id through this table
+    //      before use.
+    //   2. Record the exact same per-node file-dep set as the legacy per-node
+    //      scan, so Tier-1 cache invalidation is byte-identical.
+    //   3. Handle the `Imports` node fast-path (an `Import` node whose own name
+    //      matches, with no edges), mirroring `node_has_matching_endpoint`.
+    let mut idx_to_id: HashMap<u32, NodeId> = HashMap::with_capacity(snapshot.nodes().len());
     for (node_id, entry) in snapshot.nodes().iter() {
+        idx_to_id.insert(node_id.index(), node_id);
         record_file_dep(entry.file);
-        // Gate 0d iter-2 fix: skip unified losers from relation
-        // query results. See `NodeEntry::is_unified_loser`.
+        // Gate 0d iter-2 fix: skip unified losers from relation query results.
         if entry.is_unified_loser() {
             continue;
         }
-        if node_has_matching_endpoint(snapshot, node_id, relation, direction, role, &matcher) {
+        if relation == RelationKind::Imports
+            && entry.kind == sqry_core::graph::unified::node::NodeKind::Import
+            && match_endpoint_name(snapshot, entry, &matcher)
+        {
             results.push(node_id);
+        }
+    }
+
+    // Pass 2 (O(|csr| + |delta|)). One global scan over the forward edge store,
+    // transposed to the per-node predicate. This replaces the legacy
+    // per-node `neighbours()` -> `edges_from`/`edges_to`, each of which
+    // rebuilds a per-source delta LWW map by rescanning the whole delta,
+    // making the node loop O(N x |delta|) (issue #626). Transposing to a
+    // single `all_live_forward_edges` pass is O(|csr| + |delta|).
+    //
+    // Endpoint selection mirrors `node_has_matching_endpoint` exactly:
+    //   Forward/Target -> (result = edge source, endpoint = edge target)
+    //   Reverse/Source -> (result = edge target, endpoint = edge source)
+    //   Both/Either    -> both of the above (the `Exports` dual emit); the
+    //                     `Either` role additionally skips self-endpoints.
+    let consider =
+        |result_id: NodeId, endpoint_id: NodeId, edge: &StoreEdgeRef| -> Option<NodeId> {
+            if role == EndpointRole::Either && result_id == endpoint_id {
+                return None;
+            }
+            let result_entry = snapshot.nodes().get(result_id)?;
+            if result_entry.is_unified_loser() {
+                return None;
+            }
+            let endpoint_entry = snapshot.nodes().get(endpoint_id)?;
+            relation_endpoint_hit(snapshot, relation, endpoint_entry, edge, &matcher)
+                .then_some(result_id)
+        };
+
+    for edge in snapshot.edges().all_live_forward_edges() {
+        if !edge_kind_matches(relation, &edge.kind) {
+            continue;
+        }
+        let (Some(src), Some(tgt)) = (
+            idx_to_id.get(&edge.source.index()).copied(),
+            idx_to_id.get(&edge.target.index()).copied(),
+        ) else {
+            continue;
+        };
+        match (direction, role) {
+            (Direction::Forward, EndpointRole::Target) => {
+                if let Some(r) = consider(src, tgt, &edge) {
+                    results.push(r);
+                }
+            }
+            (Direction::Reverse, EndpointRole::Source) => {
+                if let Some(r) = consider(tgt, src, &edge) {
+                    results.push(r);
+                }
+            }
+            (Direction::Both, EndpointRole::Either) => {
+                if let Some(r) = consider(src, tgt, &edge) {
+                    results.push(r);
+                }
+                if let Some(r) = consider(tgt, src, &edge) {
+                    results.push(r);
+                }
+            }
+            // `traversal_for` produces no other (direction, role) pair.
+            _ => {}
         }
     }
 
     results.sort_unstable_by_key(|id| (id.index(), id.generation()));
     results.dedup();
     Arc::new(results)
+}
+
+/// Whether `endpoint_entry` (and, for `Imports`, the `edge` itself) satisfies
+/// the relation's name predicate. Factored out of the legacy per-node
+/// `node_has_matching_endpoint` so the single-pass edge scan applies the
+/// identical matching rules: exact/segment name match, the `Callers`/`Callees`
+/// dynamic-language trailing-method-segment fallback, and the `Imports`
+/// alias/wildcard branch.
+fn relation_endpoint_hit(
+    snapshot: &GraphSnapshot,
+    relation: RelationKind,
+    endpoint_entry: &NodeEntry,
+    edge: &StoreEdgeRef,
+    matcher: &KeyMatcher,
+) -> bool {
+    if match_endpoint_name(snapshot, endpoint_entry, matcher) {
+        return true;
+    }
+    if matches!(relation, RelationKind::Callers | RelationKind::Callees)
+        && method_segment_matches(snapshot, endpoint_entry, matcher)
+    {
+        return true;
+    }
+    if relation == RelationKind::Imports
+        && imports_alias_or_wildcard_matches(snapshot, edge, matcher)
+    {
+        return true;
+    }
+    false
 }
 
 /// Tests whether a single node matches the relation predicate against a
@@ -289,9 +395,37 @@ pub fn relation_matches_node_via_set<S: std::hash::BuildHasher>(
 }
 
 // ============================================================================
-// Per-node probing
+// Per-node probing (legacy O(N x |delta|) path).
+//
+// Retained only as the parity oracle for `relation_source_set_parity_*` tests:
+// the production `compute_relation_source_set` now uses the single-pass edge
+// scan (issue #626). Kept behind `#[cfg(test)]` so the two implementations can
+// be asserted equivalent on fixtures with mixed CSR + delta edges.
 // ============================================================================
 
+#[cfg(test)]
+fn compute_relation_source_set_reference(
+    relation: RelationKind,
+    key: &RelationKey,
+    snapshot: &GraphSnapshot,
+) -> Arc<Vec<NodeId>> {
+    let matcher = KeyMatcher::build(key);
+    let (direction, role) = traversal_for(relation);
+    let mut results: Vec<NodeId> = Vec::new();
+    for (node_id, entry) in snapshot.nodes().iter() {
+        if entry.is_unified_loser() {
+            continue;
+        }
+        if node_has_matching_endpoint(snapshot, node_id, relation, direction, role, &matcher) {
+            results.push(node_id);
+        }
+    }
+    results.sort_unstable_by_key(|id| (id.index(), id.generation()));
+    results.dedup();
+    Arc::new(results)
+}
+
+#[cfg(test)]
 fn node_has_matching_endpoint(
     snapshot: &GraphSnapshot,
     node_id: NodeId,
@@ -634,6 +768,243 @@ mod tests {
         db.register::<ReferencesQuery>();
         db.register::<ImplementsQuery>();
         db
+    }
+
+    fn alloc_named(graph: &mut CodeGraph, name: &str, kind: NodeKind, file: &Path) -> NodeId {
+        let name_id = graph.strings_mut().intern(name).unwrap();
+        let file_id = graph.files_mut().register(file).unwrap();
+        graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(kind, name_id, file_id).with_qualified_name(name_id))
+            .unwrap()
+    }
+
+    /// Issue #626: the single-pass edge-scan `compute_relation_source_set` must
+    /// return EXACTLY what the legacy per-node scan
+    /// (`compute_relation_source_set_reference`) returns, across every relation
+    /// kind and key shape, on a graph exercising the tricky branches: the
+    /// `Callers`/`Callees` dynamic-language method-segment fallback, `Imports`
+    /// alias + wildcard, an `Import`-node fast-path, `Exports` (Both/Either)
+    /// with a self-loop, a unified-loser node used as both caller and callee,
+    /// and mixed edge kinds. This is the correctness gate for the transpose.
+    #[test]
+    fn relation_source_set_parity_new_vs_legacy() {
+        use sqry_core::graph::unified::string::id::StringId;
+
+        let mut graph = CodeGraph::new();
+        let path = Path::new("lib.rs");
+        let file_id = graph.files_mut().register(path).unwrap();
+
+        // Methods sharing the trailing segment `bar` (segment fallback).
+        let foo_bar = alloc_named(&mut graph, "Foo::bar", NodeKind::Method, path);
+        let baz_bar = alloc_named(&mut graph, "Baz::bar", NodeKind::Method, path);
+        let main_fn = alloc_named(&mut graph, "main", NodeKind::Function, path);
+        let helper = alloc_named(&mut graph, "helper", NodeKind::Function, path);
+        let selfrec = alloc_named(&mut graph, "selfrec", NodeKind::Function, path);
+
+        add_calls_edge(&mut graph, main_fn, helper);
+        add_calls_edge(&mut graph, main_fn, foo_bar);
+        add_calls_edge(&mut graph, baz_bar, helper);
+        add_calls_edge(&mut graph, helper, baz_bar);
+        add_calls_edge(&mut graph, selfrec, selfrec); // self-loop
+
+        // Unified-loser node (name == INVALID), as both caller and callee.
+        let loser = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(
+                NodeKind::Function,
+                StringId::INVALID,
+                file_id,
+            ))
+            .unwrap();
+        add_calls_edge(&mut graph, loser, helper);
+        add_calls_edge(&mut graph, main_fn, loser);
+
+        // Imports: exact + aliased + wildcard + an Import-kind fast-path node.
+        let importer = alloc_named(&mut graph, "importer", NodeKind::Function, path);
+        let serde = alloc_named(&mut graph, "serde", NodeKind::Module, path);
+        let alias_id = graph.strings_mut().intern("s").unwrap();
+        graph.edges_mut().add_edge(
+            importer,
+            serde,
+            EdgeKind::Imports {
+                alias: Some(alias_id),
+                is_wildcard: false,
+            },
+            file_id,
+        );
+        let wild_importer = alloc_named(&mut graph, "wild", NodeKind::Function, path);
+        let lodash = alloc_named(&mut graph, "lodash", NodeKind::Module, path);
+        graph.edges_mut().add_edge(
+            wild_importer,
+            lodash,
+            EdgeKind::Imports {
+                alias: None,
+                is_wildcard: true,
+            },
+            file_id,
+        );
+        let _react = alloc_named(&mut graph, "react", NodeKind::Import, path); // fast-path
+
+        // Exports (Both/Either).
+        let mod_a = alloc_named(&mut graph, "mod_a", NodeKind::Module, path);
+        let thing = alloc_named(&mut graph, "thing", NodeKind::Function, path);
+        let ex_alias = graph.strings_mut().intern("thing_alias").unwrap();
+        graph.edges_mut().add_edge(
+            mod_a,
+            thing,
+            EdgeKind::Exports {
+                kind: ExportKind::Direct,
+                alias: Some(ex_alias),
+            },
+            file_id,
+        );
+        // Exports self-edge: exercises the `Both`/`Either` self-endpoint skip.
+        graph.edges_mut().add_edge(
+            mod_a,
+            mod_a,
+            EdgeKind::Exports {
+                kind: ExportKind::Direct,
+                alias: None,
+            },
+            file_id,
+        );
+
+        // References via a plain References edge.
+        let c_caller = alloc_named(&mut graph, "c_caller", NodeKind::Function, path);
+        let native = alloc_named(&mut graph, "native_fn", NodeKind::Function, path);
+        graph
+            .edges_mut()
+            .add_edge(c_caller, native, EdgeKind::References, file_id);
+
+        let snapshot = Arc::new(graph.snapshot());
+
+        let relations = [
+            RelationKind::Callers,
+            RelationKind::Callees,
+            RelationKind::Imports,
+            RelationKind::Exports,
+            RelationKind::References,
+            RelationKind::Implements,
+        ];
+        let keys = [
+            "helper",
+            "main",
+            "Foo::bar",
+            "Baz::bar",
+            "bar",
+            "selfrec",
+            "serde",
+            "s",
+            "lodash",
+            "react",
+            "thing",
+            "thing_alias",
+            "native_fn",
+            "importer",
+            "mod_a",
+            "*", // exercises the Imports wildcard branch
+            "nonexistent",
+        ];
+        for rel in relations {
+            for k in keys {
+                let key = RelationKey::exact(k);
+                let new = compute_relation_source_set(rel, &key, &snapshot);
+                let old = compute_relation_source_set_reference(rel, &key, &snapshot);
+                assert_eq!(
+                    new.as_ref(),
+                    old.as_ref(),
+                    "parity mismatch for relation {rel:?} key {k:?}"
+                );
+            }
+            let rkey = RelationKey::regex(".*bar");
+            assert_eq!(
+                compute_relation_source_set(rel, &rkey, &snapshot).as_ref(),
+                compute_relation_source_set_reference(rel, &rkey, &snapshot).as_ref(),
+                "parity mismatch for relation {rel:?} regex key",
+            );
+        }
+    }
+
+    /// Issue #626: parity across a persist + reload round-trip plus a post-load
+    /// delta edge. The reloaded graph is what the daemon holds (edges live in
+    /// the delta, which is precisely the state that made the legacy per-node
+    /// scan O(N x |delta|)), so this exercises the single-pass scan on a graph
+    /// built through the real serialization path and asserts it still matches
+    /// the legacy per-node oracle. (The gen-0 CSR-source branch of
+    /// `all_live_forward_edges` only fires for CSR-compacted stores, which the
+    /// loader does not produce; that branch is covered by the edge store's own
+    /// `all_live_forward_edges` tests, and the `idx_to_id` resolution in the
+    /// scan handles it defensively regardless.)
+    #[test]
+    fn relation_source_set_parity_reload_roundtrip() {
+        use sqry_core::graph::unified::persistence::snapshot::{load_from_path, save_to_path};
+
+        let mut graph = CodeGraph::new();
+        let path = Path::new("lib.rs");
+        // save_to_path validates that resolver-eligible nodes carry file
+        // language metadata, so set it before persisting.
+        let lib_file = graph.files_mut().register(path).unwrap();
+        graph
+            .files_mut()
+            .set_language(lib_file, sqry_core::graph::node::Language::Rust);
+        let a = alloc_named(&mut graph, "alpha", NodeKind::Function, path);
+        let b = alloc_named(&mut graph, "beta", NodeKind::Function, path);
+        let c = alloc_named(&mut graph, "Recv::method", NodeKind::Method, path);
+        add_calls_edge(&mut graph, a, b);
+        add_calls_edge(&mut graph, a, c);
+        add_calls_edge(&mut graph, b, c);
+        let imp = alloc_named(&mut graph, "importer", NodeKind::Function, path);
+        let m = alloc_named(&mut graph, "serde", NodeKind::Module, path);
+        let imp_file = graph.nodes().get(imp).unwrap().file;
+        graph.edges_mut().add_edge(
+            imp,
+            m,
+            EdgeKind::Imports {
+                alias: None,
+                is_wildcard: false,
+            },
+            imp_file,
+        );
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("snapshot.sqry");
+        save_to_path(&graph, &file).unwrap();
+        let mut reloaded = load_from_path(&file, None).unwrap();
+
+        // Post-load delta edge, so the reloaded (delta-backed) graph carries a
+        // fresh edge on top, matching how the daemon accretes edits.
+        let extra = Path::new("extra.rs");
+        let d = alloc_named(&mut reloaded, "delta_caller", NodeKind::Function, extra);
+        let e = alloc_named(&mut reloaded, "beta", NodeKind::Function, extra);
+        add_calls_edge(&mut reloaded, d, e);
+
+        let snapshot = Arc::new(reloaded.snapshot());
+        let relations = [
+            RelationKind::Callers,
+            RelationKind::Callees,
+            RelationKind::Imports,
+            RelationKind::References,
+        ];
+        for rel in relations {
+            for k in [
+                "alpha",
+                "beta",
+                "Recv::method",
+                "method",
+                "serde",
+                "importer",
+                "delta_caller",
+                "nonexistent",
+            ] {
+                let key = RelationKey::exact(k);
+                assert_eq!(
+                    compute_relation_source_set(rel, &key, &snapshot).as_ref(),
+                    compute_relation_source_set_reference(rel, &key, &snapshot).as_ref(),
+                    "csr-backed parity mismatch for relation {rel:?} key {k:?}"
+                );
+            }
+        }
     }
 
     #[test]

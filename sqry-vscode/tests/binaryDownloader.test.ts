@@ -2,6 +2,8 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { EventEmitter } from "node:events";
+import { PassThrough, Writable } from "node:stream";
 import { expect } from "chai";
 import proxyquireModule from "proxyquire";
 
@@ -39,6 +41,153 @@ function loadModule(overrides: Record<string, unknown> = {}) {
   });
 }
 
+class TestCancellationToken {
+  public isCancellationRequested = false;
+  public subscriptions = 0;
+  public disposals = 0;
+  private readonly listeners = new Set<() => void>();
+
+  onCancellationRequested(listener: () => void): { dispose(): void } {
+    this.subscriptions += 1;
+    this.listeners.add(listener);
+    return {
+      dispose: () => {
+        if (this.listeners.delete(listener)) {
+          this.disposals += 1;
+        }
+      },
+    };
+  }
+
+  cancel(): void {
+    if (this.isCancellationRequested) {
+      return;
+    }
+    this.isCancellationRequested = true;
+    for (const listener of [...this.listeners]) {
+      listener();
+    }
+  }
+}
+
+class TestRequest extends EventEmitter {
+  public destroyCalls = 0;
+  public destroyed = false;
+
+  destroy(_error?: Error): this {
+    this.destroyCalls += 1;
+    this.destroyed = true;
+    return this;
+  }
+}
+
+class SynchronousWriteStream extends EventEmitter {
+  public closed = false;
+  public writable = true;
+  public readonly chunks: Buffer[] = [];
+
+  write(chunk: Buffer): boolean {
+    this.chunks.push(Buffer.from(chunk));
+    return true;
+  }
+
+  end(chunk?: Buffer): this {
+    if (chunk) {
+      this.write(chunk);
+    }
+    this.emit("finish");
+    return this;
+  }
+
+  destroy(): this {
+    this.closed = true;
+    this.emit("close");
+    return this;
+  }
+}
+
+type TestResponse = PassThrough & {
+  statusCode?: number;
+  headers: Record<string, string | undefined>;
+  resumeCalls: number;
+  destroyCalls: number;
+};
+
+function makeResponse(
+  statusCode: number,
+  headers: Record<string, string | undefined> = {},
+  autoDestroy = true,
+): TestResponse {
+  const response = new PassThrough({ autoDestroy }) as TestResponse;
+  response.statusCode = statusCode;
+  response.headers = headers;
+  response.resumeCalls = 0;
+  response.destroyCalls = 0;
+  const resume = response.resume.bind(response);
+  response.resume = () => {
+    response.resumeCalls += 1;
+    return resume();
+  };
+  const destroy = response.destroy.bind(response);
+  response.destroy = ((error?: Error) => {
+    response.destroyCalls += 1;
+    return destroy(error);
+  }) as typeof response.destroy;
+  return response;
+}
+
+type DownloadScript = (
+  callback: (response: TestResponse) => void,
+  request: TestRequest,
+) => void;
+
+function loadDownloadHarness(scripts: DownloadScript[], overrides: Record<string, unknown> = {}) {
+  const requests: TestRequest[] = [];
+  const mod = loadModule({
+    "node:https": {
+      get: (_options: unknown, callback: (response: TestResponse) => void) => {
+        const script = scripts.shift();
+        if (!script) {
+          throw new Error("unexpected HTTPS request");
+        }
+        const request = new TestRequest();
+        requests.push(request);
+        script(callback, request);
+        return request;
+      },
+    },
+    ...overrides,
+  });
+  return { mod, requests };
+}
+
+async function rejectWithin(promise: Promise<unknown>, timeoutMs = 250): Promise<Error> {
+  return new Promise<Error>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`expected rejection within ${timeoutMs}ms`));
+    }, timeoutMs);
+    void promise.then(
+      () => {
+        clearTimeout(timeout);
+        reject(new Error("expected promise to reject"));
+      },
+      (error: unknown) => {
+        clearTimeout(timeout);
+        resolve(error instanceof Error ? error : new Error(String(error)));
+      },
+    );
+  });
+}
+
+function temporaryDestination(): { dir: string; destPath: string } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sqry-download-liveness-"));
+  return { dir, destPath: path.join(dir, "download.tmp") };
+}
+
+function removeTemporaryDirectory(dir: string): void {
+  fs.rmSync(dir, { recursive: true, force: true });
+}
+
 function createAttestationBundle(subjects: unknown[]) {
   const payload = Buffer.from(JSON.stringify({ subject: subjects }), "utf-8").toString("base64");
   return {
@@ -64,6 +213,501 @@ function createOutputChannel() {
 }
 
 describe("binaryDownloader", () => {
+  describe("downloadWithProgress lifecycle", () => {
+    const testTimeouts = { responseTimeoutMs: 25, idleTimeoutMs: 25 };
+
+    it("settles and aborts when final response headers never arrive", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const token = new TestCancellationToken();
+        const { mod, requests } = loadDownloadHarness([() => undefined]);
+
+        const error = await rejectWithin(
+          mod.downloadWithProgress(
+            "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+            destPath,
+            undefined,
+            token as unknown as import("vscode").CancellationToken,
+            5,
+            testTimeouts,
+          ),
+        );
+
+        expect(error).to.be.instanceOf(mod.DownloadTimeoutError);
+        expect(requests).to.have.length(1);
+        expect(requests[0].destroyCalls).to.equal(1);
+        expect(token.subscriptions).to.equal(1);
+        expect(token.disposals).to.equal(1);
+        expect(fs.existsSync(destPath)).to.equal(false);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("registers cancellation before HTTPS returns a request", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const token = new TestCancellationToken();
+        const { mod, requests } = loadDownloadHarness([
+          () => token.cancel(),
+        ]);
+
+        const error = await rejectWithin(
+          mod.downloadWithProgress(
+            "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+            destPath,
+            undefined,
+            token as unknown as import("vscode").CancellationToken,
+            5,
+            testTimeouts,
+          ),
+        );
+
+        expect(error).to.be.instanceOf(mod.DownloadCancelledError);
+        expect(requests).to.have.length(1);
+        expect(requests[0].destroyCalls).to.equal(1);
+        expect(token.disposals).to.equal(1);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("settles an idle body, closes its stream, and removes the partial output", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const token = new TestCancellationToken();
+        const response = makeResponse(200, { "content-length": "10" });
+        const { mod, requests } = loadDownloadHarness([
+          (callback) => {
+            callback(response);
+            setTimeout(() => response.write(Buffer.from("partial")), 2);
+          },
+        ]);
+
+        const error = await rejectWithin(
+          mod.downloadWithProgress(
+            "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+            destPath,
+            undefined,
+            token as unknown as import("vscode").CancellationToken,
+            5,
+            testTimeouts,
+          ),
+        );
+
+        expect(error).to.be.instanceOf(mod.DownloadTimeoutError);
+        expect(requests[0].destroyCalls).to.equal(1);
+        expect(response.destroyed).to.equal(true);
+        expect(fs.existsSync(destPath)).to.equal(false);
+        expect(token.disposals).to.equal(1);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("allows slow active progress without imposing a whole-download deadline", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const token = new TestCancellationToken();
+        const response = makeResponse(200, { "content-length": "3" });
+        const progress: number[] = [];
+        const { mod } = loadDownloadHarness([
+          (callback) => {
+            callback(response);
+            setTimeout(() => response.write(Buffer.from("a")), 2);
+            setTimeout(() => response.write(Buffer.from("b")), 12);
+            setTimeout(() => response.end(Buffer.from("c")), 22);
+          },
+        ]);
+
+        await mod.downloadWithProgress(
+          "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+          destPath,
+          (downloaded: number) => progress.push(downloaded),
+          token as unknown as import("vscode").CancellationToken,
+          5,
+          { responseTimeoutMs: 25, idleTimeoutMs: 15 },
+        );
+
+        expect(fs.readFileSync(destPath, "utf8")).to.equal("abc");
+        expect(progress).to.deep.equal([1, 2, 3]);
+        expect(token.disposals).to.equal(1);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("owns and aborts every redirect hop when the response-chain deadline expires", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const token = new TestCancellationToken();
+        const redirect = makeResponse(302, { location: "https://github.com/redirected" });
+        const { mod, requests } = loadDownloadHarness([
+          (callback) => callback(redirect),
+          () => undefined,
+        ]);
+
+        const error = await rejectWithin(
+          mod.downloadWithProgress(
+            "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+            destPath,
+            undefined,
+            token as unknown as import("vscode").CancellationToken,
+            5,
+            testTimeouts,
+          ),
+        );
+
+        expect(error).to.be.instanceOf(mod.DownloadTimeoutError);
+        expect(redirect.resumeCalls).to.equal(1);
+        expect(requests).to.have.length(2);
+        expect(requests[0].destroyCalls).to.equal(1);
+        expect(requests[1].destroyCalls).to.equal(1);
+        expect(redirect.destroyed).to.equal(true);
+        expect(token.subscriptions).to.equal(1);
+        expect(token.disposals).to.equal(1);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("cancels the active redirect child without starting another attempt", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const token = new TestCancellationToken();
+        const redirect = makeResponse(302, { location: "https://github.com/redirected" });
+        const { mod, requests } = loadDownloadHarness([
+          (callback) => callback(redirect),
+          () => undefined,
+        ]);
+        const pending = mod.downloadWithProgress(
+          "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+          destPath,
+          undefined,
+          token as unknown as import("vscode").CancellationToken,
+          5,
+          { responseTimeoutMs: 100, idleTimeoutMs: 25 },
+        );
+        setTimeout(() => token.cancel(), 5);
+
+        const error = await rejectWithin(pending);
+
+        expect(error).to.be.instanceOf(mod.DownloadCancelledError);
+        expect(requests).to.have.length(2);
+        expect(requests[0].destroyCalls).to.equal(1);
+        expect(requests[1].destroyCalls).to.equal(1);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("closes a lingering redirect parent when the redirected child succeeds", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const token = new TestCancellationToken();
+        const redirect = makeResponse(302, { location: "https://github.com/redirected" });
+        const child = makeResponse(200, { "content-length": "2" });
+        const { mod, requests } = loadDownloadHarness([
+          (callback) => callback(redirect),
+          (callback) => {
+            callback(child);
+            setTimeout(() => child.end(Buffer.from("ok")), 2);
+          },
+        ]);
+
+        await mod.downloadWithProgress(
+          "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+          destPath,
+          undefined,
+          token as unknown as import("vscode").CancellationToken,
+          5,
+          { responseTimeoutMs: 100, idleTimeoutMs: 25 },
+        );
+
+        expect(fs.readFileSync(destPath, "utf8")).to.equal("ok");
+        expect(requests).to.have.length(2);
+        expect(redirect.resumeCalls).to.equal(1);
+        expect(redirect.destroyed).to.equal(true);
+        expect(redirect.destroyCalls).to.equal(1);
+        expect(requests[0].destroyCalls).to.equal(1);
+        expect(requests[1].destroyCalls).to.equal(0);
+        expect(token.disposals).to.equal(1);
+        expect(() => redirect.emit("error", new Error("late redirect parent error"))).to.not.throw();
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("preserves the completed child when synchronous transport callbacks finish before parent return", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const redirect = makeResponse(302, { location: "https://github.com/redirected" });
+        const child = makeResponse(200, { "content-length": "2" }, false);
+        const synchronousStream = new SynchronousWriteStream();
+        const { mod, requests } = loadDownloadHarness(
+          [
+            (callback) => callback(redirect),
+            (callback) => {
+              callback(child);
+              child.end(Buffer.from("ok"));
+            },
+          ],
+          {
+            "node:fs": {
+              createWriteStream: () => synchronousStream as unknown as fs.WriteStream,
+            },
+          },
+        );
+
+        await mod.downloadWithProgress(
+          "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+          destPath,
+          undefined,
+          undefined,
+          5,
+          { responseTimeoutMs: 100, idleTimeoutMs: 25 },
+        );
+
+        expect(Buffer.concat(synchronousStream.chunks).toString("utf8")).to.equal("ok");
+        expect(requests).to.have.length(2);
+        expect(redirect.destroyCalls).to.equal(1);
+        expect(requests[0].destroyCalls).to.equal(1);
+        expect(child.destroyCalls).to.equal(0);
+        expect(requests[1].destroyCalls).to.equal(0);
+        child.destroy();
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("absorbs a late redirect-parent response error and closes every live hop", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const redirect = makeResponse(302, { location: "https://github.com/redirected" });
+        const { mod, requests } = loadDownloadHarness([
+          (callback) => callback(redirect),
+          () => undefined,
+        ]);
+        const pending = mod.downloadWithProgress(
+          "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+          destPath,
+          undefined,
+          undefined,
+          5,
+          { responseTimeoutMs: 100, idleTimeoutMs: 25 },
+        );
+
+        expect(requests).to.have.length(2);
+        expect(() => redirect.emit("error", new Error("redirect parent failed"))).to.not.throw();
+        const error = await rejectWithin(pending);
+
+        expect(error.message).to.include("redirect parent failed");
+        expect(requests[0].destroyCalls).to.equal(1);
+        expect(requests[1].destroyCalls).to.equal(1);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("absorbs late transport errors after the terminal timeout", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const { mod, requests } = loadDownloadHarness([() => undefined]);
+        const pending = mod.downloadWithProgress(
+          "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+          destPath,
+          undefined,
+          undefined,
+          5,
+          testTimeouts,
+        );
+
+        await rejectWithin(pending);
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => unhandled.push(reason);
+        process.on("unhandledRejection", onUnhandled);
+        try {
+          requests[0].emit("error", new Error("late request error"));
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        } finally {
+          process.off("unhandledRejection", onUnhandled);
+        }
+
+        expect(unhandled).to.deep.equal([]);
+        expect(requests[0].destroyCalls).to.equal(1);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("removes a partial output only after its write stream emits close", async () => {
+      const response = makeResponse(200, { "content-length": "10" });
+      const delayedStream = new Writable({
+        write(_chunk, _encoding, callback) {
+          callback();
+        },
+      });
+      let closed = false;
+      Object.defineProperty(delayedStream, "closed", {
+        configurable: true,
+        get: () => closed,
+      });
+      delayedStream.destroy = ((_error?: Error) => {
+        setTimeout(() => {
+          closed = true;
+          delayedStream.emit("close");
+        }, 5);
+        return delayedStream;
+      }) as typeof delayedStream.destroy;
+      let unlinkCalls = 0;
+      const { mod } = loadDownloadHarness(
+        [
+          (callback) => {
+            callback(response);
+            setTimeout(() => response.write(Buffer.from("partial")), 2);
+          },
+        ],
+        {
+          "node:fs": {
+            createWriteStream: () => delayedStream,
+            existsSync: () => true,
+            unlinkSync: () => {
+              expect(closed).to.equal(true);
+              unlinkCalls += 1;
+            },
+          },
+        },
+      );
+
+      await rejectWithin(
+        mod.downloadWithProgress(
+          "https://github.com/verivus-oss/sqry/releases/download/v29.0.3/SHA256SUMS.txt",
+          "/virtual/partial.tmp",
+          undefined,
+          undefined,
+          5,
+          testTimeouts,
+        ),
+      );
+
+      expect(unlinkCalls).to.equal(1);
+    });
+
+    it("retains HTTPS, host-allowlist, redirect, and redirect-limit protections", async () => {
+      const { dir, destPath } = temporaryDestination();
+      try {
+        const directHarness = loadDownloadHarness([]);
+        const nonHttps = await rejectWithin(
+          directHarness.mod.downloadWithProgress("http://github.com/asset", destPath),
+        );
+        expect(nonHttps.message).to.include("non-HTTPS");
+        expect(directHarness.requests).to.have.length(0);
+
+        const disallowed = await rejectWithin(
+          directHarness.mod.downloadWithProgress("https://example.com/asset", destPath),
+        );
+        expect(disallowed.message).to.include("allowlist");
+        expect(directHarness.requests).to.have.length(0);
+
+        const insecureRedirect = makeResponse(302, { location: "http://example.com/asset" });
+        const redirectHarness = loadDownloadHarness([
+          (callback) => callback(insecureRedirect),
+        ]);
+        const redirectError = await rejectWithin(
+          redirectHarness.mod.downloadWithProgress(
+            "https://github.com/asset",
+            destPath,
+            undefined,
+            undefined,
+            5,
+            testTimeouts,
+          ),
+        );
+        expect(redirectError.message).to.include("non-HTTPS");
+        expect(insecureRedirect.resumeCalls).to.equal(1);
+
+        const limitedRedirect = makeResponse(302, { location: "https://github.com/next" });
+        const limitHarness = loadDownloadHarness([
+          (callback) => callback(limitedRedirect),
+        ]);
+        const limitError = await rejectWithin(
+          limitHarness.mod.downloadWithProgress(
+            "https://github.com/asset",
+            destPath,
+            undefined,
+            undefined,
+            0,
+            testTimeouts,
+          ),
+        );
+        expect(limitError.message).to.include("Too many redirects");
+        expect(limitedRedirect.resumeCalls).to.equal(1);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("stops checksum candidate fallback immediately when the user cancels", async () => {
+      const { dir } = temporaryDestination();
+      try {
+        const token = new TestCancellationToken();
+        const { mod, requests } = loadDownloadHarness([
+          () => token.cancel(),
+        ]);
+        const output = createOutputChannel().channel;
+        const context = {
+          globalStorageUri: { fsPath: dir },
+          extensionMode: vscodeStub.ExtensionMode.Production,
+        } as unknown as import("vscode").ExtensionContext;
+
+        const error = await rejectWithin(
+          mod.downloadBinary(
+            context,
+            output as unknown as import("vscode").OutputChannel,
+            token as unknown as import("vscode").CancellationToken,
+          ),
+        );
+
+        expect(error).to.be.instanceOf(mod.DownloadCancelledError);
+        expect(requests).to.have.length(1);
+        expect(fs.existsSync(path.join(dir, "download.lock"))).to.equal(false);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+
+    it("retains 404 fallback but stops the next candidate when it is cancelled", async () => {
+      const { dir } = temporaryDestination();
+      try {
+        const token = new TestCancellationToken();
+        const missing = makeResponse(404);
+        const { mod, requests } = loadDownloadHarness([
+          (callback) => callback(missing),
+          () => token.cancel(),
+        ]);
+        const output = createOutputChannel().channel;
+        const context = {
+          globalStorageUri: { fsPath: dir },
+          extensionMode: vscodeStub.ExtensionMode.Production,
+        } as unknown as import("vscode").ExtensionContext;
+
+        const error = await rejectWithin(
+          mod.downloadBinary(
+            context,
+            output as unknown as import("vscode").OutputChannel,
+            token as unknown as import("vscode").CancellationToken,
+          ),
+        );
+
+        expect(error).to.be.instanceOf(mod.DownloadCancelledError);
+        expect(requests).to.have.length(2);
+        expect(fs.existsSync(path.join(dir, "download.lock"))).to.equal(false);
+      } finally {
+        removeTemporaryDirectory(dir);
+      }
+    });
+  });
+
   describe("release asset selection", () => {
     it("prefers current checksum manifest name with legacy fallback", () => {
       const mod = loadModule();

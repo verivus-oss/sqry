@@ -21,15 +21,42 @@ interface RecordedToken {
 }
 
 class FakeCancellationTokenSource {
-  public token: { isCancellationRequested: boolean };
+  public token: {
+    isCancellationRequested: boolean;
+    onCancellationRequested(listener: () => void): { dispose(): void };
+  };
   public _disposed = false;
+  public cancelCalls = 0;
+  public disposeCalls = 0;
+  public cancellationListenerDisposals = 0;
+  private readonly cancellationListeners = new Set<() => void>();
   constructor() {
-    this.token = { isCancellationRequested: false };
+    this.token = {
+      isCancellationRequested: false,
+      onCancellationRequested: (listener) => {
+        this.cancellationListeners.add(listener);
+        return {
+          dispose: () => {
+            if (this.cancellationListeners.delete(listener)) {
+              this.cancellationListenerDisposals += 1;
+            }
+          },
+        };
+      },
+    };
   }
   cancel(): void {
+    this.cancelCalls += 1;
+    if (this.token.isCancellationRequested) {
+      return;
+    }
     this.token.isCancellationRequested = true;
+    for (const listener of [...this.cancellationListeners]) {
+      listener();
+    }
   }
   dispose(): void {
+    this.disposeCalls += 1;
     this._disposed = true;
   }
 }
@@ -38,18 +65,46 @@ interface FakeLanguageClientCalls {
   initOptions: unknown;
   workspaceFolderPin: unknown;
   receivedRequests: Array<{ method: string; params: unknown; token: { isCancellationRequested: boolean } }>;
+  cancellationSources: FakeCancellationTokenSource[];
+  languageClientConstructions: number;
+  languageClientStarts: number;
+  languageClientStops: number;
+  triggerSqryConfigurationChange(): void;
+}
+
+interface FakeLanguageClientLifecycleOptions {
+  /** Optional gates for selected `LanguageClient.stop()` calls (one-based). */
+  readonly stopGates?: ReadonlyMap<number, Promise<void>>;
+  /** Optional gates for selected `LanguageClient.start()` calls (one-based). */
+  readonly startGates?: ReadonlyMap<number, Promise<void>>;
+  /** Synchronously observes a fake client entering `start()`. */
+  readonly onStart?: (ordinal: number) => void;
 }
 
 function buildSqryClientModule(
   responsesByMethod: Map<string, (params: unknown) => unknown>,
+  timeoutOverrides: Partial<{ timeoutMs: number; indexTimeoutMs: number }> = {},
+  lifecycleOptions: FakeLanguageClientLifecycleOptions = {},
 ): {
   SqryClient: typeof import("../src/sqryClient").SqryClient;
   calls: FakeLanguageClientCalls;
 } {
+  let configurationChangeListener:
+    | ((event: { affectsConfiguration(section: string): boolean }) => unknown)
+    | undefined;
   const calls: FakeLanguageClientCalls = {
     initOptions: undefined,
     workspaceFolderPin: undefined,
     receivedRequests: [],
+    cancellationSources: [],
+    languageClientConstructions: 0,
+    languageClientStarts: 0,
+    languageClientStops: 0,
+    triggerSqryConfigurationChange: () => {
+      void configurationChangeListener?.({
+        affectsConfiguration: (section: string) => section === "sqry",
+      });
+    },
   };
 
   // The SqryClient owns one LanguageClient via vscode-languageclient/node.
@@ -62,14 +117,18 @@ function buildSqryClientModule(
       _serverOptions: unknown,
       clientOptions: { initializationOptions?: unknown; workspaceFolder?: unknown },
     ) {
+      calls.languageClientConstructions += 1;
       calls.initOptions = clientOptions.initializationOptions;
       calls.workspaceFolderPin = clientOptions.workspaceFolder;
     }
     start(): Promise<void> {
-      return Promise.resolve();
+      calls.languageClientStarts += 1;
+      lifecycleOptions.onStart?.(calls.languageClientStarts);
+      return lifecycleOptions.startGates?.get(calls.languageClientStarts) ?? Promise.resolve();
     }
     stop(): Promise<void> {
-      return Promise.resolve();
+      calls.languageClientStops += 1;
+      return lifecycleOptions.stopGates?.get(calls.languageClientStops) ?? Promise.resolve();
     }
     onNotification(): void {
       // no-op
@@ -91,9 +150,16 @@ function buildSqryClientModule(
   // `which` and `node:fs` for binary resolution; we short-circuit by
   // providing a concrete `sqry.path` and a fake `which` that returns
   // the path verbatim.
+  class RecordingCancellationTokenSource extends FakeCancellationTokenSource {
+    constructor() {
+      super();
+      calls.cancellationSources.push(this);
+    }
+  }
+
   const lcStub = {
     LanguageClient: FakeLanguageClient,
-    CancellationTokenSource: FakeCancellationTokenSource,
+    CancellationTokenSource: RecordingCancellationTokenSource,
     ExecuteCommandRequest: { type: { method: "workspace/executeCommand" } },
   };
 
@@ -114,7 +180,18 @@ function buildSqryClientModule(
           return fallback;
         },
       }),
-      onDidChangeConfiguration: () => ({ dispose: () => undefined }),
+      onDidChangeConfiguration: (
+        listener: (event: { affectsConfiguration(section: string): boolean }) => unknown,
+      ) => {
+        configurationChangeListener = listener;
+        return {
+          dispose: () => {
+            if (configurationChangeListener === listener) {
+              configurationChangeListener = undefined;
+            }
+          },
+        };
+      },
       // STEP_5 acceptance criterion 7 — even when the host has folders,
       // the client must NOT pin the first one. We deliberately surface
       // a folder so the test fails if SqryClient passes it through.
@@ -125,6 +202,9 @@ function buildSqryClientModule(
     Uri: {
       parse: (s: string) => ({ fsPath: s, scheme: "file", toString: () => s }),
     },
+    window: {
+      showWarningMessage: async () => undefined,
+    },
   };
 
   // Force the binary resolver to a deterministic stub path.
@@ -132,8 +212,8 @@ function buildSqryClientModule(
     resolveConfig: async () => ({
       sqryPath: "sqry",
       limit: 200,
-      timeoutMs: 1_000,
-      indexTimeoutMs: 60_000,
+      timeoutMs: timeoutOverrides.timeoutMs ?? 1_000,
+      indexTimeoutMs: timeoutOverrides.indexTimeoutMs ?? 60_000,
       autoIndexOnOpen: "never",
       codeLensEnabled: false,
       indexRoot: "",
@@ -166,6 +246,22 @@ const noopOutput = {
   appendLine: () => undefined,
   show: () => undefined,
 } as unknown as import("vscode").OutputChannel;
+
+function deferred(): { readonly promise: Promise<void>; resolve(): void } {
+  let resolvePromise: (() => void) | undefined;
+  const promise = new Promise<void>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return {
+    promise,
+    resolve: () => {
+      if (!resolvePromise) {
+        throw new Error("deferred resolver was not initialized");
+      }
+      resolvePromise();
+    },
+  };
+}
 
 describe("STEP_5 — SqryClient.getWorkspaceStatus", () => {
   it("returns the aggregate from sqry/workspaceStatus", async () => {
@@ -360,6 +456,605 @@ describe("STEP_5 acceptance criterion 6 — per-request cancellation", () => {
     });
     await Promise.all([a, b]);
     client.dispose();
+  });
+
+  it("locally rejects a never-settling ordinary request and cleans up its source", async () => {
+    let rejectTransport: ((reason?: unknown) => void) | undefined;
+    const responses = new Map<string, (params: unknown) => unknown>([
+      [
+        "sqry/workspaceStatus",
+        () => new Promise<unknown>((_resolve, reject) => {
+          rejectTransport = reject;
+        }),
+      ],
+    ]);
+    const { SqryClient, calls } = buildSqryClientModule(responses, { timeoutMs: 15 });
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+
+    let caught: Error | undefined;
+    try {
+      await client.getWorkspaceStatus();
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).to.include("timed out after 15ms");
+    // Initialization and its successful candidate each own a source; the
+    // request source is constructed last and settles independently.
+    expect(calls.cancellationSources).to.have.length(3);
+    expect(calls.cancellationSources[2].cancelCalls).to.equal(1);
+    expect(calls.cancellationSources[2].disposeCalls).to.equal(1);
+    expect(
+      (client as unknown as { activeRequests: Set<unknown> }).activeRequests.size,
+    ).to.equal(0);
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      if (!rejectTransport) {
+        throw new Error("expected request transport to be pending");
+      }
+      rejectTransport(new Error("late transport failure"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).to.deep.equal([]);
+    client.dispose();
+  });
+
+  it("locally rejects a never-settling index command using sqry.indexTimeoutMs", async () => {
+    const responses = new Map<string, (params: unknown) => unknown>([
+      ["workspace/executeCommand", () => new Promise<unknown>(() => undefined)],
+    ]);
+    const { SqryClient, calls } = buildSqryClientModule(responses, {
+      timeoutMs: 100,
+      indexTimeoutMs: 15,
+    });
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+    const workspace = { uri: { fsPath: "/index-root" } } as import("vscode").WorkspaceFolder;
+
+    let caught: Error | undefined;
+    try {
+      await client.runIndex(workspace);
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).to.include("timed out after 15ms");
+    expect(caught?.message).to.include("sqry.indexTimeoutMs");
+    expect(calls.cancellationSources[2].cancelCalls).to.equal(1);
+    expect(calls.cancellationSources[2].disposeCalls).to.equal(1);
+    expect(
+      (client as unknown as { activeRequests: Set<unknown> }).activeRequests.size,
+    ).to.equal(0);
+    client.dispose();
+  });
+
+  it("settles a pending caller during extension disposal", async () => {
+    const responses = new Map<string, (params: unknown) => unknown>([
+      ["sqry/workspaceStatus", () => new Promise<unknown>(() => undefined)],
+    ]);
+    const { SqryClient, calls } = buildSqryClientModule(responses, { timeoutMs: 1_000 });
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+
+    const pending = client.getWorkspaceStatus();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    client.dispose();
+
+    let caught: Error | undefined;
+    try {
+      await pending;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).to.include("extension is deactivating");
+    expect(calls.cancellationSources[2].cancelCalls).to.equal(1);
+    expect(calls.cancellationSources[2].disposeCalls).to.equal(1);
+    expect(
+      (client as unknown as { activeRequests: Set<unknown> }).activeRequests.size,
+    ).to.equal(0);
+  });
+
+  it("does not restart or dispatch an ordinary RPC after its local deadline wins during client restart", async () => {
+    const stopGate = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      { timeoutMs: 15 },
+      { stopGates: new Map([[1, stopGate.promise]]) },
+    );
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+    (client as unknown as { currentBinaryPath: string | null }).currentBinaryPath = "/stale/sqry";
+
+    const pending = client.getWorkspaceStatus();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.languageClientStops).to.equal(1);
+
+    let caught: Error | undefined;
+    try {
+      await pending;
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught?.message).to.include("timed out after 15ms");
+
+    stopGate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.languageClientConstructions).to.equal(1);
+    expect(calls.languageClientStarts).to.equal(1);
+    expect(calls.receivedRequests).to.deep.equal([]);
+    client.dispose();
+  });
+
+  it("does not restart or dispatch an index RPC after disposal wins during client restart", async () => {
+    const stopGate = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      { timeoutMs: 1_000, indexTimeoutMs: 1_000 },
+      { stopGates: new Map([[1, stopGate.promise]]) },
+    );
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+    (client as unknown as { currentBinaryPath: string | null }).currentBinaryPath = "/stale/sqry";
+    const workspace = { uri: { fsPath: "/index-root" } } as import("vscode").WorkspaceFolder;
+
+    const pending = client.runIndex(workspace);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.languageClientStops).to.equal(1);
+    client.dispose();
+
+    let caught: Error | undefined;
+    try {
+      await pending;
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught?.message).to.include("extension is deactivating");
+
+    stopGate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.languageClientConstructions).to.equal(1);
+    expect(calls.languageClientStarts).to.equal(1);
+    expect(calls.receivedRequests).to.deep.equal([]);
+  });
+
+  it("stops a delayed candidate and never dispatches an ordinary RPC after its local deadline", async () => {
+    const secondStartGate = deferred();
+    const secondStartEntered = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      { timeoutMs: 15 },
+      {
+        startGates: new Map([[2, secondStartGate.promise]]),
+        onStart: (ordinal) => {
+          if (ordinal === 2) {
+            secondStartEntered.resolve();
+          }
+        },
+      },
+    );
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+    (client as unknown as { languageClient: unknown }).languageClient = null;
+
+    const pending = client.getWorkspaceStatus();
+    await secondStartEntered.promise;
+
+    let caught: Error | undefined;
+    try {
+      await pending;
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught?.message).to.include("timed out after 15ms");
+    expect(calls.languageClientConstructions).to.equal(2);
+    expect(calls.languageClientStarts).to.equal(2);
+    expect(calls.languageClientStops).to.equal(1);
+    expect(calls.cancellationSources[1].cancellationListenerDisposals).to.equal(1);
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+    expect(calls.receivedRequests).to.deep.equal([]);
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      secondStartGate.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).to.deep.equal([]);
+    expect(calls.receivedRequests).to.deep.equal([]);
+    client.dispose();
+  });
+
+  it("stops a delayed candidate and never dispatches an index RPC after its local deadline", async () => {
+    const secondStartGate = deferred();
+    const secondStartEntered = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      { timeoutMs: 100, indexTimeoutMs: 15 },
+      {
+        startGates: new Map([[2, secondStartGate.promise]]),
+        onStart: (ordinal) => {
+          if (ordinal === 2) {
+            secondStartEntered.resolve();
+          }
+        },
+      },
+    );
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+    (client as unknown as { languageClient: unknown }).languageClient = null;
+    const workspace = { uri: { fsPath: "/index-root" } } as import("vscode").WorkspaceFolder;
+
+    const pending = client.runIndex(workspace);
+    await secondStartEntered.promise;
+
+    let caught: Error | undefined;
+    try {
+      await pending;
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught?.message).to.include("timed out after 15ms");
+    expect(caught?.message).to.include("sqry.indexTimeoutMs");
+    expect(calls.languageClientStops).to.equal(1);
+    expect(calls.receivedRequests).to.deep.equal([]);
+
+    secondStartGate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+    expect(calls.receivedRequests).to.deep.equal([]);
+    client.dispose();
+  });
+
+  it("stops a delayed candidate and never dispatches after extension disposal", async () => {
+    const secondStartGate = deferred();
+    const secondStartEntered = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      { timeoutMs: 1_000 },
+      {
+        startGates: new Map([[2, secondStartGate.promise]]),
+        onStart: (ordinal) => {
+          if (ordinal === 2) {
+            secondStartEntered.resolve();
+          }
+        },
+      },
+    );
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+    (client as unknown as { languageClient: unknown }).languageClient = null;
+
+    const pending = client.getWorkspaceStatus();
+    await secondStartEntered.promise;
+    client.dispose();
+
+    let caught: Error | undefined;
+    try {
+      await pending;
+    } catch (error) {
+      caught = error as Error;
+    }
+    expect(caught?.message).to.include("extension is deactivating");
+    expect(calls.languageClientStops).to.equal(1);
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+    expect(calls.receivedRequests).to.deep.equal([]);
+
+    secondStartGate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.receivedRequests).to.deep.equal([]);
+  });
+
+  it("stops a delayed explicit-restart candidate immediately on extension disposal", async () => {
+    const secondStartGate = deferred();
+    const secondStartEntered = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      {},
+      {
+        startGates: new Map([[2, secondStartGate.promise]]),
+        onStart: (ordinal) => {
+          if (ordinal === 2) {
+            secondStartEntered.resolve();
+          }
+        },
+      },
+    );
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+
+    const restarting = client.restart();
+    await secondStartEntered.promise;
+    client.dispose();
+
+    let caught: Error | undefined;
+    try {
+      await restarting;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).to.include("cancelled because the extension is deactivating");
+    expect(calls.languageClientStops).to.equal(2);
+    expect(calls.cancellationSources[2].cancelCalls).to.equal(1);
+    expect(calls.cancellationSources[2].disposeCalls).to.equal(1);
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+    expect(calls.receivedRequests).to.deep.equal([]);
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      secondStartGate.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).to.deep.equal([]);
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+  });
+
+  it("stops a delayed configuration-reload candidate immediately on extension disposal", async () => {
+    const secondStartGate = deferred();
+    const secondStartEntered = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      {},
+      {
+        startGates: new Map([[2, secondStartGate.promise]]),
+        onStart: (ordinal) => {
+          if (ordinal === 2) {
+            secondStartEntered.resolve();
+          }
+        },
+      },
+    );
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+    (client as unknown as { languageClient: unknown }).languageClient = null;
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      calls.triggerSqryConfigurationChange();
+      await secondStartEntered.promise;
+      client.dispose();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(calls.languageClientStops).to.equal(1);
+      expect(calls.cancellationSources[2].cancelCalls).to.equal(1);
+      expect(calls.cancellationSources[2].disposeCalls).to.equal(1);
+      expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+      expect(calls.receivedRequests).to.deep.equal([]);
+
+      secondStartGate.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).to.deep.equal([]);
+  });
+
+  it("serializes overlapping restarts so only one candidate exists at a time", async () => {
+    const secondStartGate = deferred();
+    const thirdStartGate = deferred();
+    const secondStartEntered = deferred();
+    const thirdStartEntered = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      {},
+      {
+        startGates: new Map([
+          [2, secondStartGate.promise],
+          [3, thirdStartGate.promise],
+        ]),
+        onStart: (ordinal) => {
+          if (ordinal === 2) {
+            secondStartEntered.resolve();
+          }
+          if (ordinal === 3) {
+            thirdStartEntered.resolve();
+          }
+        },
+      },
+    );
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+
+    const firstRestart = client.restart();
+    await secondStartEntered.promise;
+    const secondRestart = client.restart();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.languageClientStarts).to.equal(2);
+
+    secondStartGate.resolve();
+    await firstRestart;
+    await thirdStartEntered.promise;
+    expect(calls.languageClientStarts).to.equal(3);
+    expect(calls.languageClientStops).to.equal(2);
+
+    thirdStartGate.resolve();
+    await secondRestart;
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.not.equal(null);
+
+    client.dispose();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.languageClientStops).to.equal(3);
+  });
+
+  it("serializes an overlapping configuration reload and explicit restart", async () => {
+    const secondStartGate = deferred();
+    const thirdStartGate = deferred();
+    const secondStartEntered = deferred();
+    const thirdStartEntered = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      {},
+      {
+        startGates: new Map([
+          [2, secondStartGate.promise],
+          [3, thirdStartGate.promise],
+        ]),
+        onStart: (ordinal) => {
+          if (ordinal === 2) {
+            secondStartEntered.resolve();
+          }
+          if (ordinal === 3) {
+            thirdStartEntered.resolve();
+          }
+        },
+      },
+    );
+    const client = new SqryClient(noopOutput);
+    await client.initialize();
+    (client as unknown as { languageClient: unknown }).languageClient = null;
+
+    calls.triggerSqryConfigurationChange();
+    await secondStartEntered.promise;
+    const explicitRestart = client.restart();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.languageClientStarts).to.equal(2);
+
+    secondStartGate.resolve();
+    await thirdStartEntered.promise;
+    expect(calls.languageClientStarts).to.equal(3);
+    expect(calls.languageClientStops).to.equal(1);
+
+    thirdStartGate.resolve();
+    await explicitRestart;
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.not.equal(null);
+    client.dispose();
+  });
+
+  it("cancels a delayed initial client candidate immediately on extension disposal", async () => {
+    const initialStartGate = deferred();
+    const initialStartEntered = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      {},
+      {
+        startGates: new Map([[1, initialStartGate.promise]]),
+        onStart: (ordinal) => {
+          if (ordinal === 1) {
+            initialStartEntered.resolve();
+          }
+        },
+      },
+    );
+    const client = new SqryClient(noopOutput);
+    const initializing = client.initialize();
+    await initialStartEntered.promise;
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+
+    client.dispose();
+    let caught: Error | undefined;
+    try {
+      await initializing;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).to.include("cancelled while starting the language client");
+    expect(calls.cancellationSources).to.have.length(2);
+    expect(calls.cancellationSources[0].cancelCalls).to.equal(1);
+    expect(calls.cancellationSources[0].disposeCalls).to.equal(1);
+    expect(calls.cancellationSources[1].cancelCalls).to.equal(1);
+    expect(calls.cancellationSources[1].disposeCalls).to.equal(1);
+    expect(calls.languageClientStops).to.equal(1);
+    expect(calls.receivedRequests).to.deep.equal([]);
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      initialStartGate.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    expect(unhandled).to.deep.equal([]);
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+  });
+
+  it("cancels a delayed initial candidate on timeout and blocks terminal-failure config restarts", async () => {
+    const initialStartGate = deferred();
+    const initialStartEntered = deferred();
+    const responses = new Map<string, (params: unknown) => unknown>();
+    const { SqryClient, calls } = buildSqryClientModule(
+      responses,
+      {},
+      {
+        startGates: new Map([[1, initialStartGate.promise]]),
+        onStart: (ordinal) => {
+          if (ordinal === 1) {
+            initialStartEntered.resolve();
+          }
+        },
+      },
+    );
+    // A short constructor-only test seam exercises the production 10s
+    // initialization owner without a real ten-second test wait.
+    const client = new SqryClient(noopOutput, 50);
+    const initializing = client.initialize();
+    await initialStartEntered.promise;
+
+    // Queue tokenless configuration work behind the in-flight initialization
+    // restart. The terminal activation cleanup below must prevent this queued
+    // continuation from constructing a second client after the timeout.
+    calls.triggerSqryConfigurationChange();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    let caught: Error | undefined;
+    try {
+      await initializing;
+    } catch (error) {
+      caught = error as Error;
+    }
+
+    expect(caught?.message).to.include("Configuration timeout after 10s");
+    expect(calls.cancellationSources).to.have.length(2);
+    expect(calls.cancellationSources[0].cancelCalls).to.equal(1);
+    expect(calls.cancellationSources[0].disposeCalls).to.equal(1);
+    expect(calls.cancellationSources[1].cancelCalls).to.equal(0);
+    expect(calls.cancellationSources[1].disposeCalls).to.equal(1);
+    expect(calls.languageClientStops).to.equal(1);
+    expect(calls.receivedRequests).to.deep.equal([]);
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
+
+    // Activation disposes this final-failure client before returning. That
+    // cancels the queued configuration continuation and unregisters its
+    // listener, so neither queued nor later tokenless reloads can revive it.
+    client.dispose();
+    calls.triggerSqryConfigurationChange();
+
+    initialStartGate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(calls.languageClientConstructions).to.equal(1);
+    expect(calls.languageClientStarts).to.equal(1);
+    expect((client as unknown as { languageClient: unknown }).languageClient).to.equal(null);
   });
 });
 

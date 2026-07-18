@@ -47,8 +47,6 @@ use sqry_core::query::{
     CircularType, DuplicateConfig, DuplicateType, UnusedScope, build_duplicate_groups_graph,
 };
 
-use crate::daemon_adapter::WorkspaceContext;
-use crate::engine::engine_for_workspace;
 use crate::execution::location::node_location_for_reporting;
 use crate::execution::types::{
     GenerateOverviewData, HealthIndicatorsData, LanguageStatsData, OverviewCouplingData,
@@ -123,26 +121,17 @@ fn section_selected(sections: &[String], name: &str) -> bool {
 pub fn execute_generate_overview(
     args: &GenerateOverviewArgs,
 ) -> Result<ToolExecution<GenerateOverviewData>> {
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = Instant::now();
-    let selector = crate::execution::workspace_scope::resolve_workspace_selector(&args.path)?;
-    let engine = engine_for_workspace(selector.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-
+    let ctx = crate::engine::acquire_workspace_context_scoped(&args.path)?;
     tracing::debug!(
         path = %args.path,
         top = args.top,
         group_depth = args.group_depth,
         "Executing generate_overview tool"
     );
-
-    let graph = engine.ensure_graph()?;
-
-    let ctx = WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_generate_overview(&ctx, args, start)
+    crate::daemon_adapter::execute_generate_overview_for_daemon(&ctx, args, start)
 }
 
 // -------------------------------------------------------------------------

@@ -1178,31 +1178,21 @@ fn summarize_complexity_metrics(
 pub fn execute_complexity_metrics(
     args: &crate::tools::ComplexityMetricsArgs,
 ) -> Result<ToolExecution<super::super::types::ComplexityMetricsData>> {
-    // Pre-refactor timing: `start` fires before engine resolution.
+    // Pre-refactor timing: `start` fires before engine resolution, then threads
+    // into the shared `*_for_daemon` core so the analysis body exists once.
     let start = std::time::Instant::now();
     // Issue #394: resolve via the shared scope resolver so an invalid or
     // escaping subdir `path` produces a clear error, matching list_files /
     // list_symbols / find_unused rather than silently falling back to the whole
     // workspace.
-    let selector = crate::execution::workspace_scope::resolve_workspace_selector(&args.path)?;
-    let engine = engine_for_workspace(selector.as_ref())?;
-    let workspace_root = engine.workspace_root().to_path_buf();
-
+    let ctx = crate::engine::acquire_workspace_context_scoped(&args.path)?;
     tracing::debug!(
         path = %args.path,
         target = ?args.target,
         min_complexity = args.min_complexity,
         "Executing complexity_metrics tool"
     );
-
-    let graph = engine.ensure_graph()?;
-
-    let ctx = crate::daemon_adapter::WorkspaceContext {
-        workspace_root,
-        graph,
-        executor: engine.executor_arc(),
-    };
-    inner::execute_complexity_metrics(&ctx, args, start)
+    crate::daemon_adapter::execute_complexity_metrics_for_daemon(&ctx, args, start)
 }
 
 pub(crate) mod inner {
