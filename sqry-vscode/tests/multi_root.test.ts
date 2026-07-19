@@ -232,9 +232,18 @@ function buildSqryClientModule(
     },
   };
 
+  const commandResultsStub = {
+    handleExecuteCommandResult: (
+      _command: string,
+      _args: unknown[],
+      next: (command: string, args: unknown[]) => Promise<unknown>,
+    ) => next(_command, _args),
+  };
+
   const { SqryClient } = proxyquire("../src/sqryClient", {
     vscode: vscodeStub,
     "vscode-languageclient/node": lcStub,
+    "./commandResults": commandResultsStub,
     "./config": configStub,
     "./indexQueue": indexQueueStub,
   }) as { SqryClient: typeof import("../src/sqryClient").SqryClient };

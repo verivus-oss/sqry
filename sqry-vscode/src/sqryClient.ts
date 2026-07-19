@@ -7,6 +7,7 @@ import {
   LanguageClientOptions,
   ServerOptions,
 } from "vscode-languageclient/node";
+import { handleExecuteCommandResult } from "./commandResults";
 import { ResolvedSqryConfig, resolveConfig } from "./config";
 import { IndexQueue } from "./indexQueue";
 import { SqryResult, SqrySymbolResult } from "./types";
@@ -812,6 +813,13 @@ export class SqryClient implements vscode.Disposable {
       outputChannel: this.outputChannel,
       synchronize: {
         configurationSection: "sqry",
+      },
+      // Render the results of the server-owned CodeLens/CodeAction commands
+      // (callers/references/explain) that vscode-languageclient auto-registers.
+      // Without this seam their server results are computed and discarded.
+      middleware: {
+        executeCommand: (command, args, next) =>
+          handleExecuteCommandResult(command, args, next, this.outputChannel),
       },
       ...(initializationOptions ? { initializationOptions } : {}),
     };

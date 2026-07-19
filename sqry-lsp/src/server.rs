@@ -2539,12 +2539,26 @@ fn initialize_capabilities() -> ServerCapabilities {
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             },
         )),
+        // Advertise ONLY server-owned commands: the ones this server itself
+        // surfaces through CodeLens (`codelens.rs`) and CodeActions
+        // (`code_action.rs`). `vscode-languageclient`'s `ExecuteCommandFeature`
+        // calls `vscode.commands.registerCommand` for every id listed here, so
+        // any id the extension already registers as its own UI command would
+        // collide ("command '<id>' already exists"), aborting client startup.
+        //
+        // `sqry.index` is deliberately absent: it is a client-owned UI command
+        // (status bar, keybinding, palette, walkthrough) that the extension
+        // registers itself and drives via a direct `workspace/executeCommand`
+        // request. The `execute_command` handler still services it (see the
+        // `"sqry.index"` arm) regardless of advertisement; advertising it here
+        // only re-introduces the double-registration crash. The command ids are
+        // sourced from the same constants the emission sites use so the
+        // advertised set cannot drift from what the server actually produces.
         execute_command_provider: Some(ExecuteCommandOptions {
             commands: vec![
-                "sqry.index".into(),
-                "sqry.showCallers".into(),
-                "sqry.showReferences".into(),
-                "sqry.explainSymbol".into(),
+                code_action::COMMAND_SHOW_CALLERS.into(),
+                code_action::COMMAND_SHOW_REFERENCES.into(),
+                code_action::COMMAND_EXPLAIN_SYMBOL.into(),
             ],
             work_done_progress_options: WorkDoneProgressOptions::default(),
         }),
@@ -2643,6 +2657,39 @@ mod tests {
     use tower::ServiceExt;
     use tower_lsp::jsonrpc::{Request, Response};
     use tower_lsp::lsp_types::{ExecuteCommandParams, InitializeParams, WorkDoneProgressParams};
+
+    /// Guards the `sqry.index` double-registration crash: the server must
+    /// advertise exactly the commands it surfaces via CodeLens/CodeActions and
+    /// must never advertise a client-owned UI command. If `sqry.index` (or any
+    /// other extension-registered command) re-enters `executeCommandProvider`,
+    /// `vscode-languageclient`'s `ExecuteCommandFeature` registers a colliding
+    /// client command and the language client fails to start on every platform.
+    #[test]
+    fn execute_command_advertisement_excludes_client_owned_commands() {
+        let capabilities = initialize_capabilities();
+        let commands = capabilities
+            .execute_command_provider
+            .expect("execute_command_provider must be advertised")
+            .commands;
+
+        // Exactly the server-owned commands emitted by CodeLens/CodeActions.
+        assert_eq!(
+            commands,
+            vec![
+                code_action::COMMAND_SHOW_CALLERS.to_string(),
+                code_action::COMMAND_SHOW_REFERENCES.to_string(),
+                code_action::COMMAND_EXPLAIN_SYMBOL.to_string(),
+            ],
+        );
+
+        // `sqry.index` is client-owned; advertising it collides with the
+        // extension's own registration during language-client startup.
+        assert!(
+            !commands.iter().any(|command| command == "sqry.index"),
+            "sqry.index is a client-owned UI command and must not be advertised \
+             in executeCommandProvider (regression: double-registration crash)",
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn map_join_error_reports_cancelled_new() {

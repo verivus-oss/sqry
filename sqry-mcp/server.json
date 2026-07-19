@@ -8,7 +8,7 @@
     "source": "github",
     "subfolder": "sqry-mcp"
   },
-  "version": "29.0.5",
+  "version": "29.0.6",
   "websiteUrl": "https://github.com/verivus-oss/sqry",
   "packages": [
     {
@@ -38,8 +38,8 @@
     {
       "registryType": "oci",
       "registryBaseUrl": "https://ghcr.io",
-      "identifier": "ghcr.io/verivus-oss/sqry-mcp:v29.0.5",
-      "version": "v29.0.5",
+      "identifier": "ghcr.io/verivus-oss/sqry-mcp:v29.0.6",
+      "version": "v29.0.6",
       "runtimeArguments": [
         {
           "type": "named",

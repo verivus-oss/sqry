@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [29.0.6](https://github.com/verivus-oss/sqry/compare/v29.0.5...v29.0.6) - 2026-07-19
+
+### Fixed
+
+- *(lsp)* stop advertising client-owned sqry.index in executeCommandProvider ([#633](https://github.com/verivus-oss/sqry/pull/633))
 ## [29.0.5](https://github.com/verivus-oss/sqry/compare/v29.0.4...v29.0.5) - 2026-07-18
 
 ### Other
