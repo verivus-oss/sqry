@@ -688,12 +688,12 @@ jobs:
         run: |
           set -euo pipefail
           echo "Verifying required tools are installed on self-hosted runner..."
-          CARGO_BIN="$(command -v cargo || true)"
+          readonly CARGO_BIN="$(command -v cargo || true)"
           if [[ -z "$CARGO_BIN" || ! -x "$CARGO_BIN" ]]; then
             echo "FATAL: cargo executable not found after rust-toolchain setup" >&2
             exit 1
           fi
-          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
+          readonly CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
           echo "$CARGO_BIN_DIR" >> "$GITHUB_PATH"
           export PATH="$CARGO_BIN_DIR:$PATH"
           for tool_dir in /usr/local/bin /opt/nodejs/current/bin; do
@@ -709,6 +709,10 @@ jobs:
           export XDG_CACHE_HOME="${RUNNER_TEMP}/xdg-cache"
           rm -rf "${XDG_CACHE_HOME}/cargo-zigbuild" "${HOME}/.cache/cargo-zigbuild"
           mkdir -p "${XDG_CACHE_HOME}"
+          CARGO_ZIGBUILD_ROOT="$(mktemp -d "${RUNNER_TEMP}/cargo-zigbuild-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}.XXXXXX")"
+          printf 'CARGO_ZIGBUILD_ROOT=%s\n' "$CARGO_ZIGBUILD_ROOT" >> "$GITHUB_ENV"
+          echo "$CARGO_ZIGBUILD_ROOT/bin" >> "$GITHUB_PATH"
+          export PATH="$CARGO_ZIGBUILD_ROOT/bin:$PATH"
           zig version
           zig_major="$(zig version | awk -F. '{print $1}')"
           zig_minor="$(zig version | awk -F. '{print $2}')"
@@ -716,10 +720,16 @@ jobs:
             echo "FATAL: Darwin cross-compilation requires Zig 0.15+ with SDKROOT support; found $(zig version)" >&2
             exit 1
           fi
-          if [[ ! -x "${CARGO_BIN_DIR}/cargo-zigbuild" ]]; then
-            "$CARGO_BIN" install cargo-zigbuild --locked
+          "$CARGO_BIN" install cargo-zigbuild --version 0.23.0 --locked --root "$CARGO_ZIGBUILD_ROOT"
+          readonly CARGO_ZIGBUILD_BIN="$CARGO_ZIGBUILD_ROOT/bin/cargo-zigbuild"
+          if [[ ! -x "$CARGO_ZIGBUILD_BIN" ]]; then
+            echo "FATAL: cargo-zigbuild was not installed at the verified run-local path: $CARGO_ZIGBUILD_BIN" >&2
+            exit 1
           fi
-          "${CARGO_BIN_DIR}/cargo-zigbuild" --version
+          if [[ "$("$CARGO_ZIGBUILD_BIN" --version)" != "cargo-zigbuild 0.23.0" ]]; then
+            echo "FATAL: expected cargo-zigbuild 0.23.0 at $CARGO_ZIGBUILD_BIN" >&2
+            exit 1
+          fi
           export SDKROOT="${SDKROOT:-/opt/macos-sdk/MacOSX14.0.sdk}"
           export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.12}"
           if [[ ! -d "$SDKROOT/System/Library/Frameworks/CoreFoundation.framework" ]]; then
@@ -746,16 +756,31 @@ jobs:
           mkdir -p dist/
           PUBLIC_REPO_ROOT="/workspace/sqry"
           export RUSTFLAGS="--remap-path-prefix=$(pwd)=${PUBLIC_REPO_ROOT} --remap-path-prefix=/io=${PUBLIC_REPO_ROOT}"
-          CARGO_BIN="$(command -v cargo || true)"
+          readonly CARGO_BIN="$(command -v cargo || true)"
           if [[ -z "$CARGO_BIN" || ! -x "$CARGO_BIN" ]]; then
             echo "FATAL: cargo executable not found after rust-toolchain setup" >&2
             exit 1
           fi
-          CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
-          export PATH="/opt/zig/current:${CARGO_BIN_DIR}:$PATH"
-          if [[ ! -x "${CARGO_BIN_DIR}/cargo-zigbuild" ]]; then
-            "$CARGO_BIN" install cargo-zigbuild --locked
+          readonly CARGO_BIN_DIR="$(dirname "$CARGO_BIN")"
+          if [[ -z "${CARGO_ZIGBUILD_ROOT:-}" ]]; then
+            echo "FATAL: CARGO_ZIGBUILD_ROOT was not persisted by toolchain verification" >&2
+            exit 1
           fi
+          CARGO_ZIGBUILD_PREFIX="${RUNNER_TEMP}/cargo-zigbuild-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_JOB}."
+          if [[ "$CARGO_ZIGBUILD_ROOT" != "$CARGO_ZIGBUILD_PREFIX"* ]]; then
+            echo "FATAL: cargo-zigbuild root is outside the current run/attempt/job namespace: $CARGO_ZIGBUILD_ROOT" >&2
+            exit 1
+          fi
+          readonly CARGO_ZIGBUILD_BIN="$CARGO_ZIGBUILD_ROOT/bin/cargo-zigbuild"
+          if [[ ! -x "$CARGO_ZIGBUILD_BIN" ]]; then
+            echo "FATAL: verified cargo-zigbuild is missing: $CARGO_ZIGBUILD_BIN" >&2
+            exit 1
+          fi
+          if [[ "$("$CARGO_ZIGBUILD_BIN" --version)" != "cargo-zigbuild 0.23.0" ]]; then
+            echo "FATAL: verified cargo-zigbuild version changed before the build" >&2
+            exit 1
+          fi
+          export PATH="$CARGO_ZIGBUILD_ROOT/bin:/opt/zig/current:${CARGO_BIN_DIR}:$PATH"
           export SDKROOT="${SDKROOT:-/opt/macos-sdk/MacOSX14.0.sdk}"
           export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-10.12}"
           if [[ ! -d "$SDKROOT/System/Library/Frameworks/CoreFoundation.framework" ]]; then
@@ -789,7 +814,7 @@ jobs:
               CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$wrapper_path" \
                 "$CARGO_BIN" build --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon "${SQRY_CLI_RELEASE_FEATURES[@]}"
             else
-              "$CARGO_BIN" zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon "${SQRY_CLI_RELEASE_FEATURES[@]}"
+              PATH="$CARGO_ZIGBUILD_ROOT/bin:/opt/zig/current:${CARGO_BIN_DIR}:$PATH" "$CARGO_ZIGBUILD_BIN" zigbuild --release --target "$target" -p sqry-cli -p sqry-lsp -p sqry-mcp -p sqry-daemon "${SQRY_CLI_RELEASE_FEATURES[@]}"
             fi
 
             EXT=""
