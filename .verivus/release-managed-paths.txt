@@ -2,7 +2,9 @@
 .github/ISSUE_TEMPLATE/config.yml
 .github/ISSUE_TEMPLATE/feature_request.yml
 .github/pull_request_template.md
+.github/workflows/publish-container.yml
 .github/workflows/release-distribute.yml
 .verivus/release-managed-paths.txt
+scripts/release/github-release-assets.sh
 CODE_OF_CONDUCT.md
 SECURITY.md

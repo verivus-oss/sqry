@@ -1,0 +1,217 @@
+# This file lives in verivus-oss/sqry (the public repo). The copy in
+# verivusai-labs/sqry is the source of truth mirrored out by the release
+# pipeline. It runs in verivus-oss/sqry, whose org owns both
+# ghcr.io/verivus-oss/* and the io.github.verivus-oss MCP-registry namespace, so
+# GHCR push and MCP-registry OIDC both authenticate natively here.
+#
+# Trigger: a published (non-draft) sqry release. Stage 6 (release-distribute.yml)
+# promotes the draft to published, which fires `release: published` with the
+# musl binaries already attached, so the FROM-scratch image can download and
+# checksum-verify them. workflow_dispatch(tag) re-publishes a specific version.
+name: Publish MCP container + registry entry
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to (re)publish, e.g. v28.0.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write   # push to ghcr.io/verivus-oss/sqry-mcp
+  id-token: write   # GitHub OIDC -> MCP registry (io.github.verivus-oss namespace)
+
+concurrency:
+  group: publish-container-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  container-and-registry:
+    # Real version tags only; never prereleases.
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release tag + version
+        id: ver
+        env:
+          # Pass via env (not inline interpolation) to avoid template injection.
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="$RELEASE_TAG"
+          # Anchored on the WHOLE string. A bare `v[0-9]*` glob is a prefix test,
+          # so it accepts things like 'v1$(id -u)'; every consumer of this output
+          # must therefore treat it as untrusted, and this job holds
+          # packages: write plus id-token: write against the registry namespace.
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Not a version tag: '$TAG'; skipping."; echo "skip=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version=${TAG#v}"
+
+      - name: Checkout at the release tag
+        if: steps.ver.outputs.skip != 'true'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ steps.ver.outputs.tag }}
+
+      - name: Set up QEMU
+        if: steps.ver.outputs.skip != 'true'
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3.7.0
+
+      - name: Set up Buildx
+        if: steps.ver.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - name: Log in to GHCR
+        if: steps.ver.outputs.skip != 'true'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        if: steps.ver.outputs.skip != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: packaging/docker
+          file: packaging/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          build-args: |
+            SQRY_VERSION=${{ steps.ver.outputs.version }}
+          tags: |
+            ghcr.io/verivus-oss/sqry-mcp:${{ steps.ver.outputs.tag }}
+            ghcr.io/verivus-oss/sqry-mcp:latest
+          push: true
+          provenance: true
+          sbom: true
+
+      - name: Smoke test (image answers MCP initialize + tools/list with 39 tools)
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          IMG: ghcr.io/verivus-oss/sqry-mcp:${{ steps.ver.outputs.tag }}
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$IMG"
+          init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"ci-smoke","version":"0"}}}'
+          inited='{"jsonrpc":"2.0","method":"notifications/initialized"}'
+          list='{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+          printf '%s\n%s\n%s\n' "$init" "$inited" "$list" \
+            | timeout 90 docker run -i --rm -v "$PWD:/workspace" "$IMG" > out.jsonl || true
+          echo "--- server output ---"; cat out.jsonl
+          python3 - out.jsonl <<'PY'
+          import json, sys
+          count = None
+          for line in open(sys.argv[1]):
+              line = line.strip()
+              if not line:
+                  continue
+              try:
+                  msg = json.loads(line)
+              except json.JSONDecodeError:
+                  continue
+              tools = msg.get("result", {}).get("tools")
+              if isinstance(tools, list):
+                  count = len(tools)
+          if count is None:
+              print("FAIL: no tools/list result in server output"); sys.exit(1)
+          print(f"tools/list returned {count} tools")
+          if count != 39:
+              print(f"FAIL: expected 39 tools, got {count}"); sys.exit(1)
+          print("OK")
+          PY
+
+      # The registry validates the oci package by pulling the image config
+      # ANONYMOUSLY and reading the io.modelcontextprotocol.server.name label
+      # (registry internal/validators/registries/oci.go). A GHCR package created
+      # by a first push from Actions starts out private, and a private image is
+      # rejected with "is private or requires authentication. Only public images
+      # are supported". Fail here with the exact remedy instead of letting the
+      # registration step fail with a confusing ownership error.
+      - name: Verify the image is anonymously pullable and correctly labelled
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          # Everything derived from the release tag crosses into the shell
+          # through env, never through ${{ }} inside the run: block. Inline
+          # interpolation is textual substitution done before bash parses the
+          # script, so a tag like 'v1$(id -u)' would execute here.
+          IMG: ghcr.io/verivus-oss/sqry-mcp:${{ steps.ver.outputs.tag }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          EXPECTED_NAME: io.github.verivus-oss/sqry
+        run: |
+          set -euo pipefail
+          # Anonymous pull token, exactly what the registry validator uses.
+          # No `curl -f` here: GHCR answers 403 for a private/absent package and
+          # -f would abort under `set -e` before the remedy below can print.
+          token=$(curl -sSL "https://ghcr.io/token?scope=repository:verivus-oss/sqry-mcp:pull&service=ghcr.io" \
+            | jq -r '.token // empty' || true)
+          if [[ -z "$token" ]]; then
+            echo "FATAL: could not obtain an anonymous GHCR pull token for sqry-mcp." >&2
+            echo "The package is almost certainly PRIVATE. Make it public once:" >&2
+            echo "  https://github.com/orgs/verivus-oss/packages/container/sqry-mcp/settings" >&2
+            echo "  -> Danger Zone -> Change visibility -> Public" >&2
+            exit 1
+          fi
+          code=$(curl -s -o /tmp/manifest.json -w '%{http_code}' \
+            -H "Authorization: Bearer $token" \
+            -H 'Accept: application/vnd.oci.image.index.v1+json' \
+            -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.list.v2+json' \
+            -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+            "https://ghcr.io/v2/verivus-oss/sqry-mcp/manifests/${TAG}")
+          if [[ "$code" != "200" ]]; then
+            echo "FATAL: anonymous manifest fetch for $IMG returned HTTP $code." >&2
+            case "$code" in
+              404)
+                echo "The package is public but this TAG does not exist. Check that the" >&2
+                echo "build-and-push step pushed ${TAG}." >&2
+                ;;
+              401|403)
+                echo "The MCP registry cannot validate a non-public image. Make the package public:" >&2
+                echo "  https://github.com/orgs/verivus-oss/packages/container/sqry-mcp/settings" >&2
+                ;;
+              *)
+                echo "Unexpected registry response; the raw body follows." >&2
+                ;;
+            esac
+            cat /tmp/manifest.json >&2 || true
+            exit 1
+          fi
+          echo "[OK] $IMG is anonymously pullable"
+          # The label must live in the image CONFIG (Dockerfile LABEL), not in
+          # manifest annotations: the validator only reads ConfigFile.Config.Labels.
+          # Resolve the linux/amd64 child, which is what the validator defaults to.
+          digest=$(jq -r '
+            if .manifests then
+              (.manifests[] | select(.platform.os == "linux" and .platform.architecture == "amd64") | .digest)
+            else empty end' /tmp/manifest.json | head -1)
+          if [[ -n "$digest" ]]; then
+            curl -fsSL -H "Authorization: Bearer $token" \
+              -H 'Accept: application/vnd.oci.image.manifest.v1+json' \
+              -H 'Accept: application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/verivus-oss/sqry-mcp/manifests/${digest}" -o /tmp/child.json
+          else
+            cp /tmp/manifest.json /tmp/child.json
+          fi
+          config_digest=$(jq -r '.config.digest' /tmp/child.json)
+          curl -fsSL -H "Authorization: Bearer $token" \
+            "https://ghcr.io/v2/verivus-oss/sqry-mcp/blobs/${config_digest}" -o /tmp/config.json
+          label=$(jq -r '.config.Labels["io.modelcontextprotocol.server.name"] // empty' /tmp/config.json)
+          if [[ "$label" != "$EXPECTED_NAME" ]]; then
+            echo "FATAL: image config label io.modelcontextprotocol.server.name is '${label:-<missing>}', expected '$EXPECTED_NAME'." >&2
+            echo "It must be set as a Dockerfile LABEL (config label), not a buildx --annotation." >&2
+            exit 1
+          fi
+          echo "[OK] image config carries io.modelcontextprotocol.server.name=$label"
+
+      - name: Register on the MCP registry (GitHub OIDC)
+        if: steps.ver.outputs.skip != 'true'
+        env:
+          MCP_REGISTRY_AUTH: oidc
+        run: bash scripts/release/register-mcp-registry.sh
