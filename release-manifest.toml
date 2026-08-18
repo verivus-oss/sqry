@@ -145,6 +145,13 @@ files_public = [
 dirs_public = ["docs/user-guide/"]
 
 [selection.scripts]
+# Private release-control validators are intentionally absent from this public
+# allowlist under the manifest's default-deny model:
+# - scripts/release/check-sanitization-review-contract.sh
+# - scripts/release/test-sanitization-review-contract-modes.sh
+# - scripts/release/check-workflow-run-interpolation.sh
+# - scripts/release/test-check-workflow-run-interpolation.sh
+# - scripts/release/test-daemon-env-native-ci.sh
 public = [
     "scripts/install.sh",
     "scripts/install.ps1",

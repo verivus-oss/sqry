@@ -46,6 +46,15 @@ pub struct ClasspathConfig {
     pub force: bool,
     /// Subprocess timeout in seconds for build tool resolution.
     pub timeout_secs: u64,
+    /// Whether the resolver may execute the project's build tooling
+    /// (`gradlew`, `mvn`, `bazel`, `sbt`) to resolve the classpath.
+    ///
+    /// Defaults to `true` for backward compatibility. Set to `false` (via
+    /// `--no-build-tool`) to index a repository without ever running its build
+    /// tooling, which would otherwise execute repository-controlled code. With
+    /// this disabled the pipeline uses a previously cached classpath when one is
+    /// available and otherwise skips classpath resolution for that root.
+    pub allow_build_tool_execution: bool,
 }
 
 /// Depth of classpath analysis.
@@ -66,6 +75,7 @@ impl Default for ClasspathConfig {
             classpath_file: None,
             force: false,
             timeout_secs: 60,
+            allow_build_tool_execution: true,
         }
     }
 }
@@ -323,14 +333,39 @@ fn resolve_from_build_system(
             cache_path: Some(detection.project_root.join(".sqry").join("classpath")),
         };
 
-        let mut root_resolved = match build_system {
-            BuildSystem::Gradle => {
-                crate::resolve::gradle::resolve_gradle_classpath(&resolve_config)
+        let mut root_resolved = if config.allow_build_tool_execution {
+            match build_system {
+                BuildSystem::Gradle => {
+                    crate::resolve::gradle::resolve_gradle_classpath(&resolve_config)
+                }
+                BuildSystem::Maven => {
+                    crate::resolve::maven::resolve_maven_classpath(&resolve_config)
+                }
+                BuildSystem::Bazel => {
+                    crate::resolve::bazel::resolve_bazel_classpath(&resolve_config)
+                }
+                BuildSystem::Sbt => crate::resolve::sbt::resolve_sbt_classpath(&resolve_config),
+            }?
+        } else {
+            // Build-tool execution disabled (`--no-build-tool`): never spawn the
+            // repository's build tooling. Use a previously cached classpath when
+            // one exists, otherwise skip this root with a warning rather than
+            // aborting the whole index.
+            match read_cached_classpath(build_system, &resolve_config) {
+                Some(cached) => cached,
+                None => {
+                    warn!(
+                        "Build-tool execution is disabled (--no-build-tool) and no cached \
+                         classpath is available for {} ({:?}); skipping classpath resolution \
+                         for this root. Provide --classpath-file, or resolve once without \
+                         --no-build-tool in a trusted context to populate the cache.",
+                        detection.project_root.display(),
+                        build_system
+                    );
+                    continue;
+                }
             }
-            BuildSystem::Maven => crate::resolve::maven::resolve_maven_classpath(&resolve_config),
-            BuildSystem::Bazel => crate::resolve::bazel::resolve_bazel_classpath(&resolve_config),
-            BuildSystem::Sbt => crate::resolve::sbt::resolve_sbt_classpath(&resolve_config),
-        }?;
+        };
         resolved.append(&mut root_resolved);
     }
 
@@ -340,6 +375,21 @@ fn resolve_from_build_system(
             .then_with(|| a.module_name.cmp(&b.module_name))
     });
     Ok(resolved)
+}
+
+/// Read a previously cached classpath for `build_system` without executing any
+/// build tooling. Returns `None` when no usable cache is present. Used only when
+/// build-tool execution is disabled (`--no-build-tool`).
+fn read_cached_classpath(
+    build_system: BuildSystem,
+    resolve_config: &ResolveConfig,
+) -> Option<Vec<ResolvedClasspath>> {
+    match build_system {
+        BuildSystem::Gradle => crate::resolve::gradle::read_cached_classpath(resolve_config),
+        BuildSystem::Maven => crate::resolve::maven::read_cached_classpath(resolve_config),
+        BuildSystem::Bazel => crate::resolve::bazel::read_cached_classpath(resolve_config),
+        BuildSystem::Sbt => crate::resolve::sbt::read_cached_classpath(resolve_config),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -617,6 +667,100 @@ mod tests {
         assert!(config.classpath_file.is_none());
         assert!(!config.force);
         assert_eq!(config.timeout_secs, 60);
+        // Build-tool execution is allowed by default (opt-out via --no-build-tool).
+        assert!(config.allow_build_tool_execution);
+    }
+
+    // ── Build-tool execution gate (F1: --no-build-tool) ────────────────
+
+    #[test]
+    fn no_build_tool_skips_resolution_without_running_a_build_tool() {
+        // A Gradle root is detected (build.gradle marker) but there is no
+        // wrapper and no cached classpath. With build-tool execution disabled
+        // the pipeline must not spawn anything and must skip the root gracefully
+        // (Ok, empty) rather than aborting the index.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("build.gradle"), "// empty\n").unwrap();
+
+        let config = ClasspathConfig {
+            enabled: true,
+            allow_build_tool_execution: false,
+            ..ClasspathConfig::default()
+        };
+
+        let resolved = resolve_from_build_system(tmp.path(), &config)
+            .expect("disabled build-tool execution must be a graceful skip, not an error");
+        assert!(
+            resolved.is_empty(),
+            "no cached classpath exists, so the disabled root yields nothing"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn no_build_tool_does_not_execute_a_project_wrapper() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // A Gradle root with an executable `gradlew` wrapper that writes a
+        // sentinel file if it is ever run.
+        let tmp = TempDir::new().unwrap();
+        std::fs::write(tmp.path().join("build.gradle"), "// empty\n").unwrap();
+        let sentinel = tmp.path().join("EXECUTED");
+        let gradlew = tmp.path().join("gradlew");
+        std::fs::write(
+            &gradlew,
+            format!("#!/bin/sh\ntouch \"{}\"\nexit 0\n", sentinel.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gradlew, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Disabled: the wrapper must never be executed.
+        let disabled = ClasspathConfig {
+            enabled: true,
+            allow_build_tool_execution: false,
+            ..ClasspathConfig::default()
+        };
+        let _ = resolve_from_build_system(tmp.path(), &disabled);
+        assert!(
+            !sentinel.exists(),
+            "the project build tool must not run under --no-build-tool"
+        );
+
+        // Contrast: with execution enabled the same wrapper DOES run, proving
+        // the sentinel would fire if the gate were bypassed.
+        let enabled = ClasspathConfig {
+            enabled: true,
+            allow_build_tool_execution: true,
+            ..ClasspathConfig::default()
+        };
+        let _ = resolve_from_build_system(tmp.path(), &enabled);
+        assert!(
+            sentinel.exists(),
+            "sanity: the wrapper executes when build-tool execution is enabled"
+        );
+    }
+
+    #[test]
+    fn read_cached_classpath_returns_none_without_a_cache() {
+        // The cache-only readers never spawn and return None when no cache is
+        // present, for every build system.
+        let tmp = TempDir::new().unwrap();
+        let resolve_config = crate::resolve::ResolveConfig {
+            project_root: tmp.path().to_path_buf(),
+            timeout_secs: 30,
+            cache_path: Some(tmp.path().join(".sqry").join("classpath")),
+        };
+        for build_system in [
+            BuildSystem::Gradle,
+            BuildSystem::Maven,
+            BuildSystem::Bazel,
+            BuildSystem::Sbt,
+        ] {
+            assert!(
+                read_cached_classpath(build_system, &resolve_config).is_none(),
+                "{build_system:?} must report no cached classpath when none exists"
+            );
+        }
     }
 
     // ── Manual classpath file tests ────────────────────────────────────
@@ -1036,6 +1180,7 @@ mod tests {
             classpath_file: Some(cp_file),
             force: false,
             timeout_secs: 30,
+            allow_build_tool_execution: true,
         };
 
         let result = run_classpath_pipeline(tmp.path(), &config).unwrap();

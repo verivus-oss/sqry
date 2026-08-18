@@ -160,6 +160,7 @@ fn collect_graph_data(
             include_type_edges: false,
             include_database: false,
             include_service: false,
+            cross_boundary: None,
         },
         limits: TraversalLimits {
             max_depth: u32::try_from(max_depth).unwrap_or(u32::MAX),

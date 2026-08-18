@@ -17,6 +17,7 @@ fn rule_ir_declares_nine_extension_variants() {
             kind: PathKind::Calls,
             max_depth: 5,
             max_paths: Some(3),
+            avoid: None,
         },
         RuleNode::SubgraphExtract {
             seeds: endpoint.clone(),
@@ -66,6 +67,8 @@ fn rule_ir_declares_nine_extension_variants() {
         edge_class: Some(RuleEdgeClass::Call),
         max_depth: 1,
         resolved_via: Some(ResolvedVia::Direct),
+        cross_boundary: None,
+        emit: crate::ir::TraversalEmit::ReachedNodes,
     };
 
     assert_eq!(extension_variants.len(), 9);
@@ -114,6 +117,7 @@ fn cacheable_rule_ir_variants_roundtrip_through_postcard() {
             kind: PathKind::Dependency,
             max_depth: 4,
             max_paths: Some(8),
+            avoid: None,
         },
         RuleNode::SubgraphExtract {
             seeds: endpoint.clone(),
@@ -126,6 +130,8 @@ fn cacheable_rule_ir_variants_roundtrip_through_postcard() {
             edge_class: Some(RuleEdgeClass::Call),
             max_depth: 1,
             resolved_via: Some(ResolvedVia::BindingPlane),
+            cross_boundary: None,
+            emit: crate::ir::TraversalEmit::ReachedNodes,
         },
         RuleNode::RelationEdges {
             from: endpoint.clone(),

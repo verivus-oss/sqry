@@ -7,7 +7,7 @@ use sqry_core::graph::unified::CodeGraph;
 use sqry_db::{QueryDb, QueryDbConfig};
 use sqry_rules::derived::BesideCachePrimitive;
 use sqry_rules::ir::{RuleEndpoint, RuleNode};
-use sqry_rules::rules::{RuleVariant, ShippedRule, intake, recipes};
+use sqry_rules::rules::{RuleVariant, ShippedRule, recipes};
 use sqry_rules::{
     RuleEngine, RuleOutput, RuleStep, SqryDbRuleBackend, beside_cache_route_for, load_rule_plan_str,
 };
@@ -218,9 +218,9 @@ fn assert_rule_output_shape(output: &RuleOutput) {
 }
 
 fn all_rules() -> Vec<ShippedRule> {
-    let mut rules = recipes::bbnty_recipe_rules();
-    rules.extend(intake::standard_intake_rules());
-    rules
+    // Single source of truth: the shipped set (recipes + intake + security), so
+    // the smoke suite never drifts from what `shipped_rules()` actually ships.
+    sqry_rules::rules::shipped_rules()
 }
 
 fn find_rule<'a>(rules: &'a [ShippedRule], id: &str) -> &'a ShippedRule {
@@ -264,7 +264,7 @@ fn collect_variants(node: &RuleNode, variants: &mut BTreeSet<RuleVariant>) {
 fn variant_for(node: &RuleNode) -> RuleVariant {
     match node {
         RuleNode::NodeScan { .. } => RuleVariant::NodeScan,
-        RuleNode::EdgeTraversal { .. } => RuleVariant::Chain,
+        RuleNode::EdgeTraversal { .. } => RuleVariant::EdgeTraversal,
         RuleNode::Filter { .. } => RuleVariant::Filter,
         RuleNode::SetOp { .. } => RuleVariant::SetOp,
         RuleNode::Chain { .. } => RuleVariant::Chain,
@@ -284,7 +284,15 @@ fn child_nodes(node: &RuleNode) -> Vec<&RuleNode> {
     match node {
         RuleNode::SetOp { left, right, .. } => vec![left, right],
         RuleNode::Chain { steps } => steps.iter().collect(),
-        RuleNode::PathQuery { from, to, .. } => endpoint_children([from, to]),
+        RuleNode::PathQuery {
+            from, to, avoid, ..
+        } => {
+            let mut children = endpoint_children([from, to]);
+            if let Some(avoid) = avoid {
+                children.extend(endpoint_children([avoid]));
+            }
+            children
+        }
         RuleNode::SubgraphExtract { seeds, .. } => endpoint_children([seeds]),
         RuleNode::RelationEdges { from, .. } => endpoint_children([from]),
         RuleNode::ReferencesAt { target } => endpoint_children([target]),

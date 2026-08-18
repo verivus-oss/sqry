@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [30.0.0](https://github.com/verivus-oss/sqry/compare/v29.0.6...v30.0.0) - 2026-08-18
+
+### Harden
+
+- --no-build-tool for classpath (F1) + workspace-containment guard for VS Code nav (F5) ([#670](https://github.com/verivus-oss/sqry/pull/670))
 ## [28.0.0](https://github.com/verivus-oss/sqry/compare/v27.0.8...v28.0.0) - 2026-07-07
 
 ### Documentation

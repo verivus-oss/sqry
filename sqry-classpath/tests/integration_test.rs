@@ -421,6 +421,7 @@ fn pipeline_manual_classpath_single_jar() {
         classpath_file: Some(cp_file),
         force: false,
         timeout_secs: 30,
+        allow_build_tool_execution: true,
     };
 
     let result = run_classpath_pipeline(tmp.path(), &config).unwrap();
@@ -465,6 +466,7 @@ fn pipeline_manual_classpath_multiple_jars() {
         classpath_file: Some(cp_file),
         force: false,
         timeout_secs: 30,
+        allow_build_tool_execution: true,
     };
 
     let result = run_classpath_pipeline(tmp.path(), &config).unwrap();
@@ -504,6 +506,7 @@ fn pipeline_manual_classpath_with_comments_and_blanks() {
         classpath_file: Some(cp_file),
         force: false,
         timeout_secs: 30,
+        allow_build_tool_execution: true,
     };
 
     let result = run_classpath_pipeline(tmp.path(), &config).unwrap();
@@ -543,6 +546,7 @@ fn pipeline_empty_classpath_file() {
         classpath_file: Some(cp_file),
         force: false,
         timeout_secs: 30,
+        allow_build_tool_execution: true,
     };
 
     let result = run_classpath_pipeline(tmp.path(), &config).unwrap();
@@ -1304,6 +1308,7 @@ fn pipeline_gradle_single_module_real() {
         classpath_file: None,
         force: true,
         timeout_secs: 120,
+        allow_build_tool_execution: true,
     };
 
     let result = run_classpath_pipeline(project.path(), &config).unwrap();
@@ -1328,6 +1333,7 @@ fn pipeline_maven_single_module_real() {
         classpath_file: None,
         force: true,
         timeout_secs: 120,
+        allow_build_tool_execution: true,
     };
 
     let result = run_classpath_pipeline(project.path(), &config).unwrap();
@@ -1348,6 +1354,7 @@ fn pipeline_bazel_java_real() {
         classpath_file: None,
         force: true,
         timeout_secs: 120,
+        allow_build_tool_execution: true,
     };
 
     let result = run_classpath_pipeline(project.path(), &config).unwrap();
@@ -1368,6 +1375,7 @@ fn pipeline_kotlin_project_real() {
         classpath_file: None,
         force: true,
         timeout_secs: 120,
+        allow_build_tool_execution: true,
     };
 
     let result = run_classpath_pipeline(project.path(), &config).unwrap();
@@ -1388,6 +1396,7 @@ fn pipeline_scala_project_real() {
         classpath_file: None,
         force: true,
         timeout_secs: 120,
+        allow_build_tool_execution: true,
     };
 
     let result = run_classpath_pipeline(project.path(), &config).unwrap();

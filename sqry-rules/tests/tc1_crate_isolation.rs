@@ -60,8 +60,8 @@ fn shipped_rule_catalog_is_reachable_through_public_surface() {
 
     assert_eq!(
         rules.len(),
-        12,
-        "seven bbnty recipes plus five standard intake rules are published"
+        13,
+        "seven bbnty recipes, five standard intake rules, and one security detector are published"
     );
     assert!(rules.iter().all(|rule| !rule.id().is_empty()));
 }

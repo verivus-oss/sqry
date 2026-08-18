@@ -7,6 +7,7 @@ use crate::ir::{
     ComplexityMetric, EntrypointExtension, PathKind, RelationEdgeKind, RuleCycleBounds,
     RuleEdgeClass, RuleEndpoint, RuleNode, RuleSimilarityKind,
 };
+use crate::witness::RuleSeverity;
 
 fn node(index: u32) -> NodeId {
     NodeId::new(index, 1)
@@ -137,6 +138,72 @@ fn rust_dsl_and_toml_loader_roundtrip_to_identical_ir() {
     let loaded = load_rule_plan_str(&source).expect("load generated TOML");
 
     assert_eq!(loaded, rust_plan);
+}
+
+#[test]
+fn is_unsafe_filter_survives_toml_roundtrip() {
+    // L0-P1: the `is_unsafe` planner predicate must be authorable in a TOML rule
+    // pack via a Filter node and round-trip to identical IR. The rule layer
+    // reuses the sqry-db `Predicate`, so this locks the free flow-through.
+    let rust_plan = RuleBuilder::new()
+        .scan(NodeKind::Function)
+        .filter(Predicate::IsUnsafe(true))
+        .build()
+        .expect("is_unsafe rule plan");
+    let pack = RulePack::new(vec![RuleDefinition::new("sec.unsafe", rust_plan.clone())]);
+    let source = toml::to_string(&pack).expect("serialize rule pack");
+    let loaded = load_rule_plan_str(&source).expect("load generated TOML");
+
+    assert_eq!(loaded, rust_plan);
+}
+
+#[test]
+fn rule_metadata_survives_toml_roundtrip() {
+    // L0-P3: authored security metadata (schema 2) round-trips to identical IR.
+    let plan = RuleBuilder::new()
+        .scan(NodeKind::Function)
+        .filter(Predicate::IsUnsafe(true))
+        .build()
+        .expect("plan");
+    let def = RuleDefinition::new("sec.unsafe_ffi", plan)
+        .with_severity(RuleSeverity::Error)
+        .with_cwe("CWE-242")
+        .with_description("unsafe FFI usage")
+        .with_remediation("audit the boundary");
+    let pack = RulePack::new(vec![def.clone()]);
+    let source = toml::to_string(&pack).expect("serialize rule pack");
+    let loaded = load_rule_pack_str(&source).expect("load generated TOML");
+
+    assert_eq!(loaded.schema_version, 2);
+    assert_eq!(loaded.rules.len(), 1);
+    assert_eq!(loaded.rules[0], def);
+}
+
+#[test]
+fn schema_1_pack_loads_without_metadata() {
+    // A schema 1 pack (no metadata keys) still loads; the four metadata fields
+    // default to None. Reuse the correct serialization, then downgrade the tag.
+    let plan = RuleBuilder::new()
+        .scan(NodeKind::Function)
+        .filter(Predicate::IsUnsafe(false))
+        .build()
+        .expect("plan");
+    let pack = RulePack::new(vec![RuleDefinition::new("legacy", plan)]);
+    let source = toml::to_string(&pack)
+        .expect("serialize rule pack")
+        .replace("schema_version = 2", "schema_version = 1");
+    assert!(
+        source.contains("schema_version = 1"),
+        "downgrade replacement must have produced a schema 1 pack"
+    );
+    let loaded = load_rule_pack_str(&source).expect("schema 1 pack loads");
+
+    assert_eq!(loaded.schema_version, 1, "pack loaded as schema 1");
+    let def = &loaded.rules[0];
+    assert!(def.severity.is_none());
+    assert!(def.cwe.is_none());
+    assert!(def.description.is_none());
+    assert!(def.remediation.is_none());
 }
 
 #[test]

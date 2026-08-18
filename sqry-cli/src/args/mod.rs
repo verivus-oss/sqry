@@ -563,7 +563,8 @@ pub enum RulesAction {
     /// Built-in selectors:
     ///   - `bbnty.recipes`  seven bbnty proof-recipe rules
     ///   - `bbnty.intake`   standard first-run intake pack
-    ///   - `bbnty.all`      recipes plus intake rules
+    ///   - `bbnty.security` universal security detectors (unsafe FFI reach)
+    ///   - `bbnty.all`      recipes plus intake plus security rules
     ///
     /// A selector matching a shipped rule ID executes that single rule. Any
     /// other selector is treated as a TOML rule-pack path.
@@ -924,9 +925,10 @@ pub enum Command {
     /// Execute declarative rule-layer rules and packs (P5 L5).
     ///
     /// Runs stable shipped rule IDs/packs or TOML rule packs through the
-    /// declarative rule engine. Rules that require beside-cache coordination
-    /// are reported as unsupported on this single-snapshot CLI path and are
-    /// reserved for the coordinator/MCP surface.
+    /// declarative rule engine. SimilarTo rules run in-engine via structural
+    /// neighbours; only cross-snapshot (CrossSnapshotDiff) rules are reported
+    /// as unsupported on this single-snapshot CLI path, until the
+    /// snapshot-sourcing coordinator lands.
     #[command(display_order = 4, verbatim_doc_comment)]
     Rules {
         /// Rule action.
@@ -1161,6 +1163,14 @@ pub enum Command {
         #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 45)]
         force_classpath: bool,
 
+        /// Do not execute the project's build tooling (gradlew, mvn, bazel, sbt)
+        /// during classpath analysis. Uses a previously cached classpath when
+        /// present, otherwise skips classpath resolution. Prefer this when
+        /// indexing untrusted repositories, since build-tool execution runs
+        /// repository-controlled code.
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 46)]
+        no_build_tool: bool,
+
         /// Allow creating a nested `.sqry/` index inside an outer
         /// project that already has one (cluster-E §E.3).
         ///
@@ -1307,6 +1317,14 @@ pub enum Command {
         #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 45)]
         force_classpath: bool,
 
+        /// Do not execute the project's build tooling (gradlew, mvn, bazel, sbt)
+        /// during classpath analysis. Uses a previously cached classpath when
+        /// present, otherwise skips classpath resolution. Prefer this when
+        /// indexing untrusted repositories, since build-tool execution runs
+        /// repository-controlled code.
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 46)]
+        no_build_tool: bool,
+
         #[command(flatten)]
         plugin_selection: PluginSelectionArgs,
     },
@@ -1372,6 +1390,14 @@ pub enum Command {
         /// Force classpath re-resolution (ignore cached classpath).
         #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 45)]
         force_classpath: bool,
+
+        /// Do not execute the project's build tooling (gradlew, mvn, bazel, sbt)
+        /// during classpath analysis. Uses a previously cached classpath when
+        /// present, otherwise skips classpath resolution. Prefer this when
+        /// indexing untrusted repositories, since build-tool execution runs
+        /// repository-controlled code.
+        #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 46)]
+        no_build_tool: bool,
 
         #[command(flatten)]
         plugin_selection: PluginSelectionArgs,
@@ -4225,6 +4251,41 @@ mod tests {
         } else {
             panic!("Expected Index command");
         }
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn test_index_no_build_tool_flag_parses() {
+        // Defaults to false: build tools are allowed unless opted out.
+        let cli = Cli::parse_from(["sqry", "index", "."]);
+        let Some(Command::Index { no_build_tool, .. }) = cli.command.as_deref() else {
+            panic!("Expected Index command");
+        };
+        assert!(!*no_build_tool, "no_build_tool defaults to false");
+
+        let cli = Cli::parse_from(["sqry", "index", "--no-build-tool", "."]);
+        let Some(Command::Index { no_build_tool, .. }) = cli.command.as_deref() else {
+            panic!("Expected Index command");
+        };
+        assert!(*no_build_tool, "--no-build-tool sets no_build_tool=true");
+    }
+    }
+
+    large_stack_test! {
+    #[test]
+    fn test_update_and_watch_no_build_tool_flag_parses() {
+        let cli = Cli::parse_from(["sqry", "update", "--no-build-tool", "."]);
+        let Some(Command::Update { no_build_tool, .. }) = cli.command.as_deref() else {
+            panic!("Expected Update command");
+        };
+        assert!(*no_build_tool, "update --no-build-tool sets no_build_tool=true");
+
+        let cli = Cli::parse_from(["sqry", "watch", "--no-build-tool", "."]);
+        let Some(Command::Watch { no_build_tool, .. }) = cli.command.as_deref() else {
+            panic!("Expected Watch command");
+        };
+        assert!(*no_build_tool, "watch --no-build-tool sets no_build_tool=true");
     }
     }
 

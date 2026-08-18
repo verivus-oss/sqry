@@ -54,17 +54,33 @@ export class SqryCodeActionProvider implements vscode.CodeActionProvider {
           // Navigate to the first related location
           if (diagnostic.relatedInformation && diagnostic.relatedInformation.length > 0) {
             const related = diagnostic.relatedInformation[0];
-            const action = new vscode.CodeAction(
-              "Navigate to duplicate",
-              vscode.CodeActionKind.QuickFix,
-            );
-            action.command = {
-              command: "vscode.open",
-              title: "Open duplicate",
-              arguments: [related.location.uri, { selection: related.location.range }],
-            };
-            action.diagnostics = [diagnostic];
-            actions.push(action);
+            // The related location comes from duplicate-detection results. Only
+            // offer navigation for a `file:` URI, and route it through the guarded
+            // `sqry.openResultFile` command (its fsPath is passed as data; the
+            // guard rejects out-of-workspace targets) rather than opening the raw
+            // URI. A non-`file` scheme is refused here at the source.
+            if (related.location.uri.scheme === "file") {
+              const action = new vscode.CodeAction(
+                "Navigate to duplicate",
+                vscode.CodeActionKind.QuickFix,
+              );
+              const relatedRange = related.location.range;
+              action.command = {
+                command: "sqry.openResultFile",
+                title: "Open duplicate",
+                arguments: [
+                  related.location.uri.fsPath,
+                  {
+                    startLine: relatedRange.start.line,
+                    startCharacter: relatedRange.start.character,
+                    endLine: relatedRange.end.line,
+                    endCharacter: relatedRange.end.character,
+                  },
+                ],
+              };
+              action.diagnostics = [diagnostic];
+              actions.push(action);
+            }
           }
           break;
         }

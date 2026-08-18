@@ -6,20 +6,29 @@
 
 sqry is a local semantic code search tool. It parses source code into AST-backed symbol and relationship graphs so you can ask code questions that text search cannot answer reliably.
 
+Everything runs on your machine. Indexing and querying make no network calls, and sqry sends no telemetry.
+
 Website: https://sqry.dev
 
 ## Current Capabilities
 
+- 37 language plugins, 28 with full relation support and 9 with symbol extraction plus imports. By build cost, 29 are on the default fast path, `json` is compiled but excluded by default as high-wall-clock, and 7 specialty plugins sit behind Cargo features. The `sqry://meta/manifest` MCP resource reports these counts for the binary you have installed.
 - Structural queries over symbol kind, language, visibility, names, return types, references, and relations.
 - Graph analysis for callers, callees, imports, exports, call paths, cycles, unused symbols, duplicates, impact, semantic diff, and focused subgraphs.
-- Edge-backed `returns:<TypeName>` and resolution-aware `resolved_via:<kind>` predicates for supported graph paths.
+- Edge-backed `returns:<TypeName>` and resolution-aware `resolved_via:<kind>` predicates for supported graph paths. See [Call resolution predicates](#call-resolution-predicates).
+- Cross-language FFI edges. The C, C++, C#, Elixir, Haskell, Kotlin, Lua, PHP, R, Ruby, and Rust plugins emit `FfiCall` edges from mechanisms such as `extern "C"`, `DllImport` / P/Invoke, JNI, Ruby FFI `attach_function`, and R `.Call` / `Rcpp`. Query them with `sqry graph cross-language` or the `cross_language_edges` MCP tool.
+- Structural shape matching with `sqry shape-match`, which finds functions with similar body structure independently of their identifiers.
+- A declarative rule layer. `sqry rules run` executes shipped rule IDs and packs, or your own TOML rule packs, against the graph; the `rules_run` MCP tool exposes the same engine.
+- Go context propagation analysis (`sqry context-propagation`) for call sites that drop `context.Context`.
+- Rust macro-boundary analysis: `sqry cache expand` builds a macro expansion cache, `--expand-cache` materializes macro-generated symbols as searchable nodes, and `--cfg` marks `#[cfg]`-gated symbols active or inactive. Both index-path options are execution-free.
+- Visualization and export as Mermaid, Graphviz DOT, or D2 (`sqry visualize`, `sqry export`).
+- An interactive shell (`sqry shell`) and batch runner (`sqry batch`) that keep the session cache warm across many queries.
+- Incremental indexing with `sqry update` and `sqry watch`.
 - Workspace-aware indexing through `.sqry-workspace` registries and VS Code `.code-workspace` `sqry.workspace` blocks. <!-- claim:multi-root-supported test:resolve_logical_workspace_short_circuits_in_documented_order -->
 - Daemon-backed shared graph loading through `sqryd` for editor, MCP, and repeated-agent workflows.
 - One-shot repository orientation with `sqry overview` (and the matching `generate_overview` MCP tool for agents): a single report of the load-bearing hubs, path/package subsystems, complexity hotspots, potential issues, and ready-to-run follow-up queries.
 - MCP integration for AI assistants. Standalone `sqry-mcp` currently exposes 39 tools; daemon-hosted MCP exposes a 17-tool subset. Use `tools/list`, `sqry-mcp --list-tools`, or `sqry://meta/manifest` as the authoritative catalog.
 - LSP and VS Code extension support for editor workflows.
-
-> **Removed in 21.0.0:** the experimental natural-language surface (`sqry ask` CLI command, `sqry_ask` MCP tool, `sqry/ask` LSP request) was removed. Use the structured query and graph commands shown below; see [Removed features](docs/TROUBLESHOOTING.md#removed-features) for migration.
 
 ## When To Use sqry
 
@@ -52,7 +61,7 @@ The shell installer downloads release assets, verifies SHA256 checksums by defau
 - `sqry-lsp`
 - `sqryd`
 
-Supported release platforms are Linux `x86_64`/`arm64` and macOS `x86_64`/`arm64`.
+Supported release platforms are Linux `x86_64`/`arm64` (glibc and musl builds), macOS `x86_64`/`arm64`, and Windows `x86_64`.
 
 Useful options:
 
@@ -124,6 +133,19 @@ sqry index --force .
 
 Index artifacts live under `.sqry/`. Add `.sqry/` and legacy `.sqry-index` artifacts to your project ignore rules unless you intentionally share them.
 
+### Index Validation
+
+```bash
+sqry search main . --validate fail --auto-rebuild
+sqry index --status --metrics-format prometheus .
+```
+
+`--validate` takes `off`, `warn` (default), or `fail`. Under `fail` a stale index aborts with exit code 2 instead of returning results computed from it, which is what makes it usable as a CI gate. `--auto-rebuild` rebuilds once and retries, and is a no-op under `--validate off`. Thresholds are tunable: `--threshold-orphaned-files` defaults to 0.20, so validation trips when more than 20% of indexed files no longer exist on disk, and `--threshold-dangling-refs` defaults to 0.05.
+
+Note the limit: these are global flags, but validation is evaluated on the snapshot-loading path taken by search. Passing them to `sqry index` when an index already exists does not trigger a validation pass.
+
+`--metrics-format prometheus` emits OpenMetrics-compatible text for scraping index status.
+
 ### Plugin Selection
 
 sqry records the plugin set that built an index so later graph-loading commands reuse the same semantics.
@@ -160,7 +182,32 @@ sqry plan-query "kind:function callers:main"
 sqry plan-query "kind:function callers:my_read resolved_via:binding_plane"
 ```
 
-`returns:<TypeName>` uses graph `TypeOf{Return}` edges. `resolved_via:<kind>` accepts `direct`, `type_match`, `binding_plane`, `virtual_dispatch`, `interface_dispatch`, `duck_typed`, `structural`, and `promiscuous_elided`. `framework` filtering is exposed through MCP parameters today; do not rely on `framework:<id>` text grammar unless the current parser documentation and tests in your installed version support it.
+`returns:<TypeName>` uses graph `TypeOf{Return}` edges.
+
+### Call Resolution Predicates
+
+`resolved_via:<kind>` filters call edges by **what kind of binding produced the edge**. That is a different question from how confident the resolver is: a `duck_typed` edge is not a low-confidence `direct` edge, it is a record that the call was bound by Python duck typing rather than by a syntactic reference. Knowing the mechanism lets you separate calls the compiler could have checked from calls that only resolve at runtime.
+
+The parser accepts eight values:
+
+| Value | Binding mechanism |
+|---|---|
+| `direct` | Syntactic call resolved by the language plugin |
+| `type_match` | Indirect call matched against compatible signatures by type |
+| `binding_plane` | Designated-initializer witnesses in the binding plane |
+| `virtual_dispatch` | JVM virtual or abstract method dispatch |
+| `interface_dispatch` | Go interface dispatch |
+| `duck_typed` | Python duck-typed dispatch |
+| `structural` | TypeScript structural dispatch |
+| `promiscuous_elided` | Fan-out cap exceeded, so the resolver recorded a diagnostic self-edge instead of N targets |
+
+```bash
+# Callers of my_read that only bind through the binding plane,
+# not through a plain syntactic call.
+sqry plan-query "kind:function callers:my_read resolved_via:binding_plane"
+```
+
+`framework` filtering is available only through MCP parameters. There is no `framework:<id>` predicate in the text grammar.
 
 See [Advanced Analysis](docs/user-guide/advanced-analysis.md) for graph predicates, snapshot wording, impact analysis, semantic diff, and visualization.
 
@@ -247,6 +294,16 @@ For the VS Code extension, see [sqry-vscode/README.md](sqry-vscode/README.md) an
 - [Advanced Analysis](docs/user-guide/advanced-analysis.md)
 - [Structural Shape Matching](docs/user-guide/shape-match.md)
 - [Visualization](docs/user-guide/visualization.md)
+
+## Security And Supply Chain
+
+- Release artifacts carry a GitHub OIDC keyless attestation, published as the `release-artifacts.attestation.json` asset and verifiable with `gh attestation verify` or Cosign. `SHA256SUMS.txt` ships alongside, and both installers verify checksums by default.
+- Each release also publishes a release manifest and a release ledger asset recording the stages the build passed through.
+- Dependencies are gated in CI by `cargo-vet` (importing the Mozilla, Google, Bytecode Alliance, and ISRG audit sets), `cargo-deny`, and `cargo-audit`. Clippy runs as `-D warnings`.
+- The query planner's text parser is fuzzed nightly with `cargo-fuzz`. `cargo-mutants` runs on changed lines per PR and against a canary-crate baseline on master; it currently reports rather than blocks.
+- SBOMs (CycloneDX and SPDX) and OpenVEX documents are generated by a separate workflow.
+
+Do not assume an artifact is present unless it appears in the asset list for the release you are installing. To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
 ## Project Scope
 

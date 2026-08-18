@@ -5,7 +5,7 @@ mod plan;
 
 pub use node::{
     ComplexityMetric, EntrypointExtension, PathKind, RelationEdgeKind, RuleCycleBounds,
-    RuleEdgeClass, RuleEndpoint, RuleNode, RuleSimilarityKind,
+    RuleEdgeClass, RuleEndpoint, RuleNode, RuleSimilarityKind, TraversalEmit,
 };
 pub use plan::RulePlan;
 

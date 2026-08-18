@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use sqry_core::graph::unified::bind::BindingPlane;
@@ -14,8 +14,8 @@ use sqry_db::queries::{
 };
 
 use super::{
-    CycleClass, RULE_BACKEND_METHODS, RuleBackend, RulePath, RuleReachabilityKey, RuleTopologyKey,
-    SnapshotId, TracePathKey,
+    CycleClass, RULE_BACKEND_METHODS, RuleBackend, RulePath, RuleReachabilityKey,
+    RuleStructuralNeighbor, RuleTopologyKey, SnapshotId, TracePathKey,
 };
 use crate::ir::RelationEdgeKind;
 use crate::{RuleError, RuleResult};
@@ -25,6 +25,7 @@ pub struct FakeBackend {
     snapshot: Arc<GraphSnapshot>,
     nodes: Arc<Vec<NodeId>>,
     set: Arc<HashSet<NodeId>>,
+    structural_neighbors: HashMap<NodeId, Vec<RuleStructuralNeighbor>>,
 }
 
 impl FakeBackend {
@@ -35,7 +36,19 @@ impl FakeBackend {
             snapshot: Arc::new(graph.snapshot()),
             nodes: Arc::new(Vec::new()),
             set: Arc::new(HashSet::new()),
+            structural_neighbors: HashMap::new(),
         }
+    }
+
+    /// Injects a deterministic structural-neighbour list for a probe node.
+    #[must_use]
+    pub fn with_structural_neighbors(
+        mut self,
+        probe: NodeId,
+        neighbours: Vec<RuleStructuralNeighbor>,
+    ) -> Self {
+        self.structural_neighbors.insert(probe, neighbours);
+        self
     }
 }
 
@@ -168,11 +181,32 @@ impl RuleBackend for FakeBackend {
             reason: "fake backend does not carry multiple snapshots",
         })
     }
+
+    fn structural_neighbors(
+        &self,
+        probe: NodeId,
+        similarity_floor: f32,
+        max_results: usize,
+    ) -> RuleResult<Vec<RuleStructuralNeighbor>> {
+        let hits = self
+            .structural_neighbors
+            .get(&probe)
+            .map(|neighbours| {
+                neighbours
+                    .iter()
+                    .copied()
+                    .filter(|neighbour| neighbour.jaccard >= similarity_floor)
+                    .take(max_results)
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(hits)
+    }
 }
 
 #[test]
 fn rule_backend_method_set_has_fr4_shape() {
-    assert_eq!(RULE_BACKEND_METHODS.len(), 20);
+    assert_eq!(RULE_BACKEND_METHODS.len(), 21);
     assert_eq!(
         RULE_BACKEND_METHODS,
         [
@@ -196,6 +230,7 @@ fn rule_backend_method_set_has_fr4_shape() {
             "trace_path",
             "run_plan",
             "comparative",
+            "structural_neighbors",
         ]
     );
 }

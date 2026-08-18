@@ -325,6 +325,7 @@ pub enum SetOperation {
 /// | `References(v)`  | `match_references` / `match_references_subquery` | `references:v` (supports `~=` regex) |
 /// | `Implements(v)`  | `match_implements` / `match_implements_subquery` | `impl:v` / `implements:v` |
 /// | `IsDefinition(b)` | `NodeEntry::is_definition == b` | `is_definition:b` / `items:b` |
+/// | `IsUnsafe(b)` | `NodeEntry::is_unsafe == b` (b=false means "not recorded unsafe", not "proven safe") | `is_unsafe:b` |
 ///
 /// The text frontend in DB13 must accept both `impl:` and `implements:`
 /// aliases for [`Predicate::Implements`] (spec §M8).
@@ -466,6 +467,18 @@ pub enum Predicate {
     ///
     /// [`NodeEntry::is_definition`]: sqry_core::graph::unified::storage::arena::NodeEntry::is_definition
     IsDefinition(bool),
+    /// `is_unsafe:true|false`: true iff the node's stored unsafe marker matches
+    /// the requested polarity.
+    ///
+    /// The bit is populated by plugins that model unsafe code (e.g. Rust
+    /// `unsafe fn` / `unsafe` blocks via
+    /// [`NodeEntry::with_unsafe`]). Snapshots and plugins that never record it
+    /// default the field to false, so `is_unsafe:true` is the sound, precise
+    /// query (a match means the indexer recorded unsafe); `is_unsafe:false`
+    /// means "not recorded as unsafe," NOT "proven safe."
+    ///
+    /// [`NodeEntry::with_unsafe`]: sqry_core::graph::unified::storage::arena::NodeEntry::with_unsafe
+    IsUnsafe(bool),
     /// `returns:<TypeName>`: true iff the node (a function or method) has at
     /// least one outgoing
     /// [`EdgeKind::TypeOf { context: Some(TypeOfContext::Return), .. }`][crate::queries]
@@ -572,6 +585,7 @@ impl Predicate {
             | Predicate::InFile(_)
             | Predicate::InScope(_)
             | Predicate::MatchesName(_)
+            | Predicate::IsUnsafe(_)
             | Predicate::Returns(_)
             | Predicate::CfgCondition(_)
             | Predicate::Wraps(_) => false,
@@ -599,6 +613,7 @@ impl Predicate {
             | Predicate::InScope(_)
             | Predicate::MatchesName(_)
             | Predicate::IsDefinition(_)
+            | Predicate::IsUnsafe(_)
             | Predicate::Returns(_)
             | Predicate::CfgCondition(_)
             | Predicate::Wraps(_) => false,

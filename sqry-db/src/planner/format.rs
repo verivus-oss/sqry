@@ -264,6 +264,10 @@ fn format_predicate_step(pred: &Predicate, out: &mut String) {
             write!(out, "is_definition:{}", if *b { "true" } else { "false" })
                 .expect("write to String");
         }
+        Predicate::IsUnsafe(b) => {
+            write!(out, "is_unsafe:{}", if *b { "true" } else { "false" })
+                .expect("write to String");
+        }
         Predicate::IsAddressTaken(b) => {
             // The parser accepts both `address_taken` (bare => true) and
             // `address_taken:true` / `address_taken:false`. Emit the
@@ -704,6 +708,12 @@ mod tests {
         );
         assert!(!formatted.contains("items"));
         roundtrip("kind:function is_definition:false");
+    }
+
+    #[test]
+    fn smoke_is_unsafe_round_trips() {
+        roundtrip("kind:function is_unsafe:true");
+        roundtrip("kind:function is_unsafe:false");
     }
 
     #[test]

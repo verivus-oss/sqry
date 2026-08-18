@@ -2,20 +2,20 @@
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.verivus-oss/sqry",
   "title": "sqry - Semantic Code Search",
-  "description": "AST-based semantic code search: 39 tools across 37 languages, with call tracing, dependency-impact, and cross-language edge analysis. Runs fully local (stdio).",
+  "description": "AST-based semantic code search: 39 tools over 37 languages. Call tracing and impact analysis.",
   "repository": {
     "url": "https://github.com/verivus-oss/sqry",
     "source": "github",
     "subfolder": "sqry-mcp"
   },
-  "version": "29.0.6",
+  "version": "30.0.0",
   "websiteUrl": "https://github.com/verivus-oss/sqry",
   "packages": [
     {
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "sqry-mcp",
-      "version": "28.0.0",
+      "version": "30.0.0",
       "transport": {
         "type": "stdio"
       },
@@ -37,9 +37,7 @@
     },
     {
       "registryType": "oci",
-      "registryBaseUrl": "https://ghcr.io",
-      "identifier": "ghcr.io/verivus-oss/sqry-mcp:v29.0.6",
-      "version": "v29.0.6",
+      "identifier": "ghcr.io/verivus-oss/sqry-mcp:v30.0.0",
       "runtimeArguments": [
         {
           "type": "named",

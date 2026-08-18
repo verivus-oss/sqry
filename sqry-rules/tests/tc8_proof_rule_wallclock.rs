@@ -10,13 +10,13 @@
 //! witness / `RuleOutput` envelopes) over many iterations on a non-trivial
 //! ~114-node fixture, and asserts engine_time <= 2 * hand_time.
 //!
-//! Beside-cache rules (PR-R3, PR-R4, PR-R7, and the duplicates intake rule)
-//! cannot be wall-clock compared here: their execution path is beside-cache
-//! coordination, which is not yet wired (P5U10 reports them as unsupported on
-//! the single-snapshot engine). They are budgeted by confirming they route
-//! through a beside-cache primitive, and are explicitly exempt from the <= 2x
-//! comparison until coordination lands. Measured ratios are recorded in
-//! 06_TEST_EXECUTION.md.
+//! Since L2a, SimilarTo rules (PR-R7 and the duplicates intake rule) run
+//! in-engine via the structural-neighbour primitive, so they ARE wall-clock
+//! compared here (the hand baseline exercises the same `structural_neighbors`
+//! call). Only the cross-snapshot rules (PR-R3, PR-R4) remain exempt: their
+//! `CrossSnapshotDiff` path needs a prior snapshot the single-snapshot engine
+//! cannot source yet, so they are budgeted by confirming they route through a
+//! beside-cache primitive. Measured ratios are recorded in 06_TEST_EXECUTION.md.
 
 mod common;
 

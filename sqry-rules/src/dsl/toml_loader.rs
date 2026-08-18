@@ -12,7 +12,11 @@ use crate::{RuleError, RuleResult};
 /// supported, or `RuleError::Analysis` when TOML deserialization fails.
 pub fn load_rule_pack_str(source: &str) -> RuleResult<RulePack> {
     let pack: RulePack = toml::from_str(source).map_err(anyhow::Error::from)?;
-    if pack.schema_version != super::schema::RULE_PACK_SCHEMA_VERSION {
+    // Accept the inclusive supported range `1..=CURRENT`: every version up to
+    // and including the current one loads (older packs stay valid because the
+    // schema-2 metadata fields are optional), while `0` and any future version
+    // are rejected.
+    if pack.schema_version < 1 || pack.schema_version > super::schema::RULE_PACK_SCHEMA_VERSION {
         return Err(RuleError::InvalidRuleSource {
             reason: "unsupported rule pack schema version",
         });

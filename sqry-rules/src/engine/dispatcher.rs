@@ -3,17 +3,24 @@
 use std::collections::{BTreeSet, HashSet};
 
 use serde::{Deserialize, Serialize};
-use sqry_core::graph::unified::{EdgeFilter, NodeId, TraversalDirection, TraversalLimits};
+use sqry_core::graph::unified::{
+    EdgeFilter, NodeId, TraversalDirection, TraversalLimits, TraversalResult,
+};
 use sqry_db::planner::{Direction, PathPattern, PlanNode, Predicate, QueryPlan, StringPattern};
 use sqry_db::queries::CyclesKey;
 
 use crate::backend::{CycleClass, RuleBackend, RulePath, SnapshotId, TracePathKey};
 use crate::ir::{
     ComplexityMetric, EntrypointExtension, PathKind, RelationEdgeKind, RuleCycleBounds,
-    RuleEdgeClass, RuleEndpoint, RuleNode, RulePlan, RuleSimilarityKind,
+    RuleEdgeClass, RuleEndpoint, RuleNode, RulePlan, RuleSimilarityKind, TraversalEmit,
 };
 use crate::witness::{DiffEntryKind, PathBudgetReason, RuleSeverity, RuleStep, RuleWitness};
 use crate::{RuleError, RuleResult};
+
+/// Jaccard floor for approximate structural neighbours (`SimilarTo::Similar`).
+const SIMILAR_FLOOR: f32 = 0.7;
+/// Per-seed cap on structural neighbours requested from the backend.
+const MAX_SIMILAR_RESULTS: usize = 50;
 
 /// Caller-provided cancellation hook.
 pub trait RuleCancellationToken {
@@ -177,6 +184,7 @@ impl RuleEngine {
                 kind,
                 max_depth,
                 max_paths,
+                avoid,
             } => self.execute_path_query(
                 backend,
                 from,
@@ -184,6 +192,7 @@ impl RuleEngine {
                 *kind,
                 *max_depth,
                 *max_paths,
+                avoid.as_ref(),
                 cancellation,
                 steps,
             ),
@@ -320,6 +329,8 @@ impl RuleEngine {
                     direction,
                     edge_class,
                     max_depth,
+                    cross_boundary,
+                    emit,
                     ..
                 } => {
                     if *max_depth == 0 {
@@ -327,7 +338,8 @@ impl RuleEngine {
                             reason: "edge traversal max_depth must be greater than zero",
                         });
                     }
-                    let filter = edge_class.map_or_else(EdgeFilter::all, edge_filter_for_class);
+                    let mut filter = edge_class.map_or_else(EdgeFilter::all, edge_filter_for_class);
+                    filter.cross_boundary = *cross_boundary;
                     let result = backend.traverse(
                         &current,
                         traversal_direction(*direction),
@@ -350,7 +362,7 @@ impl RuleEngine {
                             depth: edge.depth,
                         });
                     }
-                    current = result.nodes.iter().map(|node| node.node_id).collect();
+                    current = emit_traversal_nodes(&result, *emit);
                 }
                 _ => unreachable!("non-edge traversal steps are handled by sequence mode"),
             }
@@ -368,6 +380,7 @@ impl RuleEngine {
         kind: PathKind,
         max_depth: u32,
         max_paths: Option<u32>,
+        avoid: Option<&RuleEndpoint>,
         cancellation: &C,
         steps: &mut Vec<RuleStep>,
     ) -> RuleResult<RuleOutput> {
@@ -378,6 +391,17 @@ impl RuleEngine {
         }
         let sources = self.endpoint_nodes(backend, from, cancellation, steps)?;
         let targets = self.endpoint_nodes(backend, to, cancellation, steps)?;
+        // Resolve the avoid set once. A path survives only if it does not
+        // traverse any avoid node, expressing "reachable without passing through
+        // the avoid set" (e.g. a sink reachable without a guard).
+        let avoid_nodes: HashSet<NodeId> = match avoid {
+            Some(endpoint) => self
+                .endpoint_nodes(backend, endpoint, cancellation, steps)?
+                .iter()
+                .copied()
+                .collect(),
+            None => HashSet::new(),
+        };
         let mut paths = Vec::new();
         for target in targets {
             check_cancelled(cancellation)?;
@@ -397,6 +421,13 @@ impl RuleEngine {
             };
             let returned_paths = backend.trace_path(key)?;
             for path in returned_paths.iter() {
+                if !avoid_nodes.is_empty()
+                    && path.nodes.iter().any(|node| avoid_nodes.contains(node))
+                {
+                    // Path passes through the avoid set: not a guard-avoiding
+                    // path, so it is neither witnessed nor collected.
+                    continue;
+                }
                 if let (Some(from_node), Some(to_node)) =
                     (path.nodes.first().copied(), path.nodes.last().copied())
                 {
@@ -408,8 +439,8 @@ impl RuleEngine {
                         nodes: path.nodes.clone(),
                     });
                 }
+                paths.push(path.clone());
             }
-            paths.extend(returned_paths.iter().cloned());
         }
         if max_paths.is_some_and(|limit| paths.len() >= limit as usize) {
             steps.push(RuleStep::PathBudgetExhausted {
@@ -675,22 +706,60 @@ impl RuleEngine {
         steps: &mut Vec<RuleStep>,
     ) -> RuleResult<RuleOutput> {
         let seed_nodes = self.endpoint_nodes(backend, seed, cancellation, steps)?;
-        if let Some(scope_endpoint) = scope {
-            let _scope_nodes = self.endpoint_nodes(backend, scope_endpoint, cancellation, steps)?;
+        let scope_allow: Option<HashSet<NodeId>> = match scope {
+            Some(scope_endpoint) => Some(
+                self.endpoint_nodes(backend, scope_endpoint, cancellation, steps)?
+                    .into_iter()
+                    .collect(),
+            ),
+            None => None,
+        };
+
+        // Duplicate = exact structural identity (shape_hash match); Similar =
+        // approximate neighbour above the Jaccard floor.
+        let (floor, exact_only) = match similarity_kind {
+            RuleSimilarityKind::Duplicate => (0.0_f32, true),
+            RuleSimilarityKind::Similar => (SIMILAR_FLOOR, false),
+        };
+
+        let mut rows = Vec::new();
+        for seed_node in seed_nodes {
+            check_cancelled(cancellation)?;
+            let neighbours = backend.structural_neighbors(seed_node, floor, MAX_SIMILAR_RESULTS)?;
+            for neighbour in neighbours {
+                if neighbour.node == seed_node {
+                    continue;
+                }
+                if exact_only && !neighbour.shape_hash_exact {
+                    continue;
+                }
+                if let Some(allow) = &scope_allow
+                    && !allow.contains(&neighbour.node)
+                {
+                    continue;
+                }
+                let score = match similarity_kind {
+                    RuleSimilarityKind::Duplicate => 10_000u16,
+                    RuleSimilarityKind::Similar => {
+                        (neighbour.jaccard * 10_000.0).round().clamp(0.0, 10_000.0) as u16
+                    }
+                };
+                rows.push(RuleSimilarityMatch {
+                    seed: seed_node,
+                    matched: neighbour.node,
+                    score,
+                    similarity_kind,
+                });
+                steps.push(RuleStep::SimilarityMatchEmitted {
+                    seed: seed_node,
+                    matched: neighbour.node,
+                    score,
+                    similarity_kind,
+                });
+            }
         }
-        if let Some(seed_node) = seed_nodes.first().copied() {
-            steps.push(RuleStep::SimilarityMatchEmitted {
-                seed: seed_node,
-                matched: seed_node,
-                score: 10_000,
-                similarity_kind,
-            });
-        }
-        Err(RuleError::UnsupportedPrimitive {
-            backend: "rule-engine",
-            primitive: "similar_to",
-            reason: "SimilarTo routes through the P5U07 beside-cache adapter; P5U06 only validates dispatch and cancellation behavior",
-        })
+
+        Ok(RuleOutput::SimilarityMatches(rows))
     }
 
     fn endpoint_nodes<B: RuleBackend, C: RuleCancellationToken>(
@@ -884,8 +953,19 @@ fn lower_plan_node(node: &RuleNode) -> Option<PlanNode> {
             edge_class,
             max_depth,
             resolved_via,
+            cross_boundary,
+            emit,
         } => {
-            if edge_class.is_some() {
+            // sqry-db's planner IR has no cross-boundary or emit concept, and
+            // its separate `run_traversal` BFS filters by discriminant only,
+            // with no `EdgeFilter` and always emits reached nodes. Lowering a
+            // cross-boundary or non-default-emit traversal would silently drop
+            // the criterion, so refuse it and force the witness-bearing backend
+            // traversal path.
+            if edge_class.is_some()
+                || cross_boundary.is_some()
+                || *emit != TraversalEmit::ReachedNodes
+            {
                 return None;
             }
             Some(PlanNode::EdgeTraversal {
@@ -955,6 +1035,38 @@ fn edge_filter_for_class(edge_class: RuleEdgeClass) -> EdgeFilter {
     edge_filter_for_classes(&[edge_class])
 }
 
+/// Selects the node set an edge traversal emits from its materialized result.
+///
+/// `ReachedNodes` returns seeds plus every reached node (historical behavior);
+/// `EdgeSources` / `EdgeTargets` return the distinct source / target endpoints
+/// of the edges that passed the filter, in first-seen order.
+fn emit_traversal_nodes(result: &TraversalResult, emit: TraversalEmit) -> Vec<NodeId> {
+    match emit {
+        TraversalEmit::ReachedNodes => result.nodes.iter().map(|node| node.node_id).collect(),
+        TraversalEmit::EdgeSources => collect_edge_endpoints(result, true),
+        TraversalEmit::EdgeTargets => collect_edge_endpoints(result, false),
+    }
+}
+
+/// Collects the distinct source (or target) endpoints of the traversed edges in
+/// first-seen order.
+fn collect_edge_endpoints(result: &TraversalResult, sources: bool) -> Vec<NodeId> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for edge in &result.edges {
+        let idx = if sources {
+            edge.source_idx
+        } else {
+            edge.target_idx
+        };
+        let node_id = result.nodes[idx].node_id;
+        if seen.insert(node_id) {
+            out.push(node_id);
+        }
+    }
+    out
+}
+
 fn edge_filter_for_classes(edge_classes: &[RuleEdgeClass]) -> EdgeFilter {
     if edge_classes.is_empty() {
         return EdgeFilter::all();
@@ -972,6 +1084,7 @@ fn edge_filter_for_classes(edge_classes: &[RuleEdgeClass]) -> EdgeFilter {
         include_type_edges: selected.contains(&RuleEdgeClass::Type),
         include_database: selected.contains(&RuleEdgeClass::Database),
         include_service: selected.contains(&RuleEdgeClass::Service),
+        cross_boundary: None,
     }
 }
 

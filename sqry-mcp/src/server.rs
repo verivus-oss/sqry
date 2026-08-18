@@ -1195,7 +1195,7 @@ impl SqryServer {
 
     /// Execute a declarative rule-layer rule or pack (P5U10).
     #[tool(
-        description = "Run a declarative rule-layer rule or pack against the workspace graph: resolves a shipped Rust DSL rule/pack by stable id (e.g. bbnty.recipes, bbnty.intake, bbnty.all) or a TOML rule pack by workspace path, runs the production rule engine, and returns each rule's structured output plus witness. Rules needing cross-snapshot or similarity routes are reported as unsupported until the coordinator surface lands.",
+        description = "Run a declarative rule-layer rule or pack against the workspace graph: resolves a shipped Rust DSL rule/pack by stable id (e.g. bbnty.recipes, bbnty.intake, bbnty.security, bbnty.all) or a TOML rule pack by workspace path, runs the production rule engine, and returns each rule's structured output plus witness. SimilarTo rules run in-engine via structural neighbours; only cross-snapshot (CrossSnapshotDiff) routes are reported as unsupported until the snapshot-sourcing coordinator lands.",
         annotations(read_only_hint = true, open_world_hint = false)
     )]
     async fn rules_run(

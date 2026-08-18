@@ -73,6 +73,7 @@ fn path_to_check(source: RuleNode, check: RuleNode, max_depth: u32) -> RuleNode 
         kind: PathKind::Calls,
         max_depth,
         max_paths: Some(32),
+        avoid: None,
     }
 }
 

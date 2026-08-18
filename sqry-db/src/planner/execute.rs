@@ -661,6 +661,7 @@ impl<'db> PlanExecutor<'db> {
                 entry_name_matches(&self.snapshot, node_id, entry, pattern)
             }
             CompiledPredicate::IsDefinition(want) => entry.is_definition() == *want,
+            CompiledPredicate::IsUnsafe(want) => entry.is_unsafe == *want,
             CompiledPredicate::Returns(type_name) => self.node_returns_type(node_id, type_name),
 
             CompiledPredicate::CfgCondition(matcher) => {
@@ -1047,6 +1048,10 @@ enum CompiledPredicate {
     /// graphs are responsible for honoring the R3 `definition_signal_present`
     /// marker before interpreting pre-V16 snapshots.
     IsDefinition(bool),
+    /// `is_unsafe:true|false`. Executor compares the node's stored
+    /// `NodeEntry::is_unsafe` bit directly. See [`Predicate::IsUnsafe`] for the
+    /// legacy default-false semantics.
+    IsUnsafe(bool),
     /// `returns:<TypeName>`. Carries the byte-exact type-name needle that
     /// the executor compares against the resolved name string of any node
     /// targeted by a forward `TypeOf { context: Some(Return), .. }` edge.
@@ -1100,6 +1105,7 @@ impl CompiledPredicate {
                     .unwrap_or(CompiledStringPattern::REJECT_ALL),
             ),
             Predicate::IsDefinition(want) => CompiledPredicate::IsDefinition(*want),
+            Predicate::IsUnsafe(want) => CompiledPredicate::IsUnsafe(*want),
             Predicate::Returns(type_name) => CompiledPredicate::Returns(type_name.clone()),
             Predicate::CfgCondition(matcher) => CompiledPredicate::CfgCondition(matcher.clone()),
             Predicate::Wraps(filter) => CompiledPredicate::Wraps(*filter),

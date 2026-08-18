@@ -25,8 +25,8 @@ use sqry_db::queries::{
 use sqry_rules::ir::{RelationEdgeKind, RuleEndpoint};
 use sqry_rules::{
     CycleClass, RULE_BACKEND_METHODS, RuleBackend, RuleEngine, RuleError, RuleNode, RuleOutput,
-    RulePath, RulePlan, RuleReachabilityKey, RuleRelationRows, RuleResult, RuleTopologyKey,
-    SnapshotId, TracePathKey,
+    RulePath, RulePlan, RuleReachabilityKey, RuleRelationRows, RuleResult, RuleStructuralNeighbor,
+    RuleTopologyKey, SnapshotId, TracePathKey,
 };
 
 const NODE_A: NodeId = NodeId::new(1, 1);
@@ -173,6 +173,15 @@ impl RuleBackend for FakeBackend {
             reason: "fake backend carries a single snapshot",
         })
     }
+
+    fn structural_neighbors(
+        &self,
+        _probe: NodeId,
+        _similarity_floor: f32,
+        _max_results: usize,
+    ) -> RuleResult<Vec<RuleStructuralNeighbor>> {
+        Ok(Vec::new())
+    }
 }
 
 #[test]
@@ -216,11 +225,12 @@ fn malformed_rule_source_returns_typed_error_without_panicking() {
 
 #[test]
 fn rule_backend_method_set_has_fr4_shape() {
-    assert_eq!(RULE_BACKEND_METHODS.len(), 20);
+    assert_eq!(RULE_BACKEND_METHODS.len(), 21);
     assert_eq!(RULE_BACKEND_METHODS[0], "snapshot_id");
     assert_eq!(
         RULE_BACKEND_METHODS[RULE_BACKEND_METHODS.len() - 1],
-        "comparative"
+        "structural_neighbors"
     );
+    assert!(RULE_BACKEND_METHODS.contains(&"comparative"));
     assert!(RULE_BACKEND_METHODS.contains(&"relation_from_node"));
 }

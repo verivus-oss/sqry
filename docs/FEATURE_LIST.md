@@ -2,7 +2,7 @@
 
 This document provides a comprehensive list of all features available across sqry's interfaces.
 
-> **Removed in 21.0.0:** the natural-language surface (`sqry ask`, the `sqry_ask` MCP tool, the `sqry/ask` LSP request) was removed. See [Removed features](TROUBLESHOOTING.md#removed-features) for migration to the structured commands and tools listed below.
+> The natural-language surface (`sqry ask`, the `sqry_ask` MCP tool, the `sqry/ask` LSP request) was removed in 21.0.0. Everything below is the structured command and tool surface that replaced it.
 
 ## CLI Commands (`sqry`)
 
@@ -139,7 +139,7 @@ Indexing behavior highlights:
 
 ## MCP Tools (Model Context Protocol)
 
-sqry provides **37 MCP tools** for AI/LLM integration:
+sqry provides **39 MCP tools** for AI/LLM integration (standalone `sqry-mcp`; the daemon-hosted subset is 17). `sqry-mcp --list-tools` and `sqry://meta/manifest` are the authoritative catalog:
 
 ### MCP Response Redaction
 
@@ -224,6 +224,7 @@ sqry provides **37 MCP tools** for AI/LLM integration:
 | `is_node_in_cycle` | Check if a specific symbol is part of a cycle |
 | `structural_similar` | Find functions structurally similar to a reference by identifier-blind body shape (rename/relocate invariant); returns `shape_hash_exact` + `jaccard` per match. Distinct from name-based `search_similar` |
 | `rules_run` | Run a declarative rule-layer rule or pack (shipped bbnty recipes + standard intake by stable id, or a workspace TOML pack) and return each rule's structured output plus witness; cross-snapshot / similarity rules report `unsupported` until the coordinator surface lands |
+| `context_propagation` | Detect Go call-sites that drop `context.Context`: callers holding a ctx calling ctx-accepting callees without threading it. Modes: `break_site` (sync), `unthreaded_goroutine` (`go f`), `http_handler_leak` (`http.HandlerFunc` shape) |
 
 ### MCP Prompts (Claude Code `/` menu)
 
@@ -375,7 +376,7 @@ LSP server config file.
 
 > Configurable per-workspace cross-repo: sqry treats each opened tree as a single repo by default. Cross-repo classification is enabled by either committing a `.sqry-workspace` registry file (CLI / standalone LSP) or by adding a `sqry.workspace` block inside a `.code-workspace` (VS Code). Both surfaces deserialize into the same `LogicalWorkspace` value before reaching the runtime. <!-- claim:configurable-cross-repo test:resolve_logical_workspace_short_circuits_in_documented_order -->
 
-See [docs/cli/workspace.md](cli/workspace.md) for end-to-end configuration flows and [docs/development/code-map/workspace-aware.md](development/code-map/workspace-aware.md) for the data-flow code map.
+See [docs/user-guide/workspace.md](user-guide/workspace.md) for end-to-end configuration flows.
 
 ---
 

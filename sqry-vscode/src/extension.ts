@@ -15,6 +15,7 @@ import { SqrySourceRootStatus, SqryWorkspaceStatus } from "./lspProtocol";
 import { SqryDiagnosticsProvider } from "./diagnosticsProvider";
 import { SqryHoverProvider } from "./hoverProvider";
 import { SqryGraphPanel, GraphNode, GraphEdge } from "./graphPanel";
+import { openFileWithinWorkspace, GuardSelection } from "./workspaceGuard";
 import { SqryStatusBar } from "./statusBar";
 import { exportAsJson, exportAsMarkdown, exportAsCsv } from "./exportResults";
 import { AutoIndexManager } from "./autoIndex";
@@ -98,6 +99,18 @@ export async function activate(
     vscode.commands.registerCommand("sqry.showOutput", () => {
       outputChannel?.show(true);
     }),
+  );
+
+  // Result-driven file navigation (search results, symbol lists) routes through
+  // this command so every open is confined to the workspace. The paths come from
+  // indexed data, so opening them directly with `vscode.open` could reach a file
+  // outside the workspace via an absolute path, a `..` sequence, or a symlink.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "sqry.openResultFile",
+      (filePath: string, selection?: GuardSelection) =>
+        openFileWithinWorkspace(filePath, { selection }),
+    ),
   );
 
   // STEP_5 contract: state machine starts in `Activating`. Both UI

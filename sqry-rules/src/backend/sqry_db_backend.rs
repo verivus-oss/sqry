@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use sqry_core::graph::unified::bind::BindingPlane;
-use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::edge::kind::{FfiConvention, TypeOfContext};
 use sqry_core::graph::unified::{
     DbQueryType, EdgeFilter, EdgeKind, ExportKind, GraphSnapshot, NodeId, ResolvedVia,
     SimplePathStrategy, TraversalConfig, TraversalDirection, TraversalLimits, TraversalResult,
@@ -24,7 +24,8 @@ use sqry_db::queries::{
 use sqry_db::{ComparativeQueryDb, QueryDb};
 
 use super::{
-    RuleBackend, RulePath, RuleReachabilityKey, RuleTopologyKey, SnapshotId, TracePathKey,
+    RuleBackend, RulePath, RuleReachabilityKey, RuleStructuralNeighbor, RuleTopologyKey,
+    SnapshotId, TracePathKey,
 };
 use crate::ir::{RelationEdgeKind, RuleEdgeClass};
 use crate::{RuleError, RuleResult};
@@ -333,6 +334,30 @@ impl RuleBackend for SqryDbRuleBackend<'_> {
             reason: "the default backend only owns the current single-snapshot QueryDb; cross-snapshot lookup is provided by a higher-level coordinator",
         })
     }
+
+    fn structural_neighbors(
+        &self,
+        probe: NodeId,
+        similarity_floor: f32,
+        max_results: usize,
+    ) -> RuleResult<Vec<RuleStructuralNeighbor>> {
+        let snapshot = self.db.snapshot();
+        let hits = sqry_db::queries::structural_neighbors(
+            self.db,
+            snapshot,
+            probe,
+            similarity_floor,
+            max_results,
+        );
+        Ok(hits
+            .into_iter()
+            .map(|neighbour| RuleStructuralNeighbor {
+                node: neighbour.node,
+                shape_hash_exact: neighbour.shape_hash_exact,
+                jaccard: neighbour.jaccard,
+            })
+            .collect())
+    }
 }
 
 /// Maps an edge filter to representative edge discriminants.
@@ -344,10 +369,17 @@ impl RuleBackend for SqryDbRuleBackend<'_> {
 pub fn edge_filter_to_edge_kind_probes(filter: &EdgeFilter) -> Vec<EdgeKind> {
     let mut probes = Vec::new();
     if filter.include_calls {
+        // Both an intra-language and a cross-boundary representative of the
+        // `Call` classification, so the cross_boundary discriminator can select
+        // the correct one in the `retain` below: a plain `Calls` edge is not
+        // cross-boundary, while `FfiCall` is.
         probes.push(EdgeKind::Calls {
             argument_count: 0,
             is_async: false,
             resolved_via: ResolvedVia::Direct,
+        });
+        probes.push(EdgeKind::FfiCall {
+            convention: FfiConvention::C,
         });
     }
     if filter.include_imports {
@@ -387,6 +419,13 @@ pub fn edge_filter_to_edge_kind_probes(filter: &EdgeFilter) -> Vec<EdgeKind> {
     if filter.include_service {
         probes.push(EdgeKind::WebAssemblyCall);
     }
+    // Every emitted probe must be consistent with the whole filter, including
+    // the cross_boundary discriminator (P2). Without this, a `Some(true)` filter
+    // could emit a plain `Calls` probe (not cross-boundary) and a `Some(false)`
+    // filter could emit a `DbQuery` probe (cross-boundary), each violating the
+    // filter contract. `cross_boundary: None` keeps every classification-selected
+    // probe, preserving prior behavior exactly.
+    probes.retain(|kind| filter.accepts_kind(kind));
     probes
 }
 
@@ -466,6 +505,72 @@ mod tests {
             probes
                 .iter()
                 .any(|kind| matches!(kind, EdgeKind::WebAssemblyCall))
+        );
+    }
+
+    #[test]
+    fn every_probe_is_consistent_with_its_filter() {
+        // The probe set must never emit an edge kind the filter would reject,
+        // for any cross_boundary polarity.
+        for cross_boundary in [None, Some(true), Some(false)] {
+            let filter = EdgeFilter {
+                cross_boundary,
+                ..EdgeFilter::all()
+            };
+            let probes = edge_filter_to_edge_kind_probes(&filter);
+            assert!(
+                probes.iter().all(|kind| filter.accepts_kind(kind)),
+                "every emitted probe must pass accepts_kind for cross_boundary={cross_boundary:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cross_boundary_true_emits_only_cross_boundary_probes() {
+        let filter = EdgeFilter {
+            cross_boundary: Some(true),
+            ..EdgeFilter::all()
+        };
+        let probes = edge_filter_to_edge_kind_probes(&filter);
+        assert!(!probes.is_empty(), "cross-boundary calls/db/service remain");
+        assert!(
+            probes.iter().all(EdgeKind::is_cross_boundary),
+            "Some(true) must drop the plain Calls / Imports / intra probes"
+        );
+        // The cross-boundary call representative survives even though plain
+        // `Calls` is dropped.
+        assert!(
+            probes
+                .iter()
+                .any(|kind| matches!(kind, EdgeKind::FfiCall { .. }))
+        );
+        assert!(
+            !probes
+                .iter()
+                .any(|kind| matches!(kind, EdgeKind::Calls { .. }))
+        );
+    }
+
+    #[test]
+    fn cross_boundary_false_emits_only_intra_language_probes() {
+        let filter = EdgeFilter {
+            cross_boundary: Some(false),
+            ..EdgeFilter::all()
+        };
+        let probes = edge_filter_to_edge_kind_probes(&filter);
+        assert!(
+            probes.iter().all(|kind| !kind.is_cross_boundary()),
+            "Some(false) must drop FfiCall / DbQuery / WebAssemblyCall"
+        );
+        assert!(
+            probes
+                .iter()
+                .any(|kind| matches!(kind, EdgeKind::Calls { .. }))
+        );
+        assert!(
+            !probes
+                .iter()
+                .any(|kind| matches!(kind, EdgeKind::DbQuery { .. }))
         );
     }
 }

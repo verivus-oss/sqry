@@ -557,6 +557,17 @@ fn read_cache(cache_dir: &Path) -> ClasspathResult<Vec<ResolvedClasspath>> {
     Ok(classpaths)
 }
 
+/// Read a previously cached Gradle classpath without invoking Gradle. Returns
+/// `None` when no usable cache is present. Used when build-tool execution is
+/// disabled (`--no-build-tool`).
+pub(crate) fn read_cached_classpath(config: &ResolveConfig) -> Option<Vec<ResolvedClasspath>> {
+    let cache_dir = resolve_cache_dir(config);
+    match read_cache(&cache_dir) {
+        Ok(classpaths) if !classpaths.is_empty() => Some(classpaths),
+        _ => None,
+    }
+}
+
 fn read_cache_or_error(
     cache_dir: &Path,
     live_error: &str,

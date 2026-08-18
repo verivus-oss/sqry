@@ -106,6 +106,7 @@ fn test_watch_requires_index() {
         None,
         None,
         false,
+        false, // no_build_tool
     )
         .expect_err("watch should fail when index is missing");
     let msg = err.to_string();
@@ -140,6 +141,7 @@ fn test_watch_nonexistent_directory() {
         None,
         None,
         false,
+        false, // no_build_tool
     )
     .expect_err("watch should fail for nonexistent directory");
     let msg = err.to_string();

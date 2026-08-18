@@ -22,7 +22,9 @@ mod sqry_db_backend;
 pub use sqry_db_backend::{CycleClass, SqryDbRuleBackend, edge_filter_to_edge_kind_probes};
 
 /// Canonical `RuleBackend` method set from the Phase 5 FR4 contract.
-pub const RULE_BACKEND_METHODS: [&str; 20] = [
+///
+/// `structural_neighbors` was appended for L2a (SimilarTo coordinator).
+pub const RULE_BACKEND_METHODS: [&str; 21] = [
     "snapshot_id",
     "binding",
     "traverse",
@@ -43,6 +45,7 @@ pub const RULE_BACKEND_METHODS: [&str; 20] = [
     "trace_path",
     "run_plan",
     "comparative",
+    "structural_neighbors",
 ];
 
 /// Stable facade identity for the snapshot view a rule backend exposes.
@@ -121,6 +124,21 @@ impl TracePathKey {
     pub fn min_confidence(&self) -> f64 {
         f64::from(self.min_confidence_bps) / 10_000.0
     }
+}
+
+/// One structural-neighbour match at the rule layer.
+///
+/// Rule-layer mirror of `sqry_db::queries::StructuralNeighbor`, so sqry-db types
+/// stay inside the concrete backend adapter (see the trait note below).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RuleStructuralNeighbor {
+    /// The neighbour node.
+    pub node: NodeId,
+    /// True when the neighbour is a rename/relocate-invariant exact structural
+    /// match of the probe.
+    pub shape_hash_exact: bool,
+    /// Estimated Jaccard similarity of the two shape sketches (`0.0..=1.0`).
+    pub jaccard: f32,
 }
 
 /// Adapter trait consumed by the declarative rule engine.
@@ -211,6 +229,18 @@ pub trait RuleBackend {
         base: SnapshotId,
         head: SnapshotId,
     ) -> RuleResult<Arc<ComparativeQueryDb>>;
+
+    /// Structural nearest-neighbours of a seed node (V15 body-shape LSH).
+    ///
+    /// Returns at most `max_results` neighbours with estimated Jaccard
+    /// `>= similarity_floor`, exact structural matches first. Empty when the
+    /// probe has no hashable shape descriptor.
+    fn structural_neighbors(
+        &self,
+        probe: NodeId,
+        similarity_floor: f32,
+        max_results: usize,
+    ) -> RuleResult<Vec<RuleStructuralNeighbor>>;
 }
 
 /// Returns a binding plane from a public snapshot reference.

@@ -837,12 +837,27 @@ function asRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
 
+// Stage 6 signs release attestations with `actions/attest`, which stamps the
+// running workflow's ref into the certificate identity. That workflow is driven
+// by the Stage 5 `repository_dispatch` handoff, so it always runs on the default
+// branch: every real release bundle carries an `@refs/heads/main` identity and
+// never a tag ref. This was verified by decoding the published bundles from v7
+// through v29, none of which was signed on `@refs/tags/*`. We therefore trust
+// only the `@refs/heads/main` identity of the two workflows that have ever
+// signed a release: the current `release-distribute.yml` and the historical
+// `oss-distribute.yml` (renamed around v9, still the signer for older pinned
+// versions). The tag-ref candidates the allowlist used to carry never matched a
+// real bundle, so dropping them narrows the accepted-identity surface without
+// weakening any supported release. `version` is retained for call-site
+// stability but is not part of the identity; the asset-to-version binding is
+// enforced separately by the DSSE subject-digest check in
+// verifyAttestationSubject.
 export function getCertificateIdentityCandidates(version: string): readonly string[] {
+  void version;
   const base = "https://github.com/verivus-oss/sqry/.github/workflows";
-  return CERT_IDENTITY_WORKFLOWS.flatMap((workflow) => [
-    `${base}/${workflow}@refs/tags/v${version}`,
-    `${base}/${workflow}@refs/heads/main`,
-  ]);
+  return CERT_IDENTITY_WORKFLOWS.map(
+    (workflow) => `${base}/${workflow}@refs/heads/main`,
+  );
 }
 
 export async function verifyCosignBundleWithIdentities(

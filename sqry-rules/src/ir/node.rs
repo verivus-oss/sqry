@@ -29,6 +29,27 @@ pub enum RuleEdgeClass {
     Service,
 }
 
+/// Which node set an [`RuleNode::EdgeTraversal`] emits as its result.
+///
+/// The traversal always visits seeds and materializes reached nodes plus the
+/// edges it followed; `emit` chooses which of those becomes the step's output.
+/// `EdgeSources` / `EdgeTargets` have no `PlanNode` equivalent, so a non-default
+/// value forces the witness-bearing backend traversal path (planner lowering
+/// refuses it, exactly like `cross_boundary`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum TraversalEmit {
+    /// Default: seeds plus every reached node (historical behavior).
+    #[default]
+    ReachedNodes,
+    /// Only the nodes that emitted at least one edge passing the filter. At
+    /// `max_depth: 1` from a seed set this is exactly the seeds with a
+    /// qualifying out-edge.
+    EdgeSources,
+    /// Only the nodes reached by at least one edge passing the filter.
+    EdgeTargets,
+}
+
 impl RuleEdgeClass {
     /// Returns whether this rule class accepts a materialized edge
     /// classification.
@@ -194,6 +215,19 @@ pub enum RuleNode {
         max_depth: u32,
         /// Optional call-resolution provenance filter preserved from planner IR.
         resolved_via: Option<ResolvedVia>,
+        /// Optional cross-boundary (FFI / cross-language / service) filter.
+        ///
+        /// `None` ignores boundary status; `Some(true)` keeps only
+        /// cross-boundary edges; `Some(false)` keeps only intra-language edges.
+        /// Has no `PlanNode` equivalent, so a set `Some(_)` forces the
+        /// witness-bearing backend traversal path (planner lowering refuses it).
+        cross_boundary: Option<bool>,
+        /// Which node set the step emits (see [`TraversalEmit`]).
+        ///
+        /// A non-default value forces the witness-bearing backend traversal
+        /// path (planner lowering refuses it).
+        #[serde(default)]
+        emit: TraversalEmit,
     },
     /// Reused set-only `PlanNode::Filter` semantics.
     Filter {
@@ -228,6 +262,17 @@ pub enum RuleNode {
         max_depth: u32,
         /// Maximum paths to emit.
         max_paths: Option<u32>,
+        /// Optional set of nodes the path must NOT traverse.
+        ///
+        /// `None` (default) keeps every path. When set, only paths whose nodes
+        /// are disjoint from the resolved endpoint survive, expressing
+        /// "reachable WITHOUT passing through the avoid set" (e.g. a sink
+        /// reachable without a guard). Applied as a post-filter on the
+        /// enumerated paths; bounded by `max_paths`, so a returned path is a
+        /// sound positive but the absence of one is not a proof of no avoiding
+        /// path.
+        #[serde(default)]
+        avoid: Option<RuleEndpoint>,
     },
     /// Extracts a bounded subgraph.
     SubgraphExtract {
@@ -318,6 +363,12 @@ impl From<PlanNode> for RuleNode {
                     .map(RuleEdgeClass::from),
                 max_depth,
                 resolved_via,
+                // No `PlanNode` cross-boundary concept; a lowered traversal is
+                // always boundary-agnostic.
+                cross_boundary: None,
+                // No `PlanNode` emit concept; a lowered traversal always emits
+                // the reached-node set.
+                emit: TraversalEmit::ReachedNodes,
             },
             PlanNode::Filter { predicate } => Self::Filter { predicate },
             PlanNode::SetOp { op, left, right } => Self::SetOp {

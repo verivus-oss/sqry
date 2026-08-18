@@ -122,9 +122,38 @@ const vscodeStub = {
   },
 };
 
+// The real guard requires the host `vscode` module, so it is stubbed. The stub
+// reproduces the two guard behaviours this provider leans on instead of waving
+// every URI through: a path under `/outside/` is rejected the way an
+// out-of-workspace path is, and `/link/` canonicalizes to `/real/` the way a
+// symlink resolves to its target. Ordinary in-workspace URIs come back
+// unchanged so the rest of the suite is untouched, but keying the collection by
+// the raw URI instead of the canonical one, or dropping the containment filter,
+// now fails a test. Containment itself is covered by workspaceGuard.test.ts.
+function stubGuardPath(value: string): string | undefined {
+  if (value.includes("/outside/")) {
+    return undefined;
+  }
+  return value.replace("/link/", "/real/");
+}
+
 // Load module under test with vscode stub
 const { SqryDiagnosticsProvider } = proxyquire("../src/diagnosticsProvider", {
   vscode: vscodeStub,
+  "./workspaceGuard": {
+    resolveUriWithinWorkspace: (uri: { toString(): string }) => {
+      const value = uri.toString();
+      if (!value.startsWith("file://")) {
+        return undefined;
+      }
+      const resolved = stubGuardPath(value);
+      return resolved === undefined ? undefined : StubUri.parse(resolved);
+    },
+    resolveWithinWorkspace: (p: string) => {
+      const resolved = stubGuardPath(p);
+      return resolved === undefined ? undefined : StubUri.file(resolved);
+    },
+  },
 }) as {
   SqryDiagnosticsProvider: typeof import("../src/diagnosticsProvider").SqryDiagnosticsProvider;
 };
@@ -612,6 +641,401 @@ describe("SqryDiagnosticsProvider", () => {
 
       expect(collection.entries.has(openUri)).to.be.true;
       expect(collection.entries.has(closedUri)).to.be.false;
+    });
+  });
+
+  // ===== Workspace containment =====
+
+  // Everything published to the collection becomes a clickable Problems entry,
+  // so each of the three publication paths has to drop results outside the
+  // workspace and key what it does publish by the guard's canonical URI. Using
+  // the raw URI would leave a window where a symlink retargeted after the check
+  // sends the click somewhere else.
+
+  describe("workspace containment", () => {
+    const LINK_URI = "file:///src/link/a.rs";
+    const REAL_URI = "file:///src/real/a.rs";
+    const OUTSIDE_URI = "file:///outside/evil.rs";
+    // A non-`file` URI whose path would look in-workspace to a path-only
+    // check, so publishing it would mean the scheme was never checked.
+    const UNTITLED_URI = "untitled:/src/scratch.rs";
+
+    it("keys per-file diagnostics by the canonical URI, not the raw one", async () => {
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listUnusedSymbols: async () => ({
+          symbols: [makeSearchItem("dead_fn", LINK_URI, 1, 0, 1, 7)],
+          total: 1,
+          truncated: false,
+          scope: "all",
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.refreshForFile(
+        StubUri.parse(LINK_URI) as any,
+        TEST_WORKSPACE,
+      );
+
+      expect(collection.entries.has(REAL_URI)).to.be.true;
+      expect(collection.entries.has(LINK_URI)).to.be.false;
+    });
+
+    it("publishes no per-file diagnostics for a file outside the workspace", async () => {
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listUnusedSymbols: async () => ({
+          symbols: [makeSearchItem("dead_fn", OUTSIDE_URI, 1, 0, 1, 7)],
+          total: 1,
+          truncated: false,
+          scope: "all",
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.refreshForFile(
+        StubUri.parse(OUTSIDE_URI) as any,
+        TEST_WORKSPACE,
+      );
+
+      expect(collection.entries.size).to.equal(0);
+    });
+
+    it("keys open-editor diagnostics by the canonical URI and drops external ones", async () => {
+      const collection = new MockDiagnosticCollection();
+      vscodeStub.window.visibleTextEditors = [
+        { document: { uri: StubUri.parse(LINK_URI) } },
+        { document: { uri: StubUri.parse(OUTSIDE_URI) } },
+      ];
+
+      const client = createMockClient({
+        listUnusedSymbols: async () => ({
+          symbols: [
+            makeSearchItem("linked_fn", LINK_URI, 0, 0, 0, 9),
+            makeSearchItem("evil_fn", OUTSIDE_URI, 0, 0, 0, 7),
+          ],
+          total: 2,
+          truncated: false,
+          scope: "all",
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.refreshForOpenEditors(TEST_WORKSPACE);
+
+      expect(collection.entries.has(REAL_URI)).to.be.true;
+      expect(collection.entries.has(LINK_URI)).to.be.false;
+      expect(collection.entries.has(OUTSIDE_URI)).to.be.false;
+    });
+
+    it("keys workspace-scan diagnostics by the canonical URI and drops external ones", async () => {
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listUnusedSymbols: async () => ({
+          symbols: [
+            makeSearchItem("linked_fn", LINK_URI, 0, 0, 0, 9),
+            makeSearchItem("evil_fn", OUTSIDE_URI, 0, 0, 0, 7),
+          ],
+          total: 2,
+          truncated: false,
+          scope: "all",
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.scanWorkspace(TEST_WORKSPACE);
+
+      expect(collection.entries.has(REAL_URI)).to.be.true;
+      expect(collection.entries.has(LINK_URI)).to.be.false;
+      expect(collection.entries.has(OUTSIDE_URI)).to.be.false;
+    });
+
+    it("publishes no per-file diagnostics for a non-file URI", async () => {
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listUnusedSymbols: async () => ({
+          symbols: [makeSearchItem("dead_fn", UNTITLED_URI, 1, 0, 1, 7)],
+          total: 1,
+          truncated: false,
+          scope: "all",
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.refreshForFile(
+        StubUri.parse(UNTITLED_URI) as any,
+        TEST_WORKSPACE,
+      );
+
+      expect(collection.entries.size).to.equal(0);
+    });
+
+    it("publishes no open-editor diagnostics for a non-file URI", async () => {
+      const collection = new MockDiagnosticCollection();
+      vscodeStub.window.visibleTextEditors = [
+        { document: { uri: StubUri.parse(UNTITLED_URI) } },
+      ];
+
+      const client = createMockClient({
+        listUnusedSymbols: async () => ({
+          symbols: [makeSearchItem("dead_fn", UNTITLED_URI, 0, 0, 0, 7)],
+          total: 1,
+          truncated: false,
+          scope: "all",
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.refreshForOpenEditors(TEST_WORKSPACE);
+
+      expect(collection.entries.size).to.equal(0);
+    });
+
+    it("publishes no workspace-scan diagnostics for a non-file URI", async () => {
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listUnusedSymbols: async () => ({
+          symbols: [makeSearchItem("dead_fn", UNTITLED_URI, 0, 0, 0, 7)],
+          total: 1,
+          truncated: false,
+          scope: "all",
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.scanWorkspace(TEST_WORKSPACE);
+
+      expect(collection.entries.size).to.equal(0);
+    });
+
+    it("builds cycle related-information from canonical URIs and drops external members", async () => {
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listCircularDependencies: async () => ({
+          cycles: [
+            {
+              cycle_id: "abc123",
+              depth: 3,
+              members: ["foo", "bar", "evil"],
+              cycle_type: "calls",
+              member_locations: [
+                { name: "foo", file: "/src/link/a.rs", line: 2, column: 5 },
+                { name: "bar", file: "/src/b.rs", line: 4, column: 3 },
+                { name: "evil", file: "/outside/evil.rs", line: 6, column: 1 },
+              ],
+            },
+          ],
+          total_cycles: 1,
+          truncated: false,
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.scanWorkspace(TEST_WORKSPACE);
+
+      // The cycle member behind the symlink is published under its canonical
+      // URI, and the out-of-workspace member never becomes a diagnostic.
+      expect(collection.entries.has(REAL_URI)).to.be.true;
+      expect(collection.entries.has(LINK_URI)).to.be.false;
+      expect(collection.entries.has("file:///outside/evil.rs")).to.be.false;
+
+      // The surviving member's related links point at canonical URIs only.
+      const barDiags = collection.entries.get("file:///src/b.rs");
+      expect(barDiags).to.have.lengthOf(1);
+      const targets = (barDiags![0].relatedInformation ?? []).map((info) =>
+        info.location.uri.toString(),
+      );
+      expect(targets).to.deep.equal([REAL_URI]);
+    });
+
+    it("drops cycle members whose location carries a non-file scheme", async () => {
+      // A cycle member location arrives as a bare string, so a non-`file`
+      // scheme must not be mistaken for a relative path and re-resolved as
+      // one. Only `file:` URIs and plain paths are navigable.
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listCircularDependencies: async () => ({
+          cycles: [
+            {
+              cycle_id: "abc123",
+              depth: 2,
+              members: ["foo", "scratch"],
+              cycle_type: "calls",
+              member_locations: [
+                { name: "foo", file: "/src/b.rs", line: 4, column: 3 },
+                { name: "scratch", file: "untitled:/src/in-memory.rs", line: 6, column: 1 },
+              ],
+            },
+          ],
+          total_cycles: 1,
+          truncated: false,
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.scanWorkspace(TEST_WORKSPACE);
+
+      const keys = [...collection.entries.keys()];
+      expect(keys.some((k) => k.includes("untitled:"))).to.equal(false);
+
+      const related = (collection.entries.get("file:///src/b.rs") ?? [])
+        .flatMap((d) => d.relatedInformation ?? [])
+        .map((info) => info.location.uri.toString());
+      expect(related.some((t) => t.includes("untitled:"))).to.equal(false);
+    });
+
+    it("drops cycle members whose location carries a single-character scheme", async () => {
+      // RFC 3986 allows a one-character scheme, so the classifier cannot
+      // require two characters before the colon. Both the hierarchical
+      // (`x:/...`) and opaque (`x:...`) forms must be recognized and rejected.
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listCircularDependencies: async () => ({
+          cycles: [
+            {
+              cycle_id: "abc123",
+              depth: 3,
+              members: ["foo", "hier", "opaque"],
+              cycle_type: "calls",
+              member_locations: [
+                { name: "foo", file: "/src/b.rs", line: 4, column: 3 },
+                { name: "hier", file: "x:/src/in-memory.rs", line: 6, column: 1 },
+                { name: "opaque", file: "x:in-memory.rs", line: 7, column: 1 },
+              ],
+            },
+          ],
+          total_cycles: 1,
+          truncated: false,
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.scanWorkspace(TEST_WORKSPACE);
+
+      const keys = [...collection.entries.keys()];
+      expect(keys.some((k) => k.includes("in-memory"))).to.equal(false);
+
+      const related = (collection.entries.get("file:///src/b.rs") ?? [])
+        .flatMap((d) => d.relatedInformation ?? [])
+        .map((info) => info.location.uri.toString());
+      expect(related.some((t) => t.includes("in-memory"))).to.equal(false);
+    });
+
+    it("keeps plain paths navigable while dropping drive-letter forms off Windows", async () => {
+      // A drive-letter prefix is indistinguishable from a one-character scheme,
+      // so it counts as a path only on Windows. Everywhere else `C:\...` is not
+      // a usable path and is dropped, which is the fail-closed direction. This
+      // asserts the behaviour of the host it runs on rather than assuming one.
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listCircularDependencies: async () => ({
+          cycles: [
+            {
+              cycle_id: "abc123",
+              depth: 2,
+              members: ["plain", "drive"],
+              cycle_type: "calls",
+              member_locations: [
+                { name: "plain", file: "/src/b.rs", line: 4, column: 3 },
+                { name: "drive", file: "C:\\src\\a.rs", line: 5, column: 1 },
+              ],
+            },
+          ],
+          total_cycles: 1,
+          truncated: false,
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.scanWorkspace(TEST_WORKSPACE);
+
+      // The plain path is always navigable.
+      expect(collection.entries.has("file:///src/b.rs")).to.equal(true);
+
+      const driveKept = [...collection.entries.keys()].some((k) =>
+        k.includes("a.rs"),
+      );
+      expect(driveKept).to.equal(process.platform === "win32");
+    });
+
+    it("builds duplicate related-information from canonical URIs and drops external ones", async () => {
+      const collection = new MockDiagnosticCollection();
+      const client = createMockClient({
+        listDuplicateGroups: async () => ({
+          groups: [
+            {
+              group_id: "hash1",
+              count: 3,
+              representative_name: "process_data",
+              symbols: [
+                makeSearchItem("process_data", TEST_URI, 5, 0, 15, 1),
+                makeSearchItem("process_data", LINK_URI, 10, 0, 20, 1),
+                makeSearchItem("process_data", OUTSIDE_URI, 30, 0, 40, 1),
+              ],
+            },
+          ],
+          total_groups: 1,
+          total_symbols: 3,
+          truncated: false,
+        }),
+      });
+
+      const provider = new SqryDiagnosticsProvider(
+        collection as any,
+        client,
+        null,
+      );
+      await provider.scanWorkspace(TEST_WORKSPACE);
+
+      const diags = collection.entries.get(TEST_URI);
+      expect(diags).to.have.lengthOf(1);
+      const related = diags![0].relatedInformation ?? [];
+      const targets = related.map((info) => info.location.uri.toString());
+      expect(targets).to.deep.equal([REAL_URI]);
     });
   });
 });

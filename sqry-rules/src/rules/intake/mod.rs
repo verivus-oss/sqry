@@ -123,7 +123,8 @@ fn duplicate_intake_rule() -> ShippedRule {
         methodology: "tikv-analysis-methodology.md §Phase 3 find_duplicates lines 113-145",
         seed_finding: None,
         variants: DUPLICATE_VARIANTS,
-        requires_beside_cache: true,
+        // SimilarTo runs in-engine since L2a; only cross-snapshot needs coordination.
+        requires_beside_cache: false,
         requires_trace_path: false,
         baseline_ms_floor: 1,
     }

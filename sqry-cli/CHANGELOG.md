@@ -6,6 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [30.0.0](https://github.com/verivus-oss/sqry/compare/v29.0.6...v30.0.0) - 2026-08-18
+
+### Added
+
+- *(rules)* wire SimilarTo beside-cache coordinator (L2a) ([#675](https://github.com/verivus-oss/sqry/pull/675))
+- *(rules)* PathQuery.avoid primitive + missing_guard/trust_boundary (L1b) ([#668](https://github.com/verivus-oss/sqry/pull/668))
+- *(rules)* EdgeTraversal.emit primitive + bbnty.security detectors (L1a) ([#667](https://github.com/verivus-oss/sqry/pull/667))
+- *(rules)* cross-boundary / FFI edge discrimination on EdgeTraversal (L0 P2) ([#664](https://github.com/verivus-oss/sqry/pull/664))
+- *(rules)* per-rule security metadata on rule definitions ([#663](https://github.com/verivus-oss/sqry/pull/663))
+
+### Harden
+
+- --no-build-tool for classpath (F1) + workspace-containment guard for VS Code nav (F5) ([#670](https://github.com/verivus-oss/sqry/pull/670))
 ## [29.0.6](https://github.com/verivus-oss/sqry/compare/v29.0.5...v29.0.6) - 2026-07-19
 
 ### Other

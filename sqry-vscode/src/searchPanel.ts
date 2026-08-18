@@ -105,8 +105,8 @@ class SqryFileItem extends vscode.TreeItem {
     this.iconPath = new vscode.ThemeIcon("file-code");
     this.command = {
       title: "Open File",
-      command: "vscode.open",
-      arguments: [vscode.Uri.file(filePath)],
+      command: "sqry.openResultFile",
+      arguments: [filePath],
     };
     this.tooltip = filePath;
     this.contextValue = "sqry.file";
@@ -159,8 +159,8 @@ class SqryCrossLanguageRelationItem extends vscode.TreeItem {
       const filePath = resolveFilePath(relation.from_file);
       this.command = {
         title: "Open File",
-        command: "vscode.open",
-        arguments: [vscode.Uri.file(filePath)],
+        command: "sqry.openResultFile",
+        arguments: [filePath],
       };
     }
   }
@@ -383,18 +383,8 @@ class SqrySymbolItem extends vscode.TreeItem {
     this.iconPath = new vscode.ThemeIcon("symbol-method");
     this.command = {
       title: "Open Symbol",
-      command: "vscode.open",
-      arguments: [
-        vscode.Uri.file(filePath),
-        {
-          selection: new vscode.Range(
-            Math.max((symbol.startLine ?? 1) - 1, 0),
-            0,
-            Math.max((symbol.startLine ?? 1) - 1, 0),
-            0,
-          ),
-        },
-      ],
+      command: "sqry.openResultFile",
+      arguments: [filePath, { startLine: Math.max((symbol.startLine ?? 1) - 1, 0) }],
     };
     this.tooltip = `${filePath}`;
     this.contextValue = "sqry.symbol";
@@ -410,18 +400,8 @@ class SqryTextMatchItem extends vscode.TreeItem {
     this.iconPath = new vscode.ThemeIcon("search");
     this.command = {
       title: "Open Match",
-      command: "vscode.open",
-      arguments: [
-        vscode.Uri.file(filePath),
-        {
-          selection: new vscode.Range(
-            Math.max(match.line - 1, 0),
-            0,
-            Math.max(match.line - 1, 0),
-            0,
-          ),
-        },
-      ],
+      command: "sqry.openResultFile",
+      arguments: [filePath, { startLine: Math.max(match.line - 1, 0) }],
     };
     this.tooltip = match.lineText ?? filePath;
     this.contextValue = "sqry.textMatch";
@@ -1550,16 +1530,14 @@ class SqryTreeDataProvider
       const filePath = resolveFilePath(symbol.location.uri.replace("file://", ""));
       item.command = {
         title: "Open Symbol",
-        command: "vscode.open",
+        command: "sqry.openResultFile",
         arguments: [
-          vscode.Uri.file(filePath),
+          filePath,
           {
-            selection: new vscode.Range(
-              symbol.location.range.start.line,
-              symbol.location.range.start.character,
-              symbol.location.range.end.line,
-              symbol.location.range.end.character,
-            ),
+            startLine: symbol.location.range.start.line,
+            startCharacter: symbol.location.range.start.character,
+            endLine: symbol.location.range.end.line,
+            endCharacter: symbol.location.range.end.character,
           },
         ],
       };
@@ -1671,16 +1649,14 @@ class SqryTreeDataProvider
       const filePath = resolveFilePath(symbol.location.uri.replace("file://", ""));
       item.command = {
         title: "Open Symbol",
-        command: "vscode.open",
+        command: "sqry.openResultFile",
         arguments: [
-          vscode.Uri.file(filePath),
+          filePath,
           {
-            selection: new vscode.Range(
-              symbol.location.range.start.line,
-              symbol.location.range.start.character,
-              symbol.location.range.end.line,
-              symbol.location.range.end.character,
-            ),
+            startLine: symbol.location.range.start.line,
+            startCharacter: symbol.location.range.start.character,
+            endLine: symbol.location.range.end.line,
+            endCharacter: symbol.location.range.end.character,
           },
         ],
       };

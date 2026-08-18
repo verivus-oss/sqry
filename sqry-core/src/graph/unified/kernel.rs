@@ -54,6 +54,13 @@ pub struct EdgeFilter {
     pub include_database: bool,
     /// Include `ServiceInteraction` edges.
     pub include_service: bool,
+    /// Cross-boundary (FFI / cross-language / service) discriminator.
+    ///
+    /// `None` (default) ignores boundary status and preserves the
+    /// classification-only behavior. `Some(true)` keeps only edges whose
+    /// [`EdgeKind::is_cross_boundary`] is true; `Some(false)` keeps only
+    /// intra-language edges. Applied on top of the classification flags.
+    pub cross_boundary: Option<bool>,
 }
 
 impl EdgeFilter {
@@ -69,6 +76,7 @@ impl EdgeFilter {
             include_type_edges: true,
             include_database: true,
             include_service: true,
+            cross_boundary: None,
         }
     }
 
@@ -84,6 +92,7 @@ impl EdgeFilter {
             include_type_edges: false,
             include_database: false,
             include_service: false,
+            cross_boundary: None,
         }
     }
 
@@ -99,6 +108,7 @@ impl EdgeFilter {
             include_type_edges: false,
             include_database: false,
             include_service: false,
+            cross_boundary: None,
         }
     }
 
@@ -114,6 +124,7 @@ impl EdgeFilter {
             include_type_edges: false,
             include_database: false,
             include_service: false,
+            cross_boundary: None,
         }
     }
 
@@ -134,6 +145,22 @@ impl EdgeFilter {
             EdgeClassification::DatabaseAccess => self.include_database,
             EdgeClassification::ServiceInteraction => self.include_service,
         }
+    }
+
+    /// Returns `true` if the raw edge kind passes the filter.
+    ///
+    /// Applies the classification flags (via [`EdgeFilter::accepts`]) AND the
+    /// [`EdgeFilter::cross_boundary`] discriminator. This is the gate used by
+    /// the BFS traversal loops: unlike `accepts`, it has the raw [`EdgeKind`],
+    /// so it can honor the cross-boundary criterion, which
+    /// `EdgeClassification` cannot express (a plain `Call` and an `FfiCall`
+    /// share the `Call` classification).
+    #[must_use]
+    pub fn accepts_kind(&self, kind: &EdgeKind) -> bool {
+        self.accepts(&EdgeClassification::from(kind))
+            && self
+                .cross_boundary
+                .is_none_or(|want| kind.is_cross_boundary() == want)
     }
 }
 
@@ -528,8 +555,7 @@ fn run_standard_bfs(
                 break 'bfs;
             }
 
-            let classification = EdgeClassification::from(&edge_ref.kind);
-            if !config.edge_filter.accepts(&classification) {
+            if !config.edge_filter.accepts_kind(&edge_ref.kind) {
                 continue;
             }
 
@@ -670,8 +696,7 @@ fn run_path_bfs(
                 break 'bfs;
             }
 
-            let classification = EdgeClassification::from(&edge_ref.kind);
-            if !config.edge_filter.accepts(&classification) {
+            if !config.edge_filter.accepts_kind(&edge_ref.kind) {
                 continue;
             }
 
@@ -1548,5 +1573,210 @@ mod tests {
         // Defines has 0.3 confidence
         assert!(is_followable_edge(&EdgeKind::Defines, 0.3));
         assert!(!is_followable_edge(&EdgeKind::Defines, 0.4));
+    }
+
+    // ──────────────────── Cross-boundary filter (P2) ────────────────────
+
+    fn ffi_edge() -> EdgeKind {
+        EdgeKind::FfiCall {
+            convention: crate::graph::unified::edge::kind::FfiConvention::C,
+        }
+    }
+
+    fn db_edge() -> EdgeKind {
+        EdgeKind::DbQuery {
+            query_type: crate::graph::unified::edge::kind::DbQueryType::Select,
+            table: None,
+        }
+    }
+
+    #[test]
+    fn accepts_kind_honors_cross_boundary_discriminator() {
+        let calls = EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+            resolved_via: ResolvedVia::Direct,
+        };
+
+        // None: classification-only, identical to `accepts`.
+        let agnostic = EdgeFilter::all();
+        assert!(agnostic.accepts_kind(&ffi_edge()));
+        assert!(agnostic.accepts_kind(&db_edge()));
+        assert!(agnostic.accepts_kind(&calls));
+
+        // Some(true): keep only cross-boundary edges.
+        let cross_only = EdgeFilter {
+            cross_boundary: Some(true),
+            ..EdgeFilter::all()
+        };
+        assert!(cross_only.accepts_kind(&ffi_edge()));
+        assert!(cross_only.accepts_kind(&db_edge()));
+        assert!(!cross_only.accepts_kind(&calls));
+
+        // Some(false): keep only intra-language edges.
+        let intra_only = EdgeFilter {
+            cross_boundary: Some(false),
+            ..EdgeFilter::all()
+        };
+        assert!(!intra_only.accepts_kind(&ffi_edge()));
+        assert!(!intra_only.accepts_kind(&db_edge()));
+        assert!(intra_only.accepts_kind(&calls));
+
+        // The classification gate still applies on top of the discriminator
+        // (it is an AND, not a replacement). An FFI edge classifies as `Call`,
+        // so it passes when calls are included and cross_boundary is true...
+        let calls_and_cross = EdgeFilter {
+            cross_boundary: Some(true),
+            ..EdgeFilter::calls_only()
+        };
+        assert!(calls_and_cross.accepts_kind(&ffi_edge()));
+        // ...but is dropped when the classification gate excludes calls, even
+        // though the cross_boundary criterion alone would keep it. A DB edge
+        // (DatabaseAccess classification) still passes the same filter.
+        let mut no_calls_cross = EdgeFilter::all();
+        no_calls_cross.include_calls = false;
+        no_calls_cross.cross_boundary = Some(true);
+        assert!(!no_calls_cross.accepts_kind(&ffi_edge()));
+        assert!(no_calls_cross.accepts_kind(&db_edge()));
+    }
+
+    /// Star graph: root reaches an FFI target, a DB target, and an intra-language
+    /// call target. Exercises the standard BFS loop.
+    fn cross_boundary_star() -> (GraphSnapshot, NodeId, NodeId, NodeId, NodeId) {
+        let mut tg = TestGraph::new();
+        let root = tg.add_node("root");
+        let ffi_t = tg.add_node("ffi_target");
+        let db_t = tg.add_node("db_target");
+        let call_t = tg.add_node("call_target");
+        tg.add_edge(root, ffi_t, ffi_edge());
+        tg.add_edge(root, db_t, db_edge());
+        tg.add_call_edge(root, call_t);
+        (tg.snapshot(), root, ffi_t, db_t, call_t)
+    }
+
+    fn star_config(cross_boundary: Option<bool>) -> TraversalConfig {
+        TraversalConfig {
+            direction: TraversalDirection::Outgoing,
+            edge_filter: EdgeFilter {
+                cross_boundary,
+                ..EdgeFilter::all()
+            },
+            limits: TraversalLimits {
+                max_depth: 3,
+                max_nodes: None,
+                max_edges: None,
+                max_paths: None,
+            },
+        }
+    }
+
+    #[test]
+    fn standard_bfs_cross_boundary_true_keeps_ffi_and_db() {
+        let (snapshot, root, ffi_t, db_t, _call_t) = cross_boundary_star();
+        let result = traverse(&snapshot, &[root], &star_config(Some(true)), None);
+        let nodes: HashSet<NodeId> = result.nodes.iter().map(|n| n.node_id).collect();
+        assert_eq!(nodes.len(), 3, "root + ffi + db");
+        assert!(nodes.contains(&ffi_t));
+        assert!(nodes.contains(&db_t));
+        assert_eq!(result.edges.len(), 2);
+    }
+
+    #[test]
+    fn standard_bfs_cross_boundary_false_keeps_only_intra() {
+        let (snapshot, root, _ffi_t, _db_t, call_t) = cross_boundary_star();
+        let result = traverse(&snapshot, &[root], &star_config(Some(false)), None);
+        let nodes: HashSet<NodeId> = result.nodes.iter().map(|n| n.node_id).collect();
+        assert_eq!(nodes.len(), 2, "root + intra call target");
+        assert!(nodes.contains(&call_t));
+        assert_eq!(result.edges.len(), 1);
+    }
+
+    #[test]
+    fn standard_bfs_cross_boundary_none_preserves_current_behavior() {
+        let (snapshot, root, _ffi_t, _db_t, _call_t) = cross_boundary_star();
+        let result = traverse(&snapshot, &[root], &star_config(None), None);
+        assert_eq!(result.nodes.len(), 4, "root + all three targets");
+        assert_eq!(result.edges.len(), 3);
+    }
+
+    /// Diamond of two disjoint two-hop paths to a shared target: one entirely
+    /// FFI (cross-boundary), one entirely intra-language calls. Exercises the
+    /// path-enumeration BFS loop.
+    fn cross_boundary_diamond() -> (GraphSnapshot, NodeId, NodeId) {
+        let mut tg = TestGraph::new();
+        let root = tg.add_node("proot");
+        let ffi_mid = tg.add_node("ffi_mid");
+        let call_mid = tg.add_node("call_mid");
+        let target = tg.add_node("ptarget");
+        tg.add_edge(root, ffi_mid, ffi_edge());
+        tg.add_edge(ffi_mid, target, ffi_edge());
+        tg.add_call_edge(root, call_mid);
+        tg.add_call_edge(call_mid, target);
+        (tg.snapshot(), root, target)
+    }
+
+    fn path_config(cross_boundary: Option<bool>) -> TraversalConfig {
+        TraversalConfig {
+            direction: TraversalDirection::Outgoing,
+            edge_filter: EdgeFilter {
+                cross_boundary,
+                ..EdgeFilter::all()
+            },
+            limits: TraversalLimits {
+                max_depth: 5,
+                max_nodes: None,
+                max_edges: None,
+                max_paths: Some(10),
+            },
+        }
+    }
+
+    #[test]
+    fn path_bfs_cross_boundary_true_keeps_only_ffi_path() {
+        let (snapshot, root, target) = cross_boundary_diamond();
+        // allow_cross_language: true so the strategy does not itself drop the
+        // FFI edges; the EdgeFilter cross_boundary gate is what we exercise.
+        let mut strategy = SimplePathStrategy::new(target, 0.0, true);
+        let result = traverse(
+            &snapshot,
+            &[root],
+            &path_config(Some(true)),
+            Some(&mut strategy),
+        );
+        let paths = result.paths.as_ref().expect("path enumeration ran");
+        assert_eq!(paths.len(), 1, "only the all-FFI path reaches the target");
+        assert_eq!(paths[0].len(), 3, "root -> ffi_mid -> target");
+    }
+
+    #[test]
+    fn path_bfs_cross_boundary_false_keeps_only_intra_path() {
+        let (snapshot, root, target) = cross_boundary_diamond();
+        let mut strategy = SimplePathStrategy::new(target, 0.0, true);
+        let result = traverse(
+            &snapshot,
+            &[root],
+            &path_config(Some(false)),
+            Some(&mut strategy),
+        );
+        let paths = result.paths.as_ref().expect("path enumeration ran");
+        assert_eq!(
+            paths.len(),
+            1,
+            "only the intra-language call path reaches the target"
+        );
+        assert_eq!(paths[0].len(), 3, "root -> call_mid -> target");
+    }
+
+    #[test]
+    fn path_bfs_cross_boundary_none_finds_both_paths() {
+        let (snapshot, root, target) = cross_boundary_diamond();
+        let mut strategy = SimplePathStrategy::new(target, 0.0, true);
+        let result = traverse(&snapshot, &[root], &path_config(None), Some(&mut strategy));
+        let paths = result.paths.as_ref().expect("path enumeration ran");
+        assert_eq!(
+            paths.len(),
+            2,
+            "both the FFI and intra-language paths reach the target"
+        );
     }
 }

@@ -967,6 +967,19 @@ pub struct RulesRunResultData {
     pub id: String,
     /// Outcome class for this rule.
     pub status: RulesRunStatus,
+    /// Authored severity (schema 2), pack-authored and independent of execution
+    /// success, so it rides every status row. Absent when the rule sets none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub severity: Option<sqry_rules::witness::RuleSeverity>,
+    /// Authored CWE identifier for the finding, e.g. `"CWE-89"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cwe: Option<String>,
+    /// Authored human-readable description of what the rule detects.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Authored remediation guidance for a match.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<String>,
     /// Structured rule output, present when `status` is `ok`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<sqry_rules::engine::RuleOutput>,

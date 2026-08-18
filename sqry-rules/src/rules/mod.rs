@@ -2,6 +2,7 @@
 
 pub mod intake;
 pub mod recipes;
+pub mod security;
 
 use crate::dsl::RuleDefinition;
 
@@ -12,6 +13,8 @@ pub enum RuleVariant {
     NodeScan,
     /// Reused planner filter.
     Filter,
+    /// Rule-level edge traversal (witness-bearing; see `RuleNode::EdgeTraversal`).
+    EdgeTraversal,
     /// Reused planner set operation.
     SetOp,
     /// Reused planner chain.
@@ -65,10 +68,12 @@ impl ShippedRule {
     }
 }
 
-/// Returns every shipped proof recipe plus the standard intake rules.
+/// Returns every shipped rule: the proof recipes, the standard intake rules,
+/// and the universal security detectors.
 #[must_use]
 pub fn shipped_rules() -> Vec<ShippedRule> {
     let mut rules = recipes::bbnty_recipe_rules();
     rules.extend(intake::standard_intake_rules());
+    rules.extend(security::security_rules());
     rules
 }

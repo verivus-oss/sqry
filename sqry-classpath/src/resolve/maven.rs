@@ -673,6 +673,13 @@ fn write_maven_cache(config: &ResolveConfig, entries: &[ResolvedClasspath]) {
 }
 
 /// Read Maven-specific cache.
+/// Read a previously cached Maven classpath without invoking Maven. Returns
+/// `None` when no usable cache is present. Used when build-tool execution is
+/// disabled (`--no-build-tool`).
+pub(crate) fn read_cached_classpath(config: &ResolveConfig) -> Option<Vec<ResolvedClasspath>> {
+    read_maven_cache(config).filter(|classpaths| !classpaths.is_empty())
+}
+
 fn read_maven_cache(config: &ResolveConfig) -> Option<Vec<ResolvedClasspath>> {
     let cache_path = cache_dir(config).join(MAVEN_CACHE_FILE);
     let data = std::fs::read_to_string(&cache_path).ok()?;

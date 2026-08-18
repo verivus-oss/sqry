@@ -50,15 +50,23 @@ echo "[INFO] Auth mode: $AUTH_MODE"
 
 MANIFEST_TMP=$(mktemp)
 trap 'rm -f "$MANIFEST_TMP"' EXIT
-# Patch the top-level version, each package version, AND the oci identifier's
-# embedded tag (ghcr.io/...:vX.Y.Z). Patching the identifier tag too means a
-# stale checked-in manifest can never publish a version/identifier mismatch,
-# even when this script is run standalone without scripts/sync-versions.sh.
+# Patch the top-level version, each non-oci package version, AND the oci
+# identifier's embedded tag (ghcr.io/...:vX.Y.Z). Patching the identifier tag too
+# means a stale checked-in manifest can never publish a version/identifier
+# mismatch, even when this script is run standalone without
+# scripts/sync-versions.sh.
+#
+# An oci package carries its version ONLY in the identifier tag. The registry
+# rejects the whole publish if an oci entry also has `version` or
+# `registryBaseUrl` (internal/validators/registries/oci.go: "OCI packages must
+# not have 'version' field" / "must not have 'registryBaseUrl' field"), so strip
+# both here rather than setting them.
 jq --arg ver "$WORKSPACE_VERSION" '
   .version = $ver
   | if .packages then .packages |= map(
       if .registryType == "oci"
-      then .version = ("v" + $ver) | .identifier = (.identifier | sub(":[^:]*$"; ":v" + $ver))
+      then .identifier = (.identifier | sub(":[^:]*$"; ":v" + $ver))
+           | del(.version, .registryBaseUrl, .fileSha256)
       else .version = $ver
       end
     ) else . end
@@ -108,6 +116,20 @@ if [[ "$AUTH_MODE" == "oidc" ]]; then
   # mcp-publisher publishes ./server.json from its working directory.
   workdir=$(mktemp -d)
   cp "$MANIFEST_TMP" "$workdir/server.json"
+
+  # Schema-validate BEFORE authenticating. The registry rejects schema
+  # violations (e.g. description longer than 100 chars) with HTTP 422 before it
+  # looks at packages at all, so catching it here gives a precise error instead
+  # of a failed publish. Note this covers the SCHEMA only: the oci field rules
+  # and the package ownership checks run at publish time and are not exercised
+  # by `validate`.
+  echo "[INFO] Validating manifest against the live registry schema..."
+  if ! ( cd "$workdir" && mcp-publisher validate ); then
+    echo "FATAL: manifest failed registry schema validation; not publishing" >&2
+    rm -rf "$workdir"
+    exit 1
+  fi
+
   echo "[INFO] Authenticating via GitHub OIDC..."
   ( cd "$workdir" && mcp-publisher login github-oidc )
   echo "[INFO] Publishing to MCP registry..."

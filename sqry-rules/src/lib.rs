@@ -15,8 +15,8 @@ pub mod rules;
 pub mod witness;
 
 pub use backend::{
-    CycleClass, RULE_BACKEND_METHODS, RuleBackend, RulePath, RuleReachabilityKey, RuleTopologyKey,
-    SnapshotId, SqryDbRuleBackend, TracePathKey,
+    CycleClass, RULE_BACKEND_METHODS, RuleBackend, RulePath, RuleReachabilityKey,
+    RuleStructuralNeighbor, RuleTopologyKey, SnapshotId, SqryDbRuleBackend, TracePathKey,
 };
 pub use derived::{
     BesideCachePrimitive, BesideCacheRoute, CacheableRuleQuery, CacheableRuleVariant,
@@ -25,15 +25,18 @@ pub use derived::{
     ReferencesAtRuleQuery, ReferencesAtRuleQueryKey, RelationEdgesRuleQuery,
     RelationEdgesRuleQueryKey, RuleQueryFailure, RuleQueryFailureKind, RuleQueryOutcome,
     SubgraphRuleQuery, SubgraphRuleQueryKey, beside_cache_route_for, cacheable_rule_query_specs,
-    register_rule_queries,
+    register_rule_queries, requires_unsupported_beside_cache,
 };
-pub use dsl::{RuleBuilder, RuleDefinition, RulePack, load_rule_pack_str, load_rule_plan_str};
+pub use dsl::{
+    RULE_PACK_SCHEMA_VERSION, RuleBuilder, RuleDefinition, RulePack, load_rule_pack_str,
+    load_rule_plan_str,
+};
 pub use engine::{
     NoopCancellationToken, RuleCancellationToken, RuleEngine, RuleEngineConfig, RuleMetricValue,
     RuleOutput, RuleRelationRows, RuleRun,
 };
 pub use error::{RuleError, RuleResult};
-pub use ir::{RuleEdgeClass, RuleNode, RulePlan};
+pub use ir::{RuleEdgeClass, RuleNode, RulePlan, TraversalEmit};
 pub use rules::{RuleVariant, ShippedRule, shipped_rules};
 pub use sqry_core::graph::unified::EdgeClassification;
 pub use sqry_db::{DerivedQuery, QueryDb, QueryDbConfig};

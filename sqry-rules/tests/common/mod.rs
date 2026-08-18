@@ -22,10 +22,10 @@ use sqry_db::queries::{CycleBounds, CyclesKey};
 use sqry_db::{QueryDb, QueryDbConfig};
 use sqry_rules::ir::{
     ComplexityMetric, EntrypointExtension, PathKind, RelationEdgeKind, RuleCycleBounds,
-    RuleEdgeClass, RuleEndpoint, RuleNode,
+    RuleEdgeClass, RuleEndpoint, RuleNode, RuleSimilarityKind, TraversalEmit,
 };
 use sqry_rules::rules::ShippedRule;
-use sqry_rules::{CycleClass, RuleBackend, TracePathKey, beside_cache_route_for};
+use sqry_rules::{CycleClass, RuleBackend, TracePathKey, requires_unsupported_beside_cache};
 
 /// A two-function call fixture: `main` calls `helper`, both in `src/lib.rs`.
 pub struct CallFixture {
@@ -77,6 +77,86 @@ pub fn two_node_call_fixture() -> CallFixture {
     }
 }
 
+/// A star fixture for cross-boundary traversal: `root` reaches an FFI target
+/// (cross-boundary), a DB target (cross-boundary, different classification),
+/// and an intra-language call target.
+pub struct CrossBoundaryFixture {
+    /// Immutable snapshot of the fixture graph.
+    pub snapshot: Arc<GraphSnapshot>,
+    /// `root`, the traversal seed.
+    pub root: NodeId,
+    /// Target reached via an `FfiCall` edge (cross-boundary).
+    pub ffi_target: NodeId,
+    /// Target reached via a `DbQuery` edge (cross-boundary).
+    pub db_target: NodeId,
+    /// Target reached via a plain `Calls` edge (intra-language).
+    pub intra_target: NodeId,
+}
+
+/// Builds a `root -> {ffi_target, db_target, intra_target}` star exercising the
+/// cross-boundary edge discriminator through the production backend.
+#[must_use]
+pub fn cross_boundary_fixture() -> CrossBoundaryFixture {
+    let mut graph = CodeGraph::new();
+    let file = graph
+        .files_mut()
+        .register(Path::new("src/lib.rs"))
+        .expect("register fixture file");
+
+    let function = |graph: &mut CodeGraph, name: &str| {
+        let name_id = graph.strings_mut().intern(name).expect("intern name");
+        let node_id = graph
+            .nodes_mut()
+            .alloc(NodeEntry::new(NodeKind::Function, name_id, file).with_qualified_name(name_id))
+            .expect("allocate function");
+        graph
+            .indices_mut()
+            .add(node_id, NodeKind::Function, name_id, Some(name_id), file);
+        node_id
+    };
+
+    let root = function(&mut graph, "root");
+    let ffi_target = function(&mut graph, "ffi_target");
+    let db_target = function(&mut graph, "db_target");
+    let intra_target = function(&mut graph, "intra_target");
+
+    graph.edges_mut().add_edge(
+        root,
+        ffi_target,
+        EdgeKind::FfiCall {
+            convention: sqry_core::graph::unified::edge::kind::FfiConvention::C,
+        },
+        file,
+    );
+    graph.edges_mut().add_edge(
+        root,
+        db_target,
+        EdgeKind::DbQuery {
+            query_type: sqry_core::graph::unified::edge::kind::DbQueryType::Select,
+            table: None,
+        },
+        file,
+    );
+    graph.edges_mut().add_edge(
+        root,
+        intra_target,
+        EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+            resolved_via: ResolvedVia::Direct,
+        },
+        file,
+    );
+
+    CrossBoundaryFixture {
+        snapshot: Arc::new(graph.snapshot()),
+        root,
+        ffi_target,
+        db_target,
+        intra_target,
+    }
+}
+
 /// Builds an empty `QueryDb` backed by an empty graph snapshot.
 #[must_use]
 pub fn empty_query_db() -> QueryDb {
@@ -124,29 +204,39 @@ pub fn manifest_dependency_names(manifest: &str) -> Vec<&str> {
     names
 }
 
-/// Returns true when any node in the rule subtree routes through a
-/// beside-cache primitive, mirroring the recursive check the CLI / MCP apply
-/// before reporting a rule as unsupported.
+/// Returns true when any node in the rule subtree routes through beside-cache
+/// coordination the engine cannot yet run (cross-snapshot), mirroring the
+/// recursive check the CLI / MCP apply before reporting a rule as unsupported.
+/// Since L2a, SimilarTo runs in-engine and is no longer flagged here.
 #[must_use]
 pub fn contains_beside_cache_route(node: &RuleNode) -> bool {
-    beside_cache_route_for(node).is_some()
+    requires_unsupported_beside_cache(node)
         || beside_child_nodes(node)
             .iter()
             .any(|child| contains_beside_cache_route(child))
 }
 
 /// Returns true when a shipped rule must route through beside-cache
-/// coordination, combining its declared flag with a structural scan.
+/// coordination the engine cannot run yet, derived solely from the plan (a
+/// stale declared flag must not gate a rule the engine can run).
 #[must_use]
 pub fn requires_beside_cache(rule: &ShippedRule) -> bool {
-    rule.requires_beside_cache || contains_beside_cache_route(rule.definition.plan.root())
+    contains_beside_cache_route(rule.definition.plan.root())
 }
 
 fn beside_child_nodes(node: &RuleNode) -> Vec<&RuleNode> {
     match node {
         RuleNode::SetOp { left, right, .. } => vec![left.as_ref(), right.as_ref()],
         RuleNode::Chain { steps } => steps.iter().collect(),
-        RuleNode::PathQuery { from, to, .. } => beside_endpoint_children([from, to]),
+        RuleNode::PathQuery {
+            from, to, avoid, ..
+        } => {
+            let mut children = beside_endpoint_children([from, to]);
+            if let Some(avoid) = avoid {
+                children.extend(beside_endpoint_children([avoid]));
+            }
+            children
+        }
         RuleNode::SubgraphExtract { seeds, .. } => beside_endpoint_children([seeds]),
         RuleNode::RelationEdges { from, .. } => beside_endpoint_children([from]),
         RuleNode::ReferencesAt { target } => beside_endpoint_children([target]),
@@ -270,6 +360,7 @@ pub fn hand_compose<B: RuleBackend>(backend: &B, node: &RuleNode) -> Vec<NodeId>
             kind,
             max_depth,
             max_paths,
+            avoid: _,
         } => {
             let sources = endpoint_nodes(backend, from);
             for target in endpoint_nodes(backend, to) {
@@ -419,9 +510,33 @@ pub fn hand_compose<B: RuleBackend>(backend: &B, node: &RuleNode) -> Vec<NodeId>
             }
             nodes
         }
-        // Beside-cache variants have no single-snapshot backend primitive; the
-        // engine never executes them inline, so neither does the baseline.
-        RuleNode::SimilarTo { .. } | RuleNode::CrossSnapshotDiff { .. } => Vec::new(),
+        // SimilarTo runs the structural-neighbour primitive in-engine since L2a,
+        // so the baseline exercises the same backend call for a meaningful
+        // wall-clock comparison (mirrors the dispatcher's execute_similar_to).
+        RuleNode::SimilarTo {
+            seed,
+            similarity_kind,
+            ..
+        } => {
+            let (floor, exact_only) = match similarity_kind {
+                RuleSimilarityKind::Duplicate => (0.0_f32, true),
+                RuleSimilarityKind::Similar => (0.7_f32, false),
+            };
+            let mut matched = Vec::new();
+            for seed_node in endpoint_nodes(backend, seed) {
+                for neighbour in backend
+                    .structural_neighbors(seed_node, floor, 50)
+                    .expect("hand structural_neighbors")
+                {
+                    if neighbour.node != seed_node && (!exact_only || neighbour.shape_hash_exact) {
+                        matched.push(neighbour.node);
+                    }
+                }
+            }
+            matched
+        }
+        // CrossSnapshotDiff still has no single-snapshot backend primitive.
+        RuleNode::CrossSnapshotDiff { .. } => Vec::new(),
     }
 }
 
@@ -457,11 +572,14 @@ fn hand_chain<B: RuleBackend>(backend: &B, steps: &[RuleNode]) -> Vec<NodeId> {
                 direction,
                 edge_class,
                 max_depth,
+                cross_boundary,
+                emit,
                 ..
             } = step
             {
-                let filter =
+                let mut filter =
                     edge_class.map_or_else(EdgeFilter::all, |class| classes_edge_filter(&[class]));
+                filter.cross_boundary = *cross_boundary;
                 let result = backend
                     .traverse(
                         &current,
@@ -475,7 +593,13 @@ fn hand_chain<B: RuleBackend>(backend: &B, steps: &[RuleNode]) -> Vec<NodeId> {
                         },
                     )
                     .expect("hand chain traverse");
-                current = result.nodes.iter().map(|node| node.node_id).collect();
+                current = match emit {
+                    TraversalEmit::ReachedNodes => {
+                        result.nodes.iter().map(|node| node.node_id).collect()
+                    }
+                    TraversalEmit::EdgeSources => hand_edge_endpoints(&result, true),
+                    TraversalEmit::EdgeTargets => hand_edge_endpoints(&result, false),
+                };
             }
         }
         return current;
@@ -504,8 +628,13 @@ fn lower_plan(node: &RuleNode) -> Option<PlanNode> {
             edge_class,
             max_depth,
             resolved_via,
+            cross_boundary,
+            emit,
         } => {
-            if edge_class.is_some() {
+            if edge_class.is_some()
+                || cross_boundary.is_some()
+                || *emit != TraversalEmit::ReachedNodes
+            {
                 None
             } else {
                 Some(PlanNode::EdgeTraversal {
@@ -546,6 +675,28 @@ fn path_edge_filter(kind: PathKind) -> EdgeFilter {
     }
 }
 
+/// Mirror of the dispatcher's edge-endpoint collection for `emit` modes:
+/// distinct source (or target) endpoints of the traversed edges, first-seen.
+fn hand_edge_endpoints(
+    result: &sqry_core::graph::unified::TraversalResult,
+    sources: bool,
+) -> Vec<NodeId> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for edge in &result.edges {
+        let idx = if sources {
+            edge.source_idx
+        } else {
+            edge.target_idx
+        };
+        let node_id = result.nodes[idx].node_id;
+        if seen.insert(node_id) {
+            out.push(node_id);
+        }
+    }
+    out
+}
+
 fn classes_edge_filter(classes: &[RuleEdgeClass]) -> EdgeFilter {
     if classes.is_empty() {
         return EdgeFilter::all();
@@ -559,6 +710,7 @@ fn classes_edge_filter(classes: &[RuleEdgeClass]) -> EdgeFilter {
         include_type_edges: classes.contains(&RuleEdgeClass::Type),
         include_database: classes.contains(&RuleEdgeClass::Database),
         include_service: classes.contains(&RuleEdgeClass::Service),
+        cross_boundary: None,
     }
 }
 

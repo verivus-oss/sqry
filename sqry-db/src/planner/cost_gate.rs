@@ -252,6 +252,7 @@ fn check_predicate(
         | Predicate::HasCallee
         | Predicate::IsUnused
         | Predicate::IsDefinition(_)
+        | Predicate::IsUnsafe(_)
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
         | Predicate::HasCallsitePromiscuous(_)

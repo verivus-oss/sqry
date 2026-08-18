@@ -8,16 +8,13 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 # Note: All vulnerability advisories now emit errors by default (cargo-deny v0.14+)
 # To allow specific CVEs, add them to the ignore list below. Exceptions must
 # also be documented in `.cargo/audit.toml` with rationale and expiry.
-unmaintained = "workspace" # Keep failures scoped to direct dependencies until async-std is removed (RUSTSEC-2025-0052)
+unmaintained = "workspace" # Intentionally fail unmaintained direct dependencies; async-std is absent and separately banned below.
 yanked = "warn"
-# Ignore list = superset of `.cargo/audit.toml`'s ignore list.
-# - 2023-0071 (rsa) is the canonical exception; audit.toml holds rationale + expiry.
+# This ignore list must exactly equal `.cargo/audit.toml`'s ignore list.
 # 2026-06-15 (sqry-nl removal): dropped 2024-0436 (paste) and 2025-0119
 # (number_prefix). The ONNX/embeddings/DataFusion stack that pulled them was
 # removed with sqry-nl, so neither advisory matches any crate in the tree.
-ignore = [
-  "RUSTSEC-2023-0071", # rsa: Marvin Attack (not exploitable in sqry context — see audit.toml)
-]
+ignore = []
 
 [licenses]
 version = 2

@@ -269,6 +269,7 @@ fn edge_filter_imports_only() -> EdgeFilter {
         include_type_edges: false,
         include_database: false,
         include_service: false,
+        cross_boundary: None,
     }
 }
 
@@ -285,6 +286,7 @@ fn edge_filter_exports_only() -> EdgeFilter {
         include_type_edges: false,
         include_database: false,
         include_service: false,
+        cross_boundary: None,
     }
 }
 

@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { resolveUriWithinWorkspace } from "./workspaceGuard";
 
 // Command ids the LSP server surfaces through CodeLens (`codelens.rs`) and
 // CodeActions (`code_action.rs`). The server advertises them in
@@ -156,9 +157,18 @@ async function renderReferences(
 ): Promise<void> {
   const label = command === SQRY_SHOW_CALLERS ? "callers" : "references";
   const name = symbolName(result);
-  const locations = extractLocations(result);
+  // The peek view navigates to these result locations, so confine them to the
+  // workspace and navigate using the guard's CANONICAL URI (dropping non-`file`
+  // or out-of-workspace locations, and pinning symlinks to their real target so
+  // a post-check retarget cannot redirect the peek outside).
+  const guarded = extractLocations(result)
+    .map((loc) => {
+      const uri = resolveUriWithinWorkspace(vscode.Uri.parse(loc.uri));
+      return uri ? { loc, uri } : undefined;
+    })
+    .filter((entry): entry is { loc: LspLocation; uri: vscode.Uri } => entry !== undefined);
 
-  if (locations.length === 0) {
+  if (guarded.length === 0) {
     void vscode.window.showInformationMessage(
       `sqry: no ${label} found${name ? ` for ${name}` : ""}.`,
     );
@@ -166,18 +176,29 @@ async function renderReferences(
   }
 
   const context = extractContext(args);
-  const anchorUri = context
-    ? vscode.Uri.parse(context.uri)
-    : vscode.Uri.parse(locations[0].uri);
-  const anchorPosition = context
-    ? new vscode.Position(context.position.line, context.position.character)
-    : new vscode.Position(locations[0].range.start.line, locations[0].range.start.character);
+  const contextUri = context ? resolveUriWithinWorkspace(vscode.Uri.parse(context.uri)) : undefined;
+  const anchorUri = contextUri ?? guarded[0].uri;
+  const anchorPosition =
+    context && contextUri
+      ? new vscode.Position(context.position.line, context.position.character)
+      : new vscode.Position(guarded[0].loc.range.start.line, guarded[0].loc.range.start.character);
 
   await vscode.commands.executeCommand(
     "editor.action.showReferences",
     anchorUri,
     anchorPosition,
-    locations.map(toVscodeLocation),
+    guarded.map(
+      ({ loc, uri }) =>
+        new vscode.Location(
+          uri,
+          new vscode.Range(
+            loc.range.start.line,
+            loc.range.start.character,
+            loc.range.end.line,
+            loc.range.end.character,
+          ),
+        ),
+    ),
   );
 }
 

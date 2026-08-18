@@ -2,31 +2,9 @@
 # RR-12: Dependency Hygiene - CVE exception tracking
 # See: docs/development/p2-37-unwrap-audit/RR12_DEPENDENCY_HYGIENE_ANALYSIS.md
 
-# RUSTSEC-2023-0071: Marvin Attack: potential key recovery through timing sidechannels
-#
-# Crate: rsa 0.9.9
-# Severity: 5.9/10 (Medium)
-# Date: 2023-11-22
-#
-# RATIONALE FOR ACCEPTANCE:
-# sqry does NOT perform RSA decryption operations. The RSA crate is pulled in
-# via the Lance/OpenDAL storage layer (6 levels deep: rsa → reqsign → opendal
-# → object_store_opendal → lance-io → sqry-core) for cloud storage authentication
-# (S3, Azure, GCS signatures).
-#
-# The Marvin Attack exploits timing sidechannels during RSA decryption to recover
-# private keys. sqry's primary use case is local file indexing and semantic search,
-# which does not expose RSA key material to attackers. The vulnerability is not
-# exploitable in sqry's context.
-#
-# MITIGATION:
-# - Monitor for Lance 0.40+ releases (may update opendal/reqsign stack)
-# - Re-evaluate when upstream dependencies address the issue
-# - If cloud storage integration becomes a primary feature, revisit this exception
-#
-# Documented in: RR12_DEPENDENCY_HYGIENE_ANALYSIS.md
-# Accepted by: Claude (RR-12 Analysis, 2025-11-23)
-# Expires: 2026-06-01 (6 months - re-evaluate after Lance ecosystem updates)
+# 2026-08-18: removed the expired RUSTSEC-2023-0071 exception after the
+# Lance/OpenDAL/RSA dependency chain left the workspace. This list must remain
+# exactly equal to deny.toml's advisory ignore list.
 
 # ============================================================================
 # 2026-06-15 (sqry-nl removal): the number_prefix (RUSTSEC-2025-0119) and paste
@@ -37,6 +15,4 @@
 # crate, so the advisories no longer match anything in the dependency graph.
 
 [advisories]
-ignore = [
-    "RUSTSEC-2023-0071",  # rsa: Marvin Attack (not exploitable in sqry context)
-]
+ignore = []

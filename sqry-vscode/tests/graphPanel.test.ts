@@ -9,6 +9,7 @@ let disposeCallCount = 0;
 let revealCallCount = 0;
 let onDidReceiveMessageHandler: ((message: unknown) => void) | null = null;
 let onDidDisposeHandler: (() => void) | null = null;
+let executedCommands: Array<{ command: string; args: unknown[] }> = [];
 
 function createMockPanel() {
   return {
@@ -65,10 +66,30 @@ const vscodeStub = {
   workspace: {
     openTextDocument: () => Promise.resolve({}),
   },
+  commands: {
+    // Present so a regression that navigates with `vscode.open` is recorded
+    // rather than throwing on an undefined stub.
+    executeCommand: (command: string, ...args: unknown[]) => {
+      executedCommands.push({ command, args });
+      return Promise.resolve(undefined);
+    },
+  },
 };
+
+// Record what the webview navigation handler does, so a regression that opens
+// `message.file` directly instead of routing through the guard is visible.
+let guardOpenCalls: Array<{ filePath: string; options: unknown }> = [];
 
 const { SqryGraphPanel } = proxyquire("../src/graphPanel", {
   vscode: vscodeStub,
+  // Stub the workspace guard so the real one (which requires the host `vscode`
+  // module) is not pulled in transitively during unit tests.
+  "./workspaceGuard": {
+    openFileWithinWorkspace: async (filePath: string, options: unknown) => {
+      guardOpenCalls.push({ filePath, options });
+      return undefined;
+    },
+  },
 }) as { SqryGraphPanel: typeof import("../src/graphPanel").SqryGraphPanel };
 
 describe("SqryGraphPanel", () => {
@@ -96,6 +117,39 @@ describe("SqryGraphPanel", () => {
     postedMessages = [];
     disposeCallCount = 0;
     revealCallCount = 0;
+    guardOpenCalls = [];
+    executedCommands = [];
+  });
+
+  // The webview hands back a file path derived from indexed data, which is the
+  // highest-risk navigation surface in the extension: it is an imperative open,
+  // not a link the user inspects first. It must go through the guard.
+  describe("navigateToFile message handling", () => {
+    it("routes the webview navigation request through the workspace guard", async () => {
+      const panel = SqryGraphPanel.createOrShow({} as any, "callGraph");
+      expect(onDidReceiveMessageHandler).to.not.be.null;
+
+      await onDidReceiveMessageHandler!({
+        type: "navigateToFile",
+        file: "/outside/evil.rs",
+        line: 3,
+      });
+
+      expect(guardOpenCalls).to.have.lengthOf(1);
+      expect(guardOpenCalls[0].filePath).to.equal("/outside/evil.rs");
+      expect(executedCommands.filter((c) => c.command === "vscode.open")).to.have.lengthOf(0);
+      panel.dispose();
+    });
+
+    it("ignores messages that are not a navigation request", async () => {
+      const panel = SqryGraphPanel.createOrShow({} as any, "callGraph");
+
+      await onDidReceiveMessageHandler!({ type: "somethingElse", file: "/src/a.rs", line: 1 });
+      await onDidReceiveMessageHandler!({ type: "navigateToFile", line: 1 });
+
+      expect(guardOpenCalls).to.have.lengthOf(0);
+      panel.dispose();
+    });
   });
 
   it("createOrShow() creates a panel", () => {

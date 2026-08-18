@@ -35,6 +35,9 @@ pub(crate) struct ClasspathCliOptions<'a> {
     pub classpath_file: Option<&'a Path>,
     pub build_system: Option<&'a str>,
     pub force_classpath: bool,
+    /// When true, never execute the project's build tooling during classpath
+    /// resolution (maps to `ClasspathConfig::allow_build_tool_execution = false`).
+    pub no_build_tool: bool,
 }
 
 #[cfg(feature = "jvm-classpath")]
@@ -56,6 +59,7 @@ pub(crate) fn run_classpath_pipeline_only(
         classpath_file: classpath_opts.classpath_file.map(Path::to_path_buf),
         force: classpath_opts.force_classpath,
         timeout_secs: 60,
+        allow_build_tool_execution: !classpath_opts.no_build_tool,
     };
 
     // Under `--json` this progress chatter must not pollute stdout (the caller
@@ -710,6 +714,7 @@ pub fn run_index(
     classpath_file: Option<&Path>,
     build_system: Option<&str>,
     force_classpath: bool,
+    no_build_tool: bool,
     allow_nested: bool,
     cfg_flags: &[String],
     expand_cache: Option<&Path>,
@@ -759,6 +764,7 @@ pub fn run_index(
         classpath_file,
         build_system,
         force_classpath,
+        no_build_tool,
     };
     // C001b: surface `--cache-dir` to the build pipeline so the post-parse
     // hash-index snapshot lands in the operator-supplied directory.
@@ -1169,6 +1175,7 @@ pub fn run_update(
     classpath_file: Option<&Path>,
     build_system: Option<&str>,
     force_classpath: bool,
+    no_build_tool: bool,
 ) -> Result<()> {
     let root_path = Path::new(path);
     let mut step_runner = StepRunner::new(!std::io::stderr().is_terminal() && !cli.json);
@@ -1232,6 +1239,7 @@ pub fn run_update(
         classpath_file,
         build_system,
         force_classpath,
+        no_build_tool,
     };
     let cache_dir_path = cache_dir.map(Path::new);
     let build_result = step_runner.step("Update unified graph", || -> Result<_> {
@@ -1771,6 +1779,7 @@ mod tests {
             classpath_file: None,
             build_system: None,
             force_classpath: true,
+            no_build_tool: false,
         };
 
         let result = run_classpath_pipeline_only(tmp_cli_workspace.path(), &classpath_opts, false)
@@ -1803,6 +1812,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested
             &[],   // cfg_flags
             None,  // expand_cache
@@ -1842,6 +1852,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested
             &[],   // cfg_flags
             None,  // expand_cache
@@ -1863,6 +1874,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested
             &[],   // cfg_flags
             None,  // expand_cache
@@ -1884,6 +1896,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested
             &[],   // cfg_flags
             None,  // expand_cache
@@ -1914,6 +1927,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No index found"));
@@ -1974,6 +1988,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested
             &[],   // cfg_flags
             None,  // expand_cache
@@ -2184,6 +2199,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false,
             &[],
             None,
@@ -2265,6 +2281,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested
             &[],   // cfg_flags
             None,  // expand_cache
@@ -2285,6 +2302,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
         );
         assert!(result.is_ok());
     }
@@ -2319,6 +2337,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested
             &[],   // cfg_flags
             None,  // expand_cache
@@ -2348,6 +2367,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested
             &[],   // cfg_flags
             None,  // expand_cache
@@ -2418,6 +2438,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested
             &[],   // cfg_flags
             None,  // expand_cache
@@ -2471,6 +2492,7 @@ mod tests {
             None,
             None,
             false,
+            false, // no_build_tool
             false, // allow_nested = false → guard fires
             &[],   // cfg_flags
             None,  // expand_cache

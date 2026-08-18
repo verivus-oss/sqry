@@ -28,6 +28,18 @@ fn shipped_pack_intake_loads() {
 }
 
 #[test]
+fn shipped_pack_security_loads_the_universal_detector() {
+    let dir = tempdir().expect("tempdir");
+    let loaded = load_rules("bbnty.security", dir.path()).expect("security load");
+    assert_eq!(loaded.source, "bbnty.security");
+    assert_eq!(loaded.rules.len(), 1);
+    assert_eq!(
+        loaded.rules[0].definition.id,
+        "bbnty.security.unsafe_ffi_reach"
+    );
+}
+
+#[test]
 fn shipped_pack_all_unions_recipes_and_intake() {
     let dir = tempdir().expect("tempdir");
     let all = load_rules("bbnty.all", dir.path()).expect("all load");
@@ -72,20 +84,52 @@ fn toml_path_escaping_workspace_is_rejected() {
 }
 
 #[test]
-fn shipped_rules_carry_mixed_beside_cache_flags() {
-    // The shipped suite includes both directly-executable rules and
-    // beside-cache rules (CrossSnapshotDiff / SimilarTo). The From
-    // conversion must mark them honestly so `rules_run` reports the latter
-    // as `unsupported` instead of attempting a beside-cache primitive.
-    let loaded: Vec<LoadedRule> = shipped_rules().into_iter().map(LoadedRule::from).collect();
-    assert!(
-        loaded.iter().any(|rule| rule.requires_beside_cache),
-        "expected at least one beside-cache rule in the shipped suite"
+fn shipped_similarto_rules_load_ungated() {
+    // Since L2a, shipped SimilarTo rules must reach the engine on the MCP
+    // surface instead of short-circuiting to `unsupported`; only cross-snapshot
+    // rules stay gated. The From conversion derives the gate from plan shape.
+    let similar_to_ids = ["bbnty.intake.duplicates.body", "bbnty.pr_r7.peer_asymmetry"];
+    let mut seen = 0_usize;
+    let mut any_gated = false;
+    for rule in shipped_rules() {
+        let id = rule.id().to_string();
+        let loaded = LoadedRule::from(rule);
+        if similar_to_ids.contains(&id.as_str()) {
+            seen += 1;
+            assert!(
+                !loaded.requires_beside_cache,
+                "{id} is SimilarTo and must load ungated since L2a"
+            );
+        }
+        if loaded.requires_beside_cache {
+            any_gated = true;
+        }
+    }
+    assert_eq!(
+        seen,
+        similar_to_ids.len(),
+        "expected the shipped SimilarTo rules to be present"
     );
     assert!(
-        loaded.iter().any(|rule| !rule.requires_beside_cache),
-        "expected at least one directly-executable rule in the shipped suite"
+        any_gated,
+        "cross-snapshot shipped rules must still load gated as unsupported"
     );
+}
+
+#[test]
+fn shipped_rules_beside_cache_flag_matches_plan_shape() {
+    // Pin every shipped declaration to plan reality so a stale flag cannot
+    // silently regress the gate (the L2a code-gate defect).
+    for rule in shipped_rules() {
+        let plan_needs = contains_unsupported_beside_cache(rule.definition.plan.root());
+        assert_eq!(
+            rule.requires_beside_cache,
+            plan_needs,
+            "{} declares requires_beside_cache={} but its plan needs={plan_needs}",
+            rule.id(),
+            rule.requires_beside_cache,
+        );
+    }
 }
 
 #[test]
@@ -109,6 +153,10 @@ fn result_skips_absent_optional_fields() {
     let ok = RulesRunResultData {
         id: "rule.x".to_string(),
         status: RulesRunStatus::Ok,
+        severity: None,
+        cwe: None,
+        description: None,
+        remediation: None,
         output: None,
         witness: None,
         error: None,
@@ -125,6 +173,12 @@ fn result_skips_absent_optional_fields() {
         json.get("witness").is_none(),
         "absent witness must be skipped"
     );
+    for field in ["severity", "cwe", "description", "remediation"] {
+        assert!(
+            json.get(field).is_none(),
+            "absent metadata field {field} must be skipped"
+        );
+    }
 }
 
 #[test]
@@ -157,7 +211,7 @@ fn execute_loaded_rule_emits_witness_for_ok_and_unsupported_for_beside_cache() {
     use sqry_core::graph::unified::CodeGraph;
     use sqry_db::planner::StringPattern;
     use sqry_db::{QueryDb, QueryDbConfig};
-    use sqry_rules::ir::{RuleEndpoint, RulePlan, RuleSimilarityKind};
+    use sqry_rules::ir::RulePlan;
     use sqry_rules::witness::RuleStep;
 
     let snapshot = Arc::new(CodeGraph::new().snapshot());
@@ -190,16 +244,23 @@ fn execute_loaded_rule_emits_witness_for_ok_and_unsupported_for_beside_cache() {
         "an ok rule result carries a witness ending in RuleFired"
     );
 
-    // A beside-cache rule is reported `unsupported` with the beside-cache
+    // A cross-snapshot rule is reported `unsupported` with the cross-snapshot
     // explanation and no witness, never executed on the single-snapshot graph.
+    // The gate computes this from the plan shape (flag left false).
     let beside_rule = LoadedRule {
-        requires_beside_cache: true,
+        requires_beside_cache: false,
         definition: RuleDefinition::new(
-            "test.beside.similar",
-            RulePlan::new(RuleNode::SimilarTo {
-                seed: RuleEndpoint::Nodes(Vec::new()),
-                scope: None,
-                similarity_kind: RuleSimilarityKind::Similar,
+            "test.beside.cross_snapshot",
+            RulePlan::new(RuleNode::CrossSnapshotDiff {
+                base: sqry_rules::SnapshotId {
+                    edge_revision: 1,
+                    metadata_revision: 1,
+                },
+                head: sqry_rules::SnapshotId {
+                    edge_revision: 2,
+                    metadata_revision: 2,
+                },
+                include_unchanged: false,
             }),
         ),
     };
@@ -212,8 +273,8 @@ fn execute_loaded_rule_emits_witness_for_ok_and_unsupported_for_beside_cache() {
             .error
             .as_deref()
             .unwrap_or_default()
-            .contains("beside-cache"),
-        "unsupported beside-cache result explains the beside-cache requirement"
+            .contains("cross-snapshot"),
+        "unsupported result explains the cross-snapshot requirement"
     );
 }
 

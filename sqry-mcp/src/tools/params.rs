@@ -1280,8 +1280,9 @@ pub struct SqryQueryParams {
 /// `RuleEngine` plus `SqryDbRuleBackend` over the workspace graph and returns
 /// each rule's structured output plus witness. The selector resolution and
 /// honest beside-cache handling mirror the `sqry rules run` CLI surface
-/// (P5U09); rules whose IR requires cross-snapshot or similarity routes are
-/// reported as `unsupported` until the coordinator surface (P5U11) lands.
+/// (P5U09). SimilarTo rules run in-engine via structural neighbours since L2a;
+/// only cross-snapshot (`CrossSnapshotDiff`) routes are reported as
+/// `unsupported`, until the snapshot-sourcing coordinator (L2a-2) lands.
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
 #[schemars(example = "json!({
     \"rule_or_pack\": \"bbnty.intake\",
@@ -1289,9 +1290,9 @@ pub struct SqryQueryParams {
 })")]
 pub struct RulesRunParams {
     /// Rule or pack selector. Resolves in order: a shipped pack name
-    /// (`bbnty.recipes`, `bbnty.intake`, `bbnty.all`), an exact shipped
-    /// rule ID, otherwise a path (relative to `path`) to a TOML rule pack
-    /// loaded from the workspace.
+    /// (`bbnty.recipes`, `bbnty.intake`, `bbnty.security`, `bbnty.all`), an
+    /// exact shipped rule ID, otherwise a path (relative to `path`) to a TOML
+    /// rule pack loaded from the workspace.
     pub rule_or_pack: String,
 
     /// Workspace path. Defaults to the current directory if omitted.

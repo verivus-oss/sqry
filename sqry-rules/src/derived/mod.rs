@@ -3,7 +3,10 @@
 pub mod beside_cache;
 pub mod cacheable;
 
-pub use beside_cache::{BesideCachePrimitive, BesideCacheRoute, beside_cache_route_for};
+pub use beside_cache::{
+    BesideCachePrimitive, BesideCacheRoute, beside_cache_route_for,
+    requires_unsupported_beside_cache,
+};
 pub use cacheable::{
     CacheableRuleQuery, CacheableRuleVariant, ComplexityRuleQuery, ComplexityRuleQueryKey,
     CycleWitnessRuleQuery, CycleWitnessRuleQueryKey, EntryPointUnionRuleQuery,

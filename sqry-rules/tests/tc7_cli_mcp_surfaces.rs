@@ -11,14 +11,15 @@
 
 mod common;
 
-use sqry_rules::rules::{ShippedRule, intake, recipes};
+use sqry_rules::rules::{ShippedRule, intake, recipes, security};
 use sqry_rules::{RuleEngine, RuleRun, RuleStep, SqryDbRuleBackend, shipped_rules};
 
 #[test]
 fn shipped_pack_selectors_resolve_to_expected_rule_sets() {
     assert_eq!(recipes::bbnty_recipe_rules().len(), 7);
     assert_eq!(intake::standard_intake_rules().len(), 5);
-    assert_eq!(shipped_rules().len(), 12);
+    assert_eq!(security::security_rules().len(), 1);
+    assert_eq!(shipped_rules().len(), 13);
 }
 
 #[test]

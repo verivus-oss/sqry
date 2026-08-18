@@ -3,8 +3,9 @@
 # metadata, and first-party cargo-vet exemptions.
 #
 # Usage:
-#   scripts/sync-versions.sh          # Check mode — exit 1 if any file is stale
-#   scripts/sync-versions.sh --fix    # Fix mode — update all files in-place
+#   scripts/sync-versions.sh                                  # Check mode
+#   scripts/sync-versions.sh --fix                            # Fix without rebinding reviews
+#   scripts/sync-versions.sh --fix --refresh-review-binding   # Explicitly rebind a reviewed candidate
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -12,8 +13,26 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 cd "$REPO_ROOT"
 
 FIX_MODE=false
-if [ "${1:-}" = "--fix" ]; then
-    FIX_MODE=true
+REFRESH_REVIEW_BINDING=false
+CONTRACT_WORKTREE_UPDATED=false
+CONTRACT_FIX_FAILED=false
+for argument in "$@"; do
+    case "$argument" in
+        --fix)
+            FIX_MODE=true
+            ;;
+        --refresh-review-binding)
+            REFRESH_REVIEW_BINDING=true
+            ;;
+        *)
+            echo "usage: scripts/sync-versions.sh [--fix [--refresh-review-binding]]" >&2
+            exit 2
+            ;;
+    esac
+done
+if $REFRESH_REVIEW_BINDING && ! $FIX_MODE; then
+    echo "--refresh-review-binding requires --fix" >&2
+    exit 2
 fi
 
 # --- Source of truth ---
@@ -102,6 +121,7 @@ VET_TMP_FILE=""
 WORKSPACE_CRATE_NAMES=()
 VET_MANAGED_CRATE_NAMES=()
 
+# shellcheck disable=SC2329  # Invoked by the EXIT trap below.
 cleanup_temp_files() {
     if [ -n "$VET_TMP_FILE" ]; then
         rm -f "$VET_TMP_FILE"
@@ -111,6 +131,37 @@ cleanup_temp_files() {
 trap cleanup_temp_files EXIT
 
 # --- Helpers ---
+
+# Validate or refresh the release-review contract without ever inferring or
+# changing intentional Git modes. The validator reads exact stage-zero index
+# records, so callers can safely exercise it through an isolated
+# GIT_INDEX_FILE without mutating the shared repository index.
+maintain_review_contract() {
+    local action="$1"
+    local validator="scripts/release/check-sanitization-review-contract.sh"
+    local -a validator_arguments
+
+    if [[ ! -x "$validator" ]]; then
+        printf 'ERROR\tcontract validator is missing or not executable: %s\n' "$validator"
+        return 1
+    fi
+    case "$action" in
+        check)
+            validator_arguments=(--check-integrity --source index)
+            ;;
+        fix)
+            validator_arguments=(--refresh-integrity --source worktree)
+            if $REFRESH_REVIEW_BINDING; then
+                validator_arguments+=(--refresh-review-binding)
+            fi
+            ;;
+        *)
+            printf 'ERROR\tunsupported contract maintenance action: %s\n' "$action"
+            return 1
+            ;;
+    esac
+    "$validator" "${validator_arguments[@]}"
+}
 
 # Check that the canonical version field in a file matches WORKSPACE_VERSION.
 # Uses pattern-specific checks rather than substring grep to avoid false positives.
@@ -133,6 +184,34 @@ check_version_in_file() {
         return
     fi
 
+    # Every non-oci `packages[].version` must track the release too, not just the
+    # top-level `version`. The registry publisher repatches these at publish
+    # time, so in-tree drift here is silent: the manifest looks green while the
+    # committed cargo package version points at an older release.
+    #
+    # An oci package must carry NO `version` and NO `registryBaseUrl` at all: the
+    # registry rejects the publish outright if either is present, and the tag in
+    # `identifier` (checked just above) is the only version it accepts.
+    if [ "$file" = ".mcp/server.json" ]; then
+        local pkg_drift
+        pkg_drift=$(jq -r --arg ver "$WORKSPACE_VERSION" '
+            [ (.packages // [])[]
+              | if .registryType == "oci"
+                then (if has("version") then "oci must not declare version" else empty end),
+                     (if has("registryBaseUrl") then "oci must not declare registryBaseUrl" else empty end),
+                     (if has("fileSha256") then "oci must not declare fileSha256" else empty end)
+                else (if .version != $ver then "\(.registryType)=\(.version)" else empty end)
+                end ]
+            | join(", ")
+        ' "$file")
+        if [ -n "$pkg_drift" ]; then
+            printf "❌ %-50s package drift (%s) → needs %s\n" \
+                "$label" "$pkg_drift" "$WORKSPACE_VERSION"
+            ERRORS=$((ERRORS + 1))
+            return
+        fi
+    fi
+
     if [ "$current_ver" = "$WORKSPACE_VERSION" ]; then
         printf "✅ %-50s %s\n" "$label" "$WORKSPACE_VERSION"
     elif [ -z "$current_ver" ]; then
@@ -152,6 +231,84 @@ check_version_in_file() {
 # no-packages state, so treat any divergence as an error.
 MCP_SERVER_JSON_SRC=".mcp/server.json"
 MCP_SERVER_JSON_MIRROR="sqry-mcp/server.json"
+
+# The cargo package's ownership proof is a literal `mcp-name: <server>` token in
+# the crate README. The MCP registry reads the RENDERED README from
+# static.crates.io, and crates.io strips HTML comments, so the token must be
+# visible markdown and must be followed by a boundary character (anything
+# outside [A-Za-z0-9._/-]) or the registry treats it as a prefix of a longer
+# name. Losing this token silently breaks cargo ownership validation at publish
+# time, which is exactly how the live entry ended up with no packages.
+MCP_README="sqry-mcp/README.md"
+MCP_SERVER_NAME="io.github.verivus-oss/sqry"
+
+check_mcp_name_token() {
+    local label="ownership token: ${MCP_README}"
+    if [ ! -f "$MCP_README" ]; then
+        printf "⚠️  %-50s file not found\n" "$label"
+        WARNINGS=$((WARNINGS + 1))
+        return
+    fi
+    if grep -q "<!--[^>]*mcp-name: ${MCP_SERVER_NAME}" "$MCP_README"; then
+        printf "❌ %-50s token is inside an HTML comment (stripped when rendered)\n" "$label"
+        ERRORS=$((ERRORS + 1))
+        return
+    fi
+    # Deliberately STRICTER than the registry's isMCPNameBoundary, which also
+    # accepts a following "-->" or "--!>" so that publishers can hide the token
+    # in an HTML comment. That form is exactly what broke cargo validation here
+    # (crates.io strips comments before the registry ever sees the README), so
+    # this check treats any server-name character as a failure and refuses the
+    # comment form outright.
+    if ! python3 - "$MCP_README" "$MCP_SERVER_NAME" <<'PY'
+import sys
+content = open(sys.argv[1], encoding="utf-8").read()
+token = "mcp-name: " + sys.argv[2]
+start = 0
+while True:
+    i = content.find(token, start)
+    if i < 0:
+        sys.exit(1)
+    rest = content[i + len(token):]
+    if not rest or rest[0] not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._/-":
+        sys.exit(0)
+    start = i + 1
+PY
+    then
+        printf "❌ %-50s missing a complete '%s' token\n" "$label" "mcp-name: ${MCP_SERVER_NAME}"
+        ERRORS=$((ERRORS + 1))
+        return
+    fi
+    printf "✅ %-50s present and boundary-terminated\n" "$label"
+}
+
+# Schema limits from the registry's server schema (2025-12-11):
+# ServerDetail.description and .title are maxLength 100, .name is 200. These are
+# enforced by the /validate endpoint with HTTP 422 BEFORE any package or
+# ownership validation runs, so an over-long description fails the whole publish
+# no matter how correct the packages are. Checked offline here because the
+# failure is trivial to prevent and expensive to discover in a release job.
+check_mcp_schema_limits() {
+    local label="schema limits: ${MCP_SERVER_JSON_SRC}"
+    if [ ! -f "$MCP_SERVER_JSON_SRC" ]; then
+        printf "⚠️  %-50s file not found\n" "$label"
+        WARNINGS=$((WARNINGS + 1))
+        return
+    fi
+    local over
+    over=$(jq -r '
+        [ (if (.description // "" | length) > 100 then "description=\(.description | length)>100" else empty end),
+          (if (.title // "" | length) > 100 then "title=\(.title | length)>100" else empty end),
+          (if (.name // "" | length) > 200 then "name=\(.name | length)>200" else empty end) ]
+        | join(", ")
+    ' "$MCP_SERVER_JSON_SRC")
+    if [ -n "$over" ]; then
+        printf "❌ %-50s %s\n" "$label" "$over"
+        ERRORS=$((ERRORS + 1))
+        return
+    fi
+    printf "✅ %-50s within registry schema limits\n" "$label"
+}
 
 check_mcp_server_json_mirror() {
     local label="mirror: ${MCP_SERVER_JSON_MIRROR}"
@@ -471,6 +628,8 @@ done
 echo ""
 echo "--- MCP registry manifest mirror ---"
 check_mcp_server_json_mirror
+check_mcp_schema_limits
+check_mcp_name_token
 
 echo ""
 echo "--- JSON files ---"
@@ -524,41 +683,21 @@ done
 
 # --- Sanitization review contract hashes (Category F) ---
 echo ""
-echo "--- Sanitization review contract hashes ---"
+echo "--- Sanitization review contract integrity ---"
 REVIEW_CONTRACT="docs/reviews/release-workflows/sanitization-review-contract.toml"
-CONTRACT_HASH_STALE=0
 if [ -f "$REVIEW_CONTRACT" ]; then
-    while IFS= read -r covered_path; do
-        [[ -n "$covered_path" ]] || continue
-        label="contract: ${covered_path}"
-        if [ ! -f "$covered_path" ]; then
-            printf "⚠️  %-50s file not found\n" "$label"
-            WARNINGS=$((WARNINGS + 1))
-            continue
-        fi
-        current_hash=$(sha256sum "$covered_path" | cut -d' ' -f1)
-        recorded_hash=$(python3 -c "
-import tomllib, pathlib
-data = tomllib.loads(pathlib.Path('${REVIEW_CONTRACT}').read_text())
-print(data.get('covered_path_hashes', {}).get('${covered_path}', ''))
-" 2>/dev/null || true)
-        if [ -z "$recorded_hash" ]; then
-            printf "❌ %-50s missing hash\n" "$label"
-            ERRORS=$((ERRORS + 1))
-            CONTRACT_HASH_STALE=$((CONTRACT_HASH_STALE + 1))
-        elif [ "$current_hash" = "$recorded_hash" ]; then
-            printf "✅ %-50s %s…\n" "$label" "${current_hash:0:16}"
-        else
-            printf "❌ %-50s stale → needs %s…\n" "$label" "${current_hash:0:16}"
-            ERRORS=$((ERRORS + 1))
-            CONTRACT_HASH_STALE=$((CONTRACT_HASH_STALE + 1))
-        fi
-    done < <(python3 -c "
-import tomllib, pathlib
-data = tomllib.loads(pathlib.Path('${REVIEW_CONTRACT}').read_text())
-for p in data.get('covered_path_hashes', {}):
-    print(p)
-" 2>/dev/null || true)
+    if contract_check_output=$(maintain_review_contract check "$REVIEW_CONTRACT"); then
+        while IFS=$'\t' read -r status detail; do
+            [[ -n "$status" ]] || continue
+            printf "✅ %-50s %s\n" "contract integrity" "$detail"
+        done <<< "$contract_check_output"
+    else
+        while IFS=$'\t' read -r status detail; do
+            [[ -n "$status" ]] || continue
+            printf "❌ %-50s %s\n" "contract integrity" "$detail"
+        done <<< "$contract_check_output"
+        ERRORS=$((ERRORS + 1))
+    fi
 else
     printf "⚠️  %-50s not found\n" "$REVIEW_CONTRACT"
     WARNINGS=$((WARNINGS + 1))
@@ -579,6 +718,31 @@ if $FIX_MODE && [ $ERRORS -gt 0 ]; then
             fi
         fi
     done
+
+    # Normalise every version-bearing field in the registry manifest: the
+    # top-level version, each packages[].version, and the oci identifier's
+    # embedded tag. Mirrors the patch scripts/release/register-mcp-registry.sh
+    # applies at publish time, so the committed manifest and the published one
+    # never disagree.
+    if [ -f "$MCP_SERVER_JSON_SRC" ]; then
+        mcp_tmp=$(mktemp)
+        if jq --arg ver "$WORKSPACE_VERSION" '
+            .version = $ver
+            | if .packages then .packages |= map(
+                if .registryType == "oci"
+                then .identifier = (.identifier | sub(":[^:]*$"; ":v" + $ver))
+                     | del(.version, .registryBaseUrl, .fileSha256)
+                else .version = $ver
+                end
+              ) else . end
+        ' "$MCP_SERVER_JSON_SRC" > "$mcp_tmp" \
+            && ! diff -q "$MCP_SERVER_JSON_SRC" "$mcp_tmp" >/dev/null; then
+            cp "$mcp_tmp" "$MCP_SERVER_JSON_SRC"
+            FIXED=$((FIXED + 1))
+            printf "🔧 %-50s versions normalised to %s\n" "$MCP_SERVER_JSON_SRC" "$WORKSPACE_VERSION"
+        fi
+        rm -f "$mcp_tmp"
+    fi
 
     # Force the published registry manifest to mirror the version-synced source.
     # Runs after the version-only fixes so .mcp/server.json is already at the
@@ -658,41 +822,35 @@ if $FIX_MODE && [ $ERRORS -gt 0 ]; then
         fi
     done
 
-    # Recompute sanitization review contract hashes for any covered files
-    # that changed. This prevents the check-release-process.sh invariant
-    # from failing when a covered file (e.g. release-manifest.toml) is
-    # legitimately modified.
+    # Recompute content hashes and the v2 candidate binding after legitimate
+    # covered-file edits. Intentional Git modes are validated and preserved;
+    # this command never infers or repairs a mode.
     REVIEW_CONTRACT="docs/reviews/release-workflows/sanitization-review-contract.toml"
     if [ -f "$REVIEW_CONTRACT" ]; then
-        CONTRACT_HASH_FIXES=0
-        while IFS= read -r covered_path; do
-            [[ -n "$covered_path" ]] || continue
-            [[ -f "$covered_path" ]] || continue
-            current_hash=$(sha256sum "$covered_path" | cut -d' ' -f1)
-            recorded_hash=$(python3 -c "
-import tomllib, pathlib
-data = tomllib.loads(pathlib.Path('${REVIEW_CONTRACT}').read_text())
-print(data.get('covered_path_hashes', {}).get('${covered_path}', ''))
-" 2>/dev/null || true)
-            if [ -n "$recorded_hash" ] && [ "$current_hash" != "$recorded_hash" ]; then
-                # Use python to update the TOML value (sed on TOML hashes is fragile)
-                python3 -c "
-import pathlib
-contract = pathlib.Path('${REVIEW_CONTRACT}')
-text = contract.read_text()
-text = text.replace('${recorded_hash}', '${current_hash}')
-contract.write_text(text)
-"
-                CONTRACT_HASH_FIXES=$((CONTRACT_HASH_FIXES + 1))
-                FIXED=$((FIXED + 1))
-                printf "🔧 %-50s hash → %s\n" "contract: ${covered_path}" "${current_hash:0:16}…"
+        if contract_fix_output=$(maintain_review_contract fix "$REVIEW_CONTRACT"); then
+            if grep -q $'^FIXED\t' <<< "$contract_fix_output"; then
+                CONTRACT_WORKTREE_UPDATED=true
             fi
-        done < <(python3 -c "
-import tomllib, pathlib
-data = tomllib.loads(pathlib.Path('${REVIEW_CONTRACT}').read_text())
-for p in data.get('covered_path_hashes', {}):
-    print(p)
-" 2>/dev/null || true)
+            while IFS=$'\t' read -r status detail; do
+                [[ -n "$status" ]] || continue
+                if [ "$status" = "FIXED" ]; then
+                    FIXED=$((FIXED + 1))
+                    printf "🔧 %-50s %s\n" "contract integrity" "$detail"
+                else
+                    printf "✅ %-50s %s\n" "contract integrity" "$detail"
+                fi
+            done <<< "$contract_fix_output"
+        else
+            CONTRACT_FIX_FAILED=true
+            if grep -q $'^FIXED\t' <<< "$contract_fix_output"; then
+                CONTRACT_WORKTREE_UPDATED=true
+            fi
+            while IFS=$'\t' read -r status detail; do
+                [[ -n "$status" ]] || continue
+                printf "❌ %-50s %s\n" "contract integrity" "$detail"
+            done <<< "$contract_fix_output"
+            ERRORS=$((ERRORS + 1))
+        fi
     fi
 
     echo ""
@@ -737,30 +895,28 @@ for p in data.get('covered_path_hashes', {}):
             ERRORS=$((ERRORS + 1))
         fi
     done
-    # Re-check contract hashes
+    # A successful refresh validates the generated contract bytes but leaves
+    # the caller's Git index untouched. Index/full validation must fail until
+    # the caller intentionally stages the refreshed contract.
     if [ -f "$REVIEW_CONTRACT" ]; then
-        while IFS= read -r covered_path; do
-            [[ -n "$covered_path" ]] || continue
-            [[ -f "$covered_path" ]] || continue
-            label="contract: ${covered_path}"
-            current_hash=$(sha256sum "$covered_path" | cut -d' ' -f1)
-            recorded_hash=$(python3 -c "
-import tomllib, pathlib
-data = tomllib.loads(pathlib.Path('${REVIEW_CONTRACT}').read_text())
-print(data.get('covered_path_hashes', {}).get('${covered_path}', ''))
-" 2>/dev/null || true)
-            if [ "$current_hash" = "$recorded_hash" ]; then
-                printf "✅ %-50s %s…\n" "$label" "${current_hash:0:16}"
-            else
-                printf "❌ %-50s stale → needs %s…\n" "$label" "${current_hash:0:16}"
-                ERRORS=$((ERRORS + 1))
-            fi
-        done < <(python3 -c "
-import tomllib, pathlib
-data = tomllib.loads(pathlib.Path('${REVIEW_CONTRACT}').read_text())
-for p in data.get('covered_path_hashes', {}):
-    print(p)
-" 2>/dev/null || true)
+        if $CONTRACT_WORKTREE_UPDATED; then
+            printf "✅ %-50s %s\n" "contract integrity" \
+                "generated contract validated; stage it before index/full validation"
+        elif contract_recheck_output=$(maintain_review_contract check "$REVIEW_CONTRACT"); then
+            while IFS=$'\t' read -r status detail; do
+                [[ -n "$status" ]] || continue
+                printf "✅ %-50s %s\n" "contract integrity" "$detail"
+            done <<< "$contract_recheck_output"
+        else
+            while IFS=$'\t' read -r status detail; do
+                [[ -n "$status" ]] || continue
+                printf "❌ %-50s %s\n" "contract integrity" "$detail"
+            done <<< "$contract_recheck_output"
+            ERRORS=$((ERRORS + 1))
+        fi
+    fi
+    if $CONTRACT_FIX_FAILED; then
+        ERRORS=$((ERRORS + 1))
     fi
 fi
 

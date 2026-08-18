@@ -326,6 +326,24 @@ fn find_coursier_source_jar(jar_path: &Path) -> Option<PathBuf> {
 // ── Cache fallback ──────────────────────────────────────────────────────────
 
 /// Attempt to load a previously cached classpath when live resolution fails.
+/// Read a previously cached Bazel classpath without invoking Bazel. Returns
+/// `None` when no usable cache is present. Used when build-tool execution is
+/// disabled (`--no-build-tool`).
+pub(crate) fn read_cached_classpath(config: &ResolveConfig) -> Option<Vec<ResolvedClasspath>> {
+    let cache_path = config.cache_path.as_ref()?;
+    let cache_file = if cache_path.is_dir() {
+        cache_path.join(BAZEL_CACHE_FILE)
+    } else {
+        cache_path.clone()
+    };
+    if !cache_file.exists() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&cache_file).ok()?;
+    let cached: Vec<ResolvedClasspath> = serde_json::from_str(&content).ok()?;
+    (!cached.is_empty()).then_some(cached)
+}
+
 fn try_cache_fallback(
     config: &ResolveConfig,
     original_error: &ClasspathError,

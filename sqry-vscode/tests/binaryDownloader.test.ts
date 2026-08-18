@@ -1025,58 +1025,81 @@ describe("binaryDownloader", () => {
       ];
       const identities = mod.getCertificateIdentityCandidates("8.0.2");
 
-      expect(publicWorkflowCandidates.some((candidate) => fs.existsSync(candidate))).to.equal(
-        true,
-        "current public release workflow control surface must exist",
+      const workflowPath = publicWorkflowCandidates.find((candidate) => fs.existsSync(candidate));
+      expect(workflowPath, "current public release workflow control surface must exist").to.not.equal(
+        undefined,
       );
+      // The main-only allowlist is only sound because the distribution workflow
+      // refuses to run on any ref but refs/heads/main (a workflow_dispatch from a
+      // tag would otherwise attest a tag identity this allowlist rejects). Assert
+      // that control-surface guard exists so the two cannot drift apart.
+      const workflowSource = fs.readFileSync(workflowPath as string, "utf-8");
+      expect(workflowSource).to.contain("Enforce main-branch signing identity");
+      expect(workflowSource).to.match(
+        /GITHUB_REF["}\s]*!=\s*"refs\/heads\/main"|"refs\/heads\/main"\s*\]\]/,
+      );
+      // Every real release bundle (v7 through v29) is signed on `@refs/heads/main`,
+      // never on a tag ref, so only the main-branch identities are trusted.
       expect(identities[0]).to.equal(
-        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v8.0.2",
+        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/heads/main",
       );
       expect(identities[1]).to.equal(
-        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/heads/main",
+        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main",
       );
       for (const identity of identities) {
         expect(identity).to.match(
-          /^https:\/\/github\.com\/verivus-oss\/sqry\/\.github\/workflows\/(release-distribute|oss-distribute)\.yml@refs\/(tags\/v8\.0\.2|heads\/main)$/,
+          /^https:\/\/github\.com\/verivus-oss\/sqry\/\.github\/workflows\/(release-distribute|oss-distribute)\.yml@refs\/heads\/main$/,
           `unexpectedly broad provenance identity: ${identity}`,
         );
       }
     });
 
-    it("includes current and legacy public workflow identities", () => {
+    it("trusts only the main-branch identities of the two distribution workflows", () => {
       const mod = loadModule();
+      // No tag-ref candidates: the Stage 6 workflow runs via repository_dispatch
+      // on the default branch, so a tag identity never matches a real bundle.
       expect(mod.getCertificateIdentityCandidates("8.0.2")).to.deep.equal([
-        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v8.0.2",
         "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/heads/main",
-        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/tags/v8.0.2",
         "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main",
       ]);
+    });
+
+    it("does not vary the identity set with the release version", () => {
+      const mod = loadModule();
+      // Identity is version-independent by design; the asset-to-version binding
+      // is enforced separately by the DSSE subject-digest check.
+      expect(mod.getCertificateIdentityCandidates("8.0.2")).to.deep.equal(
+        mod.getCertificateIdentityCandidates("29.0.6"),
+      );
     });
   });
 
   describe("verifyCosignBundleWithIdentities()", () => {
-    it("falls back from tag identity to main identity", async () => {
+    it("falls back from the current workflow identity to the legacy one", async () => {
       const mod = loadModule();
       const { channel } = createOutputChannel();
       const attempted: string[] = [];
 
+      // Older pinned versions were signed by the legacy `oss-distribute.yml`, so
+      // when the current `release-distribute.yml` identity does not verify the
+      // check must fall through to the legacy identity rather than fail.
       await mod.verifyCosignBundleWithIdentities(
         mod.getCertificateIdentityCandidates("8.0.2"),
         channel,
         async (identity: string) => {
           attempted.push(identity);
-          if (identity.endsWith("@refs/heads/main")) {
+          if (identity.includes("oss-distribute.yml@refs/heads/main")) {
             return;
           }
-          throw new Error(`certificate identity error - expected main, got ${identity}`);
+          throw new Error(`certificate identity error - expected legacy, got ${identity}`);
         },
       );
 
       expect(attempted).to.include(
-        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v8.0.2",
+        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/heads/main",
       );
       expect(attempted.at(-1)).to.equal(
-        "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/heads/main",
+        "https://github.com/verivus-oss/sqry/.github/workflows/oss-distribute.yml@refs/heads/main",
       );
     });
 
@@ -1113,8 +1136,8 @@ describe("binaryDownloader", () => {
         expect.fail("Expected verification failure");
       } catch (error) {
         expect((error as Error).message).to.contain("Cosign verification failed for all allowlisted identities");
-        expect((error as Error).message).to.contain("@refs/tags/v8.0.2");
-        expect((error as Error).message).to.contain("@refs/heads/main");
+        expect((error as Error).message).to.contain("release-distribute.yml@refs/heads/main");
+        expect((error as Error).message).to.contain("oss-distribute.yml@refs/heads/main");
       }
     });
   });
@@ -1233,7 +1256,7 @@ describe("binaryDownloader", () => {
       expect(Buffer.isBuffer(verifyCalls[0][1])).to.equal(false);
       expect(verifyCalls[0][1]).to.include({
         certificateIssuer: "https://token.actions.githubusercontent.com",
-        certificateIdentityURI: "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/tags/v19.0.4",
+        certificateIdentityURI: "https://github.com/verivus-oss/sqry/.github/workflows/release-distribute.yml@refs/heads/main",
       });
     });
 

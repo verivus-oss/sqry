@@ -3,7 +3,7 @@
 #
 # STEP_11 static-routing gate: structural barrier preventing the
 # regression class that motivated the workspace-aware-cross-repo design
-# from being reintroduced. Two patterns are forbidden:
+# from being reintroduced. Three patterns are forbidden:
 #
 #   (A) New `vscode.workspace.workspaceFolders` enumeration loops in
 #       `sqry-vscode/src/**/*.ts` that are NOT preceded (within a
@@ -22,6 +22,28 @@
 #       `session.classify_path(...)` re-export). LSP handlers must
 #       consult the LogicalWorkspace before opening per-folder graph
 #       storage.
+#
+#   (C) New raw `"vscode.open"` / `"vscode.openWith"` navigation
+#       anywhere in `sqry-vscode/src/**/*.ts` outside
+#       `workspaceGuard.ts`. Result paths come from indexed data, so
+#       opening one directly can reach a file outside the workspace via
+#       an absolute path, a `..` sequence, or a symlink. Every
+#       result-driven open goes through `openFileWithinWorkspace` / the
+#       `sqry.openResultFile` command, which confine and canonicalize
+#       first. There are zero raw occurrences today, so this is a bright
+#       line with no allowlist.
+#
+#       Not gated: `vscode.window.showTextDocument`. Its three call
+#       sites open an in-memory buffer (`openTextDocument({content})`)
+#       and the user's own `.code-workspace` file, neither of which is
+#       result-derived. A future result-driven `showTextDocument` should
+#       route through the guard like everything else.
+#
+#       The literal scan is a guardrail against the accidental
+#       reintroduction that review would otherwise have to catch by eye.
+#       It is not a sandbox: a command name assembled at runtime, or a
+#       future navigation command nobody has thought of, passes it. That
+#       is the same bargain patterns (A) and (B) make.
 #
 # Exit codes:
 #   0 — every loop / construction is gated upstream by a classifier.
@@ -160,9 +182,10 @@ sort -u -o "${known_ungated_rs}" "${known_ungated_rs}"
 
 ts_violations_raw="$(mktemp)"
 ts_violations="$(mktemp)"
+ts_nav_violations="$(mktemp)"
 rs_violations_raw="$(mktemp)"
 rs_violations="$(mktemp)"
-trap 'rm -f "${ts_violations}" "${ts_violations_raw}" "${rs_violations}" "${rs_violations_raw}" "${known_ungated_ts}" "${known_ungated_rs}"' EXIT
+trap 'rm -f "${ts_violations}" "${ts_violations_raw}" "${ts_nav_violations}" "${rs_violations}" "${rs_violations_raw}" "${known_ungated_ts}" "${known_ungated_rs}"' EXIT
 
 # ---------------------------------------------------------------------------
 # (A) TypeScript: workspaceFolders enumeration LOOPS.
@@ -266,7 +289,7 @@ scan_ts_file() {
     done
     if [[ ${gated} -eq 0 ]]; then
       printf '%s:%s\n' \
-        "${file#${REPO_ROOT}/}" "${lineno}" >> "${ts_violations_raw}"
+        "${file#"${REPO_ROOT}"/}" "${lineno}" >> "${ts_violations_raw}"
     fi
   done < <(grep -nE 'vscode\.workspace\.workspaceFolders' "${file}" || true)
 }
@@ -281,6 +304,45 @@ sort -u -o "${ts_violations_raw}" "${ts_violations_raw}"
 comm -23 "${ts_violations_raw}" "${known_ungated_ts}" \
   | sed -E 's|^(.*)$|\1: ungated vscode.workspace.workspaceFolders enumeration loop|' \
   > "${ts_violations}"
+
+# ---------------------------------------------------------------------------
+# (C) TypeScript: raw `vscode.open` navigation outside the guard.
+#
+# `workspaceGuard.ts` is the one place allowed to open a file, because
+# it canonicalizes and confines the path first. Everywhere else must
+# call `openFileWithinWorkspace` or route a tree item / code action
+# through the `sqry.openResultFile` command.
+#
+# A `// routing-gate-allow:<reason>` comment on the same or preceding
+# line is the documented escape hatch, so an intentional bypass is
+# visible in review rather than silent.
+
+scan_ts_nav_file() {
+  local file="$1"
+  # The guard itself is the sanctioned opener.
+  if [[ "$(basename "${file}")" == "workspaceGuard.ts" ]]; then
+    return 0
+  fi
+
+  local lineno line prev_line
+  while IFS=: read -r lineno _; do
+    line="$(sed -n "${lineno}p" "${file}")"
+    prev_line=""
+    if [[ "${lineno}" -gt 1 ]]; then
+      prev_line="$(sed -n "$((lineno - 1))p" "${file}")"
+    fi
+    if [[ "${line}" =~ routing-gate-allow: ]] || [[ "${prev_line}" =~ routing-gate-allow: ]]; then
+      continue
+    fi
+    printf '%s:%s\n' "${file#"${REPO_ROOT}"/}" "${lineno}" >> "${ts_nav_violations}"
+  done < <(grep -nE '"vscode\.open(With)?"' "${file}" || true)
+}
+
+while IFS= read -r -d '' f; do
+  scan_ts_nav_file "${f}"
+done < <(find "${TS_ROOT}" -type f -name '*.ts' -print0)
+
+sort -u -o "${ts_nav_violations}" "${ts_nav_violations}"
 
 # ---------------------------------------------------------------------------
 # (B) Rust handlers: GraphStorage::new constructions.
@@ -303,7 +365,7 @@ scan_rs_file() {
     done
     if [[ ${gated} -eq 0 ]]; then
       printf '%s:%s\n' \
-        "${file#${REPO_ROOT}/}" "${lineno}" >> "${rs_violations_raw}"
+        "${file#"${REPO_ROOT}"/}" "${lineno}" >> "${rs_violations_raw}"
     fi
   done < <(grep -nE 'GraphStorage::new[[:space:]]*\(' "${file}" || true)
 }
@@ -321,10 +383,23 @@ comm -23 "${rs_violations_raw}" "${known_ungated_rs}" \
   > "${rs_violations}"
 
 ts_count="$(wc -l < "${ts_violations}")"
+ts_nav_count="$(wc -l < "${ts_nav_violations}")"
 rs_count="$(wc -l < "${rs_violations}")"
-echo "static-routing gate: scanned ${TS_ROOT#${REPO_ROOT}/} (${ts_count} violation(s)) + ${LSP_ROOT#${REPO_ROOT}/} (${rs_count} violation(s))"
+echo "static-routing gate: scanned ${TS_ROOT#"${REPO_ROOT}"/} (${ts_count} enumeration + ${ts_nav_count} navigation violation(s)) + ${LSP_ROOT#"${REPO_ROOT}"/} (${rs_count} violation(s))"
 
 exit_code=0
+if [[ "${ts_nav_count}" -gt 0 ]]; then
+  echo "" >&2
+  echo "FAIL: raw \`vscode.open\` navigation outside sqry-vscode/src/workspaceGuard.ts:" >&2
+  sed -E 's/^/  - /' "${ts_nav_violations}" >&2
+  echo "" >&2
+  echo "  Result paths come from indexed data and can point outside the" >&2
+  echo "  workspace. Open them with openFileWithinWorkspace(), or route the" >&2
+  echo "  tree item / code action through the \`sqry.openResultFile\` command." >&2
+  echo "  If the path is genuinely not result-derived, annotate the call with" >&2
+  echo "  a \`// routing-gate-allow:<reason>\` comment." >&2
+  exit_code=1
+fi
 if [[ "${ts_count}" -gt 0 ]]; then
   echo "" >&2
   echo "FAIL: TypeScript workspaceFolders enumerations missing classifier upstream:" >&2

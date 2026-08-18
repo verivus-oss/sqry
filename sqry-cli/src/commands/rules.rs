@@ -6,11 +6,11 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use sqry_db::queries::dispatch::make_query_db_cold;
-use sqry_rules::derived::beside_cache_route_for;
+use sqry_rules::derived::requires_unsupported_beside_cache;
 use sqry_rules::dsl::{RuleDefinition, load_rule_pack_str};
 use sqry_rules::engine::{RuleOutput, RuleRun};
 use sqry_rules::ir::{RuleEndpoint, RuleNode};
-use sqry_rules::rules::{self, ShippedRule, intake, recipes};
+use sqry_rules::rules::{self, ShippedRule, intake, recipes, security};
 use sqry_rules::witness::{RuleSeverity, RuleStep, RuleWitness};
 use sqry_rules::{RuleEngine, SqryDbRuleBackend};
 
@@ -19,7 +19,7 @@ use crate::commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli
 use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 
-const BESIDE_CACHE_UNSUPPORTED_MESSAGE: &str = "rule requires beside-cache coordination for ComparativeQueryDb or SimilarTo; use the MCP/coordinator surface once P5U10 is enabled";
+const BESIDE_CACHE_UNSUPPORTED_MESSAGE: &str = "rule requires cross-snapshot coordination (CrossSnapshotDiff); the engine cannot source a prior snapshot yet. SimilarTo runs in-engine since L2a";
 const MAX_TEXT_WITNESS_STEPS: usize = 20;
 
 /// Runs the `sqry rules` command family.
@@ -109,6 +109,16 @@ struct RulesRunReport {
 struct RulesRunResult {
     id: String,
     status: RuleRunStatus,
+    // Authored security metadata (schema 2). Pack-authored and independent of
+    // execution success, so it rides every status row; omitted from JSON when absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    severity: Option<RuleSeverity>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cwe: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remediation: Option<String>,
     output: Option<RuleOutput>,
     witness: Option<RuleWitness>,
     error: Option<String>,
@@ -128,25 +138,36 @@ fn execute_loaded_rule(
     rule: &LoadedRule,
 ) -> RulesRunResult {
     let rule_id = rule.definition.id.clone();
-    if rule.requires_beside_cache || contains_beside_cache_route(rule.definition.plan.root()) {
+    if rule.requires_beside_cache || contains_unsupported_beside_cache(rule.definition.plan.root())
+    {
         return RulesRunResult {
             id: rule_id,
             status: RuleRunStatus::Unsupported,
+            severity: rule.definition.severity,
+            cwe: rule.definition.cwe.clone(),
+            description: rule.definition.description.clone(),
+            remediation: rule.definition.remediation.clone(),
             output: None,
             witness: None,
             error: Some(BESIDE_CACHE_UNSUPPORTED_MESSAGE.to_string()),
         };
     }
 
+    // Authored severity overrides the caller default; absent falls back to Info.
+    let severity = rule.definition.severity.unwrap_or(RuleSeverity::Info);
     match engine.run_named(
         backend,
         &rule.definition.plan,
         &rule.definition.id,
-        RuleSeverity::Info,
+        severity,
     ) {
         Ok(RuleRun { output, witness }) => RulesRunResult {
             id: rule_id,
             status: RuleRunStatus::Ok,
+            severity: rule.definition.severity,
+            cwe: rule.definition.cwe.clone(),
+            description: rule.definition.description.clone(),
+            remediation: rule.definition.remediation.clone(),
             output: Some(output),
             witness: Some(witness),
             error: None,
@@ -154,6 +175,10 @@ fn execute_loaded_rule(
         Err(error) => RulesRunResult {
             id: rule_id,
             status: RuleRunStatus::Error,
+            severity: rule.definition.severity,
+            cwe: rule.definition.cwe.clone(),
+            description: rule.definition.description.clone(),
+            remediation: rule.definition.remediation.clone(),
             output: None,
             witness: None,
             error: Some(error.to_string()),
@@ -173,6 +198,13 @@ fn load_rules(rule_or_pack: &str, workspace_root: &Path) -> Result<LoadedRules> 
         "bbnty.intake" => Ok(LoadedRules {
             source: rule_or_pack.to_string(),
             rules: intake::standard_intake_rules()
+                .into_iter()
+                .map(LoadedRule::from)
+                .collect(),
+        }),
+        "bbnty.security" => Ok(LoadedRules {
+            source: rule_or_pack.to_string(),
+            rules: security::security_rules()
                 .into_iter()
                 .map(LoadedRule::from)
                 .collect(),
@@ -212,7 +244,8 @@ fn load_toml_rule_pack(rule_or_pack: &str, workspace_root: &Path) -> Result<Load
             .rules
             .into_iter()
             .map(|definition| {
-                let requires_beside_cache = contains_beside_cache_route(definition.plan.root());
+                let requires_beside_cache =
+                    contains_unsupported_beside_cache(definition.plan.root());
                 LoadedRule {
                     definition,
                     requires_beside_cache,
@@ -250,9 +283,10 @@ fn resolve_workspace_rule_pack_path(rule_or_pack: &str, workspace_root: &Path) -
 
 impl From<ShippedRule> for LoadedRule {
     fn from(value: ShippedRule) -> Self {
+        // Derive the gate solely from the plan: a stale hardcoded flag must not
+        // be able to gate a rule the engine can actually run (L2a code-gate fix).
         Self {
-            requires_beside_cache: value.requires_beside_cache
-                || contains_beside_cache_route(value.definition.plan.root()),
+            requires_beside_cache: contains_unsupported_beside_cache(value.definition.plan.root()),
             definition: value.definition,
         }
     }
@@ -274,6 +308,18 @@ fn write_text_report(streams: &mut OutputStreams, report: &RulesRunReport) -> Re
     for result in &report.results {
         streams.write_result(&format!("rule {}", result.id))?;
         streams.write_result(&format!("  status: {}", status_name(&result.status)))?;
+        if let Some(severity) = result.severity {
+            streams.write_result(&format!("  severity: {}", severity_name(severity)))?;
+        }
+        if let Some(cwe) = &result.cwe {
+            streams.write_result(&format!("  cwe: {cwe}"))?;
+        }
+        if let Some(description) = &result.description {
+            streams.write_result(&format!("  description: {description}"))?;
+        }
+        if let Some(remediation) = &result.remediation {
+            streams.write_result(&format!("  remediation: {remediation}"))?;
+        }
         if let Some(error) = &result.error {
             streams.write_result(&format!("  error: {error}"))?;
         }
@@ -465,18 +511,26 @@ fn severity_name(severity: RuleSeverity) -> &'static str {
     }
 }
 
-fn contains_beside_cache_route(node: &RuleNode) -> bool {
-    beside_cache_route_for(node).is_some()
+fn contains_unsupported_beside_cache(node: &RuleNode) -> bool {
+    requires_unsupported_beside_cache(node)
         || child_nodes(node)
             .iter()
-            .any(|child| contains_beside_cache_route(child))
+            .any(|child| contains_unsupported_beside_cache(child))
 }
 
 fn child_nodes(node: &RuleNode) -> Vec<&RuleNode> {
     match node {
         RuleNode::SetOp { left, right, .. } => vec![left.as_ref(), right.as_ref()],
         RuleNode::Chain { steps } => steps.iter().collect(),
-        RuleNode::PathQuery { from, to, .. } => endpoint_children([from, to]),
+        RuleNode::PathQuery {
+            from, to, avoid, ..
+        } => {
+            let mut children = endpoint_children([from, to]);
+            if let Some(avoid) = avoid {
+                children.extend(endpoint_children([avoid]));
+            }
+            children
+        }
         RuleNode::SubgraphExtract { seeds, .. } => endpoint_children([seeds]),
         RuleNode::RelationEdges { from, .. } => endpoint_children([from]),
         RuleNode::ReferencesAt { target } => endpoint_children([target]),

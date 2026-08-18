@@ -537,6 +537,7 @@ fn run() -> Result<()> {
             classpath_file,
             build_system,
             force_classpath,
+            no_build_tool,
             allow_nested,
             ..
         }) => handle_index_command(
@@ -557,6 +558,7 @@ fn run() -> Result<()> {
             classpath_file.as_deref(),
             build_system.as_deref(),
             *force_classpath,
+            *no_build_tool,
             *allow_nested,
         )?,
 
@@ -608,6 +610,7 @@ fn run() -> Result<()> {
             classpath_file,
             build_system,
             force_classpath,
+            no_build_tool,
             ..
         }) => {
             let update_path = path.as_deref().unwrap_or(cli.search_path());
@@ -624,6 +627,7 @@ fn run() -> Result<()> {
                 classpath_file.as_deref(),
                 build_system.as_deref(),
                 *force_classpath,
+                *no_build_tool,
             )
             .context("Update command failed")?;
         }
@@ -641,6 +645,7 @@ fn run() -> Result<()> {
             classpath_file,
             build_system,
             force_classpath,
+            no_build_tool,
             ..
         }) => {
             commands::run_watch(
@@ -656,6 +661,7 @@ fn run() -> Result<()> {
                 classpath_file.clone(),
                 build_system.clone(),
                 *force_classpath,
+                *no_build_tool,
             )
             .context("Watch command failed")?;
         }
@@ -1295,6 +1301,10 @@ fn validate_index_if_requested(
                     None,
                     None,
                     false,
+                    // no_build_tool: irrelevant here because auto-rebuild passes
+                    // classpath = false above, so the classpath pipeline (the only
+                    // path that runs build tools) never executes on auto-rebuild.
+                    false,
                     // auto-rebuild path always operates on an existing graph at
                     // `search_path`, so nested-index creation cannot apply.
                     false,
@@ -1350,6 +1360,7 @@ fn handle_index_command(
     classpath_file: Option<&std::path::Path>,
     build_system: Option<&str>,
     force_classpath: bool,
+    no_build_tool: bool,
     allow_nested: bool,
 ) -> Result<()> {
     // STEP_8 precedence: positional `<path>` wins; otherwise fall back to the
@@ -1376,6 +1387,7 @@ fn handle_index_command(
             classpath_file,
             build_system,
             force_classpath,
+            no_build_tool,
             allow_nested,
             cfg_flags,
             expand_cache,

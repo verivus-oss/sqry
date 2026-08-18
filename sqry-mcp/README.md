@@ -1,8 +1,8 @@
-<!-- mcp-name: io.github.verivus-oss/sqry -->
-
 # sqry MCP Server
 
-**Version**: 29.0.6
+**Version**: 30.0.0
+
+MCP Registry name: `mcp-name: io.github.verivus-oss/sqry`
 
 `sqry-mcp` exposes sqry semantic code-search tools to Model Context Protocol clients.
 

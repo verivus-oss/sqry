@@ -791,6 +791,7 @@ fn walk_predicate_for_shared_subtrees(
         | Predicate::HasCallee
         | Predicate::IsUnused
         | Predicate::IsDefinition(_)
+        | Predicate::IsUnsafe(_)
         // Phase A (U14) leaf predicates — atomic, no nested PlanNode.
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
@@ -990,6 +991,7 @@ fn visit_proper_predicate_subtrees(predicate: &Predicate, visitor: &mut dyn FnMu
         | Predicate::HasCallee
         | Predicate::IsUnused
         | Predicate::IsDefinition(_)
+        | Predicate::IsUnsafe(_)
         // Phase A (U14) leaf predicates — atomic, no nested PlanNode.
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)
@@ -1120,6 +1122,7 @@ fn walk_predicate_for_subqueries(
         | Predicate::HasCallee
         | Predicate::IsUnused
         | Predicate::IsDefinition(_)
+        | Predicate::IsUnsafe(_)
         // Phase A (U14) leaf predicates — atomic, no nested PlanNode.
         | Predicate::IsAddressTaken(_)
         | Predicate::ResolvedVia(_)

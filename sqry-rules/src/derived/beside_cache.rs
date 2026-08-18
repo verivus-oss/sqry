@@ -29,7 +29,22 @@ pub struct BesideCacheRoute {
     pub is_cross_snapshot: bool,
 }
 
+/// True when the node needs beside-cache coordination the rule engine cannot yet
+/// execute in-process, i.e. cross-snapshot diff.
+///
+/// `SimilarTo` is engine-executable since L2a (it routes to the structural
+/// neighbour query on the current snapshot), so it is no longer "unsupported";
+/// only `CrossSnapshotDiff` still lacks a snapshot-sourcing coordinator.
+#[must_use]
+pub fn requires_unsupported_beside_cache(node: &RuleNode) -> bool {
+    matches!(node, RuleNode::CrossSnapshotDiff { .. })
+}
+
 /// Returns the beside-cache route for non-cacheable rule variants.
+///
+/// This route is advisory metadata only. It does not pick the executor: since
+/// L2a the `SimilarTo` dispatcher runs the structural neighbour query directly,
+/// regardless of the `FindDuplicates`/`FindSimilar` discriminant recorded here.
 #[must_use]
 pub fn beside_cache_route_for(node: &RuleNode) -> Option<BesideCacheRoute> {
     match node {

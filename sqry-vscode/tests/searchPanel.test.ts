@@ -353,3 +353,70 @@ describe("searchPanel labels", () => {
     expect(rootItems[0].description).to.equal("index error");
   });
 });
+
+// Every tree item built from result data navigates through the guarded
+// `sqry.openResultFile` command rather than `vscode.open`. These paths come
+// from indexed data, so wiring any of them back to a raw open would reopen the
+// escape the workspace guard closes.
+describe("searchPanel result navigation", () => {
+  const GUARDED = "sqry.openResultFile";
+
+  function navigationCommands(items: any[]): string[] {
+    return items
+      .filter((item) => item.command)
+      .map((item) => item.command.command);
+  }
+
+  it("routes file items through the guarded open command", () => {
+    const panel = makePanel();
+    const provider = panel.treeDataProvider as any;
+
+    const items = provider.buildFileItems({
+      files: ["/workspace/src/a.rs", "/outside/evil.rs"],
+      has_more: false,
+    });
+
+    const commands = navigationCommands(items);
+    expect(commands).to.have.lengthOf(2);
+    expect(commands.every((command) => command === GUARDED)).to.equal(true);
+  });
+
+  it("routes language file items through the guarded open command", () => {
+    const panel = makePanel();
+    const provider = panel.treeDataProvider as any;
+
+    const items = provider.buildLanguageFileItems({
+      files: ["/workspace/src/a.rs", "/outside/evil.rs"],
+      has_more: false,
+    });
+
+    const commands = navigationCommands(items);
+    expect(commands).to.have.lengthOf(2);
+    expect(commands.every((command) => command === GUARDED)).to.equal(true);
+  });
+
+  it("routes symbol and text-match items through the guarded open command", () => {
+    const panel = makePanel();
+    const provider = panel.treeDataProvider as any;
+
+    provider.symbols = [
+      {
+        name: "evil_fn",
+        qualifiedName: "evil_fn",
+        kind: "function",
+        language: "rust",
+        filePath: "/outside/evil.rs",
+        startLine: 4,
+      },
+    ];
+    provider.textMatches = [
+      { path: "/outside/evil.rs", line: 7, lineText: "let x = 1;" },
+    ];
+
+    const symbolItems = provider.getCategoryChildren({ category: "symbols" });
+    const textMatchItems = provider.getCategoryChildren({ category: "textMatches" });
+
+    expect(navigationCommands(symbolItems)).to.deep.equal([GUARDED]);
+    expect(navigationCommands(textMatchItems)).to.deep.equal([GUARDED]);
+  });
+});

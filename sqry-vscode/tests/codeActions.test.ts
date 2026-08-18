@@ -6,21 +6,33 @@ const proxyquire = proxyquireModule.noCallThru();
 // ===== VS Code Stubs =====
 
 class StubRange {
+  public readonly start: { line: number; character: number };
+  public readonly end: { line: number; character: number };
   constructor(
     public startLine: number,
     public startChar: number,
     public endLine: number,
     public endChar: number,
-  ) {}
+  ) {
+    this.start = { line: startLine, character: startChar };
+    this.end = { line: endLine, character: endChar };
+  }
 }
 
 class StubUri {
-  constructor(private readonly value: string) {}
+  constructor(
+    public readonly scheme: string,
+    private readonly value: string,
+    public readonly fsPath: string,
+  ) {}
   toString(): string {
     return this.value;
   }
   static file(s: string): StubUri {
-    return new StubUri(`file://${s}`);
+    return new StubUri("file", `file://${s}`, s);
+  }
+  static withScheme(scheme: string, s: string): StubUri {
+    return new StubUri(scheme, `${scheme}://${s}`, s);
   }
 }
 
@@ -191,10 +203,39 @@ describe("SqryCodeActionProvider", () => {
     const action = actions[0] as StubCodeAction;
     expect(action.title).to.equal("Navigate to duplicate");
     expect(action.kind).to.deep.equal(StubCodeActionKind.QuickFix);
-    expect(action.command?.command).to.equal("vscode.open");
-    expect((action.command?.arguments as unknown[])?.[0]).to.equal(relatedUri);
-    expect((action.command?.arguments as unknown[])?.[1]).to.deep.equal({ selection: relatedRange });
+    // Routed through the workspace-containment guard, not raw vscode.open.
+    expect(action.command?.command).to.equal("sqry.openResultFile");
+    expect((action.command?.arguments as unknown[])?.[0]).to.equal(relatedUri.fsPath);
+    expect((action.command?.arguments as unknown[])?.[1]).to.deep.equal({
+      startLine: relatedRange.start.line,
+      startCharacter: relatedRange.start.character,
+      endLine: relatedRange.end.line,
+      endCharacter: relatedRange.end.character,
+    });
     expect(action.diagnostics).to.deep.equal([diag]);
+  });
+
+  it("sqry:duplicate offers no navigate action for a non-file related URI", () => {
+    const relatedUri = StubUri.withScheme("untitled", "/path/to/duplicate.ts");
+    const relatedRange = new StubRange(5, 0, 5, 20);
+    const related = new StubDiagnosticRelatedInformation(
+      new StubLocation(relatedUri, relatedRange),
+      "duplicate symbol here",
+    );
+
+    const diag = new StubDiagnostic(makeRange(), "duplicate symbol: myClass", DiagnosticSeverity.Warning);
+    diag.source = "sqry";
+    diag.code = "sqry:duplicate";
+    diag.relatedInformation = [related];
+
+    const actions = provider.provideCodeActions(
+      {} as any,
+      makeRange() as any,
+      makeContext([diag]) as any,
+    );
+
+    // A non-file scheme is refused at the source, so no navigate action is offered.
+    expect(actions).to.have.length(0);
   });
 
   it("sqry:duplicate produces no action when relatedInformation is absent", () => {

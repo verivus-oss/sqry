@@ -9,7 +9,7 @@ use sqry_db::planner::{
 use crate::backend::SnapshotId;
 use crate::ir::{
     ComplexityMetric, EntrypointExtension, PathKind, RelationEdgeKind, RuleCycleBounds,
-    RuleEdgeClass, RuleEndpoint, RuleNode, RulePlan, RuleSimilarityKind,
+    RuleEdgeClass, RuleEndpoint, RuleNode, RulePlan, RuleSimilarityKind, TraversalEmit,
 };
 use crate::{RuleError, RuleResult};
 
@@ -84,6 +84,8 @@ impl RuleBuilder {
             edge_class,
             max_depth,
             resolved_via: None,
+            cross_boundary: None,
+            emit: TraversalEmit::ReachedNodes,
         });
         self
     }
@@ -102,6 +104,63 @@ impl RuleBuilder {
             edge_class,
             max_depth,
             resolved_via,
+            cross_boundary: None,
+            emit: TraversalEmit::ReachedNodes,
+        });
+        self
+    }
+
+    /// Appends a rule-level edge traversal restricted by cross-boundary status.
+    ///
+    /// `cross_boundary` is `Some(true)` to keep only cross-boundary (FFI /
+    /// cross-language / service) edges, `Some(false)` to keep only
+    /// intra-language edges, or `None` to ignore boundary status (equivalent
+    /// to [`RuleBuilder::traverse`]). A set `Some(_)` forces the
+    /// witness-bearing backend traversal path; the sqry-db planner has no
+    /// cross-boundary concept and refuses to lower it.
+    #[must_use]
+    pub fn traverse_cross_boundary(
+        mut self,
+        direction: Direction,
+        edge_class: Option<RuleEdgeClass>,
+        max_depth: u32,
+        cross_boundary: Option<bool>,
+    ) -> Self {
+        self.steps.push(RuleNode::EdgeTraversal {
+            direction,
+            edge_class,
+            max_depth,
+            resolved_via: None,
+            cross_boundary,
+            emit: TraversalEmit::ReachedNodes,
+        });
+        self
+    }
+
+    /// Appends a rule-level edge traversal that emits a chosen node set.
+    ///
+    /// `emit` selects the step output: [`TraversalEmit::ReachedNodes`] (seeds +
+    /// reached, the default), [`TraversalEmit::EdgeSources`] (nodes with a
+    /// qualifying out-edge), or [`TraversalEmit::EdgeTargets`] (nodes reached by
+    /// a qualifying edge). A non-default `emit` (like a set `cross_boundary`)
+    /// forces the witness-bearing backend traversal path; the sqry-db planner
+    /// has no emit concept and refuses to lower it.
+    #[must_use]
+    pub fn traverse_emitting(
+        mut self,
+        direction: Direction,
+        edge_class: Option<RuleEdgeClass>,
+        max_depth: u32,
+        cross_boundary: Option<bool>,
+        emit: TraversalEmit,
+    ) -> Self {
+        self.steps.push(RuleNode::EdgeTraversal {
+            direction,
+            edge_class,
+            max_depth,
+            resolved_via: None,
+            cross_boundary,
+            emit,
         });
         self
     }
@@ -130,6 +189,30 @@ impl RuleBuilder {
                 kind,
                 max_depth,
                 max_paths,
+                avoid: None,
+            }],
+        }
+    }
+
+    /// Builds a path query that excludes paths passing through the `avoid`
+    /// endpoint: "reachable from `from` to `to` WITHOUT traversing `avoid`".
+    #[must_use]
+    pub fn path_query_avoiding(
+        from: RuleEndpoint,
+        to: RuleEndpoint,
+        avoid: RuleEndpoint,
+        kind: PathKind,
+        max_depth: u32,
+        max_paths: Option<u32>,
+    ) -> Self {
+        Self {
+            steps: vec![RuleNode::PathQuery {
+                from,
+                to,
+                kind,
+                max_depth,
+                max_paths,
+                avoid: Some(avoid),
             }],
         }
     }

@@ -129,7 +129,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "29.0.6"
+version = "30.0.0"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"
@@ -187,7 +187,7 @@ walkdir = "2.5"
 tempfile = "3.27"
 
 # Caching & performance
-lru = "0.18"
+lru = "0.18.2"
 dashmap = "6.2.1"
 memmap2 = "0.9"
 parking_lot = "0.12"

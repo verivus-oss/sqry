@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use sqry_core::graph::unified::bind::BindingPlane;
@@ -15,8 +15,8 @@ use sqry_db::queries::{
 };
 
 use crate::backend::{
-    CycleClass, RuleBackend, RulePath, RuleReachabilityKey, RuleTopologyKey, SnapshotId,
-    TracePathKey,
+    CycleClass, RuleBackend, RulePath, RuleReachabilityKey, RuleStructuralNeighbor,
+    RuleTopologyKey, SnapshotId, TracePathKey,
 };
 use crate::engine::{
     RuleCancellationToken, RuleEngine, RuleEngineConfig, RuleOutput, RuleRelationRows,
@@ -30,6 +30,7 @@ use crate::{RuleError, RuleResult};
 
 const NODE_A: NodeId = NodeId::new(1, 1);
 const NODE_B: NodeId = NodeId::new(2, 1);
+const NODE_C: NodeId = NodeId::new(3, 1);
 
 #[test]
 fn node_scan_routes_through_run_plan_and_returns_witness() {
@@ -112,6 +113,8 @@ fn planner_only_chain_routes_through_run_plan_without_manual_traverse() {
                 edge_class: None,
                 max_depth: 1,
                 resolved_via: None,
+                cross_boundary: None,
+                emit: crate::ir::TraversalEmit::ReachedNodes,
             },
         ],
     });
@@ -135,6 +138,7 @@ fn path_query_routes_through_trace_path_and_records_path_witness() {
         kind: PathKind::Calls,
         max_depth: 4,
         max_paths: Some(3),
+        avoid: None,
     });
 
     let run = RuleEngine::new().run(&backend, &plan).expect("path query");
@@ -291,6 +295,8 @@ fn edge_chain_routes_rule_edge_traversal_through_traverse() {
                 edge_class: Some(RuleEdgeClass::Call),
                 max_depth: 1,
                 resolved_via: None,
+                cross_boundary: None,
+                emit: crate::ir::TraversalEmit::ReachedNodes,
             },
         ],
     });
@@ -583,6 +589,8 @@ fn malformed_ir_returns_typed_errors_for_dispatch_boundaries() {
                     edge_class: None,
                     max_depth: 1,
                     resolved_via: None,
+                    cross_boundary: None,
+                    emit: crate::ir::TraversalEmit::ReachedNodes,
                 }),
             )
             .expect_err("root edge traversal"),
@@ -598,6 +606,7 @@ fn malformed_ir_returns_typed_errors_for_dispatch_boundaries() {
                     kind: PathKind::Calls,
                     max_depth: 0,
                     max_paths: None,
+                    avoid: None,
                 }),
             )
             .expect_err("zero depth path"),
@@ -633,6 +642,8 @@ fn malformed_ir_returns_typed_errors_for_dispatch_boundaries() {
                             edge_class: Some(RuleEdgeClass::Call),
                             max_depth: 0,
                             resolved_via: None,
+                            cross_boundary: None,
+                            emit: crate::ir::TraversalEmit::ReachedNodes,
                         },
                     ],
                 }),
@@ -682,11 +693,13 @@ fn malformed_ir_returns_typed_errors_for_dispatch_boundaries() {
                         kind: PathKind::Calls,
                         max_depth: 1,
                         max_paths: None,
+                        avoid: None,
                     })),
                     to: RuleEndpoint::Nodes(vec![NODE_B]),
                     kind: PathKind::Calls,
                     max_depth: 1,
                     max_paths: None,
+                    avoid: None,
                 }),
             )
             .expect_err("non-node endpoint query"),
@@ -695,7 +708,124 @@ fn malformed_ir_returns_typed_errors_for_dispatch_boundaries() {
 }
 
 #[test]
-fn similar_to_reports_explicit_unsupported_primitive_until_beside_cache_lands() {
+fn similar_to_similar_emits_structural_matches_with_scaled_scores() {
+    // NODE_B is an approximate neighbour (jaccard 0.9 -> 9000 bps); NODE_A is the
+    // self-match and must be dropped.
+    let backend = RecordingBackend::new(vec![NODE_A]).with_structural_neighbors(
+        NODE_A,
+        vec![
+            RuleStructuralNeighbor {
+                node: NODE_A,
+                shape_hash_exact: true,
+                jaccard: 1.0,
+            },
+            RuleStructuralNeighbor {
+                node: NODE_B,
+                shape_hash_exact: false,
+                jaccard: 0.9,
+            },
+        ],
+    );
+    let plan = RulePlan::new(RuleNode::SimilarTo {
+        seed: RuleEndpoint::Nodes(vec![NODE_A]),
+        scope: None,
+        similarity_kind: RuleSimilarityKind::Similar,
+    });
+
+    let run = RuleEngine::new()
+        .run(&backend, &plan)
+        .expect("similar runs");
+
+    let RuleOutput::SimilarityMatches(matches) = run.output else {
+        panic!("expected similarity matches, got {:?}", run.output);
+    };
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].seed, NODE_A);
+    assert_eq!(matches[0].matched, NODE_B);
+    assert_eq!(matches[0].score, 9_000);
+    assert_eq!(matches[0].similarity_kind, RuleSimilarityKind::Similar);
+    // Each surviving match emits one witness step.
+    assert!(
+        run.witness
+            .steps
+            .iter()
+            .any(|step| matches!(step, RuleStep::SimilarityMatchEmitted { matched, .. } if *matched == NODE_B))
+    );
+}
+
+#[test]
+fn similar_to_duplicate_keeps_only_exact_shape_matches() {
+    // NODE_B is an exact structural duplicate; NODE_C is only approximate and
+    // must be excluded under the Duplicate kind.
+    let backend = RecordingBackend::new(vec![NODE_A]).with_structural_neighbors(
+        NODE_A,
+        vec![
+            RuleStructuralNeighbor {
+                node: NODE_B,
+                shape_hash_exact: true,
+                jaccard: 0.8,
+            },
+            RuleStructuralNeighbor {
+                node: NODE_C,
+                shape_hash_exact: false,
+                jaccard: 0.95,
+            },
+        ],
+    );
+    let plan = RulePlan::new(RuleNode::SimilarTo {
+        seed: RuleEndpoint::Nodes(vec![NODE_A]),
+        scope: None,
+        similarity_kind: RuleSimilarityKind::Duplicate,
+    });
+
+    let run = RuleEngine::new()
+        .run(&backend, &plan)
+        .expect("duplicate runs");
+
+    let RuleOutput::SimilarityMatches(matches) = run.output else {
+        panic!("expected similarity matches, got {:?}", run.output);
+    };
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].matched, NODE_B);
+    assert_eq!(matches[0].score, 10_000);
+    assert_eq!(matches[0].similarity_kind, RuleSimilarityKind::Duplicate);
+}
+
+#[test]
+fn similar_to_scope_restricts_matches_to_allow_set() {
+    let backend = RecordingBackend::new(vec![NODE_A]).with_structural_neighbors(
+        NODE_A,
+        vec![
+            RuleStructuralNeighbor {
+                node: NODE_B,
+                shape_hash_exact: false,
+                jaccard: 0.9,
+            },
+            RuleStructuralNeighbor {
+                node: NODE_C,
+                shape_hash_exact: false,
+                jaccard: 0.85,
+            },
+        ],
+    );
+    // Scope allows only NODE_C, so the NODE_B match is dropped.
+    let plan = RulePlan::new(RuleNode::SimilarTo {
+        seed: RuleEndpoint::Nodes(vec![NODE_A]),
+        scope: Some(RuleEndpoint::Nodes(vec![NODE_C])),
+        similarity_kind: RuleSimilarityKind::Similar,
+    });
+
+    let run = RuleEngine::new().run(&backend, &plan).expect("scoped runs");
+
+    let RuleOutput::SimilarityMatches(matches) = run.output else {
+        panic!("expected similarity matches, got {:?}", run.output);
+    };
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].matched, NODE_C);
+}
+
+#[test]
+fn similar_to_with_no_neighbours_is_ok_and_empty() {
     let backend = RecordingBackend::new(vec![NODE_A]);
     let plan = RulePlan::new(RuleNode::SimilarTo {
         seed: RuleEndpoint::Nodes(vec![NODE_A]),
@@ -703,17 +833,11 @@ fn similar_to_reports_explicit_unsupported_primitive_until_beside_cache_lands() 
         similarity_kind: RuleSimilarityKind::Similar,
     });
 
-    let error = RuleEngine::new()
+    let run = RuleEngine::new()
         .run(&backend, &plan)
-        .expect_err("unsupported");
+        .expect("empty runs ok");
 
-    assert!(matches!(
-        error,
-        RuleError::UnsupportedPrimitive {
-            primitive: "similar_to",
-            ..
-        }
-    ));
+    assert_eq!(run.output, RuleOutput::SimilarityMatches(Vec::new()));
 }
 
 #[test]
@@ -732,6 +856,7 @@ fn witness_step_cap_is_applied_to_engine_output() {
         kind: PathKind::Calls,
         max_depth: 4,
         max_paths: None,
+        avoid: None,
     });
 
     let run = engine.run(&backend, &plan).expect("path query");
@@ -783,6 +908,7 @@ struct RecordingBackend {
     entry_points_calls: Cell<usize>,
     comparative_calls: Cell<usize>,
     last_traversal_filter: RefCell<Option<EdgeFilter>>,
+    structural_neighbors: HashMap<NodeId, Vec<RuleStructuralNeighbor>>,
 }
 
 impl RecordingBackend {
@@ -806,6 +932,7 @@ impl RecordingBackend {
             entry_points_calls: Cell::new(0),
             comparative_calls: Cell::new(0),
             last_traversal_filter: RefCell::new(None),
+            structural_neighbors: HashMap::new(),
         }
     }
 
@@ -816,6 +943,15 @@ impl RecordingBackend {
 
     fn with_entry_points<const N: usize>(mut self, nodes: [NodeId; N]) -> Self {
         self.set = Arc::new(nodes.into_iter().collect());
+        self
+    }
+
+    fn with_structural_neighbors(
+        mut self,
+        probe: NodeId,
+        neighbours: Vec<RuleStructuralNeighbor>,
+    ) -> Self {
+        self.structural_neighbors.insert(probe, neighbours);
         self
     }
 }
@@ -972,6 +1108,26 @@ impl RuleBackend for RecordingBackend {
             Arc::clone(&self.snapshot),
             Arc::clone(&self.snapshot),
         )))
+    }
+
+    fn structural_neighbors(
+        &self,
+        probe: NodeId,
+        similarity_floor: f32,
+        max_results: usize,
+    ) -> RuleResult<Vec<RuleStructuralNeighbor>> {
+        Ok(self
+            .structural_neighbors
+            .get(&probe)
+            .map(|neighbours| {
+                neighbours
+                    .iter()
+                    .copied()
+                    .filter(|neighbour| neighbour.jaccard >= similarity_floor)
+                    .take(max_results)
+                    .collect()
+            })
+            .unwrap_or_default())
     }
 }
 

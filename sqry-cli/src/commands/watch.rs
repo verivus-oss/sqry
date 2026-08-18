@@ -37,6 +37,7 @@ pub fn execute(
     classpath_file: Option<PathBuf>,
     build_system: Option<String>,
     force_classpath: bool,
+    no_build_tool: bool,
 ) -> Result<()> {
     let root_path = resolve_path(path)?;
     // `sqry watch` does not carry `--cfg` / `--expand-cache` (Phase 1a/1b):
@@ -48,6 +49,7 @@ pub fn execute(
         classpath_file: classpath_file.as_deref(),
         build_system: build_system.as_deref(),
         force_classpath,
+        no_build_tool,
     };
     #[cfg(feature = "jvm-classpath")]
     let mut classpath_cache = None;
@@ -365,6 +367,7 @@ mod tests {
             classpath_file,
             build_system: None,
             force_classpath: false,
+            no_build_tool: false,
         }
     }
 

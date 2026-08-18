@@ -30,6 +30,8 @@ fn all_rule_nodes() -> Vec<RuleNode> {
             edge_class: Some(RuleEdgeClass::Call),
             max_depth: 2,
             resolved_via: Some(ResolvedVia::Direct),
+            cross_boundary: Some(true),
+            emit: sqry_rules::ir::TraversalEmit::EdgeSources,
         },
         RuleNode::Filter {
             predicate: Predicate::IsUnused,
@@ -60,6 +62,7 @@ fn all_rule_nodes() -> Vec<RuleNode> {
             kind: PathKind::Calls,
             max_depth: 5,
             max_paths: Some(3),
+            avoid: Some(endpoint.clone()),
         },
         RuleNode::SubgraphExtract {
             seeds: endpoint.clone(),

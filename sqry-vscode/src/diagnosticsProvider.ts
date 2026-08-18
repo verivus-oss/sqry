@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { SqryClient } from "./sqryClient";
+import { resolveUriWithinWorkspace, resolveWithinWorkspace } from "./workspaceGuard";
 import {
   SqrySearchItem,
   SqryCycle,
@@ -8,6 +9,24 @@ import {
 
 const MAX_DIAGNOSTICS_PER_FILE = 500;
 const MAX_DIAGNOSTICS_PER_WORKSPACE = 5000;
+
+// Matches a URI scheme prefix, per the RFC 3986 grammar. A scheme may be a
+// single character, so this cannot require two: `x:/evil.rs` is a URI, not a
+// path, and treating it as a path would route it around the scheme check.
+const URI_WITH_SCHEME = /^[a-zA-Z][a-zA-Z0-9+.-]*:/;
+
+// A Windows absolute path (`C:\src\a.rs`, `C:/src/a.rs`) also matches the
+// scheme grammar, so it is exempted, but only on Windows. On other platforms
+// such a string is not a usable path, and treating it as a URI drops it, which
+// is the fail-closed direction.
+const WINDOWS_DRIVE_PATH = /^[a-zA-Z]:[\\/]/;
+
+function isUriString(value: string): boolean {
+  if (process.platform === "win32" && WINDOWS_DRIVE_PATH.test(value)) {
+    return false;
+  }
+  return URI_WITH_SCHEME.test(value);
+}
 
 /**
  * Publishes sqry findings (unused symbols, circular dependencies, duplicate code)
@@ -55,7 +74,11 @@ export class SqryDiagnosticsProvider implements vscode.Disposable {
       }
 
       if (diagnostics.length > 0) {
-        this.collection.set(uri, truncatePerFile(diagnostics, uri));
+        // Publish only for a workspace-contained file, keyed by the canonical URI.
+        const contained = resolveUriWithinWorkspace(uri);
+        if (contained) {
+          this.collection.set(contained, truncatePerFile(diagnostics, contained));
+        }
       }
     } catch (error) {
       this.log(
@@ -99,8 +122,10 @@ export class SqryDiagnosticsProvider implements vscode.Disposable {
 
         for (const [uriStr, diags] of byUri) {
           if (openUris.has(uriStr)) {
-            const parsedUri = vscode.Uri.parse(uriStr);
-            this.collection.set(parsedUri, truncatePerFile(diags, parsedUri));
+            const contained = resolveUriWithinWorkspace(vscode.Uri.parse(uriStr));
+            if (contained) {
+              this.collection.set(contained, truncatePerFile(diags, contained));
+            }
           }
         }
       }
@@ -132,11 +157,17 @@ export class SqryDiagnosticsProvider implements vscode.Disposable {
       totalCount = await this.collectCircularDependencies(workspace, allEntries, totalCount);
       totalCount = await this.collectDuplicateGroups(workspace, allEntries, totalCount);
 
-      // Group by URI and publish
+      // Group by URI and publish. A Problems entry is a clickable navigation
+      // target, so publish only for workspace-contained files and key the
+      // collection by the guard's canonical URI (dropping out-of-workspace or
+      // non-`file` result URIs, and pinning symlinks to their real target).
       const byUri = groupByUri(allEntries);
       for (const [uriStr, diags] of byUri) {
-        const parsedUri = vscode.Uri.parse(uriStr);
-        this.collection.set(parsedUri, truncatePerFile(diags, parsedUri));
+        const contained = resolveUriWithinWorkspace(vscode.Uri.parse(uriStr));
+        if (!contained) {
+          continue;
+        }
+        this.collection.set(contained, truncatePerFile(diags, contained));
       }
 
       this.log(`Workspace scan complete: ${totalCount} diagnostics published`);
@@ -276,14 +307,23 @@ function createCycleDiagnostics(
   }> = [];
   for (const loc of locations) {
     if (loc.file && loc.line !== undefined) {
-      const uri = loc.file.startsWith("file://")
-        ? loc.file
-        : vscode.Uri.file(loc.file).toString();
+      // Related-information locations are clickable; confine them to the
+      // workspace and drop anything outside it. A member location is either a
+      // plain filesystem path or a URI string, so route the URI form through
+      // the URI guard: checking only for a `file://` prefix would hand every
+      // other scheme (`untitled:`, `vscode-remote:`) to the path guard, which
+      // would re-resolve it as a relative path instead of rejecting it.
+      const contained = isUriString(loc.file)
+        ? resolveUriWithinWorkspace(vscode.Uri.parse(loc.file))
+        : resolveWithinWorkspace(loc.file);
+      if (!contained) {
+        continue;
+      }
       const line = loc.line;
       const col = loc.column ?? 0;
       resolvedLocations.push({
         name: loc.name,
-        uri,
+        uri: contained.toString(),
         range: new vscode.Range(line, col, line, col),
       });
     }
@@ -334,19 +374,23 @@ function createDuplicateDiagnostics(
     diag.source = "sqry";
     diag.code = "sqry:duplicate";
 
-    // relatedInformation: other symbols in the group
+    // relatedInformation: other symbols in the group. These are clickable
+    // navigation targets, so confine them to the workspace (drop non-`file` or
+    // out-of-workspace locations).
     diag.relatedInformation = symbols
       .filter((_, idx) => idx !== i)
-      .map(
-        (other) =>
-          new vscode.DiagnosticRelatedInformation(
-            new vscode.Location(
-              vscode.Uri.parse(other.location.uri),
-              toRange(other.location.range),
-            ),
-            `Duplicate: ${other.name}`,
-          ),
-      );
+      .map((other) => {
+        // Navigate using the guard's CANONICAL URI (not the raw one), so a
+        // symlink retargeted after this check cannot redirect the click outside.
+        const contained = resolveUriWithinWorkspace(vscode.Uri.parse(other.location.uri));
+        return contained
+          ? new vscode.DiagnosticRelatedInformation(
+              new vscode.Location(contained, toRange(other.location.range)),
+              `Duplicate: ${other.name}`,
+            )
+          : undefined;
+      })
+      .filter((info): info is vscode.DiagnosticRelatedInformation => info !== undefined);
 
     results.push({ uri: symbol.location.uri, diagnostic: diag });
   }

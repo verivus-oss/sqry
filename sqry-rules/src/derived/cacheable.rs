@@ -120,6 +120,14 @@ pub enum RuleQueryFailureKind {
 }
 
 /// Path-query derived key.
+///
+/// This cacheable adapter does NOT support the L1 Primitive B `PathQuery.avoid`
+/// guard-avoiding filter: the key has no `avoid` field and the reconstruction
+/// below hardcodes `avoid: None`. Nothing converts an avoid-carrying `PathQuery`
+/// into this key (the `missing_guard` / `trust_boundary` detectors run through
+/// the full `RulePlan` via `RuleEngine`, not this derived path), so there is no
+/// silent drop; guard-avoiding path queries are simply not cacheable through
+/// this surface.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PathRuleQueryKey {
@@ -240,6 +248,7 @@ impl_rule_query!(
         kind: key.kind,
         max_depth: key.max_depth,
         max_paths: key.max_paths,
+        avoid: None,
     })
 );
 

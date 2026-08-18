@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [30.0.0](https://github.com/verivus-oss/sqry/compare/v29.0.6...v30.0.0) - 2026-08-18
+
+### Added
+
+- *(planner)* add is_unsafe predicate for security rule filters ([#660](https://github.com/verivus-oss/sqry/pull/660))
+
+### Documentation
+
+- bring the README up to the v29.0.6 surface, and fix stale MCP counts ([#693](https://github.com/verivus-oss/sqry/pull/693))
 ## [29.0.5](https://github.com/verivus-oss/sqry/compare/v29.0.3...v29.0.5) - 2026-07-18
 
 ### Fixed

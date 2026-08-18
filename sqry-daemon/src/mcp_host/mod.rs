@@ -108,7 +108,7 @@ impl DaemonMcpHandler {
     /// [`tools_schema::daemon_supported_tools`] in a single call so the
     /// `tools/list` advertised set and `call_tool` authorization set
     /// are guaranteed identical for the lifetime of this handler. If
-    /// the active feature flags disable one of the 14 daemon-supported
+    /// the active feature flags disable one of the 17 daemon-supported
     /// tools, that tool is hidden from `tools/list` AND rejected by
     /// `call_tool` with `InvalidArgument`, matching the standalone
     /// `SqryServer` contract.

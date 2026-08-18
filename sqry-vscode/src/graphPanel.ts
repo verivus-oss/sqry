@@ -1,4 +1,5 @@
 import * as vscode from "vscode";
+import { openFileWithinWorkspace } from "./workspaceGuard";
 
 export interface GraphNode {
   id: string;
@@ -33,12 +34,12 @@ export class SqryGraphPanel implements vscode.Disposable {
     // Handle messages from webview
     this.panel.webview.onDidReceiveMessage(async (message) => {
       if (message.type === "navigateToFile" && message.file && message.line !== undefined) {
-        const uri = vscode.Uri.file(message.file);
-        const doc = await vscode.workspace.openTextDocument(uri);
-        const editor = await vscode.window.showTextDocument(doc, vscode.ViewColumn.One);
-        const pos = new vscode.Position(message.line, 0);
-        editor.selection = new vscode.Selection(pos, pos);
-        editor.revealRange(new vscode.Range(pos, pos));
+        // `message.file` arrives from the webview and is ultimately derived from
+        // indexed data, so it must be confined to the workspace before opening.
+        await openFileWithinWorkspace(message.file, {
+          selection: { startLine: message.line },
+          viewColumn: vscode.ViewColumn.One,
+        });
       }
     });
 

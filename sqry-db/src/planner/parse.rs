@@ -38,8 +38,13 @@
 //!             | "has:" ("caller" | "callee")              → .filter(HasCaller|HasCallee)
 //!             | "unused"                                  → .filter(IsUnused)
 //!             | ("items" | "is_definition") (":" bool)?   → .filter(IsDefinition)
+//!             | "is_unsafe" (":" bool)?                   → .filter(IsUnsafe)
+//!               (is_unsafe:false = "not recorded unsafe", not "proven safe")
 //!             | "address_taken" (":" bool)?               → .filter(IsAddressTaken)
-//!             | "resolved_via:" ("direct"|"type_match"|"binding_plane")
+//!             | "resolved_via:" ("direct"|"type_match"|"binding_plane"
+//!                               |"virtual_dispatch"|"interface_dispatch"
+//!                               |"duck_typed"|"structural"
+//!                               |"promiscuous_elided")
 //!                                                         → .filter(ResolvedVia)
 //!             | "callsite_promiscuous" (":" bool)?        → .filter(HasCallsitePromiscuous)
 //!             | relation_key ":" value                    → .filter(<Relation>(value))
@@ -227,6 +232,10 @@ impl<'a> Parser<'a> {
                 let want = self.parse_optional_bool_value(start, "is_definition")?;
                 Ok(builder.filter(Predicate::IsDefinition(want)))
             }
+            "is_unsafe" => {
+                let want = self.parse_optional_bool_value(start, "is_unsafe")?;
+                Ok(builder.filter(Predicate::IsUnsafe(want)))
+            }
             "cfg" => self.parse_cfg_step(builder),
             "wraps" => self.parse_wraps_step(builder, start),
             // ----- Phase A (C indirect-call precision) -----
@@ -234,6 +243,9 @@ impl<'a> Parser<'a> {
             // Spellings locked per DESIGN §11.1:
             //   address_taken[:true|false]            — bare form => true
             //   resolved_via:direct|type_match|binding_plane
+            //     (Phase beta added virtual_dispatch|interface_dispatch|
+            //      duck_typed|structural|promiscuous_elided; the full
+            //      accepted set is in `parse_resolved_via_step`)
             //   callsite_promiscuous[:true|false]     — bare form => true
             //
             // The bare forms parallel `unused` (no required value). Any
@@ -734,6 +746,7 @@ impl<'a> Parser<'a> {
                     }
                     "items" => "items value (expected 'true' or 'false')",
                     "is_definition" => "is_definition value (expected 'true' or 'false')",
+                    "is_unsafe" => "is_unsafe value (expected 'true' or 'false')",
                     // Defensive fallback — keeps the helper reusable for
                     // any future bool-flag predicate the planner adds.
                     _ => "boolean value (expected 'true' or 'false')",
@@ -1357,6 +1370,50 @@ mod tests {
                 assert!(
                     kind.starts_with("items value"),
                     "expected items value error, got {kind:?}"
+                );
+                assert_eq!(value, "maybe");
+            }
+            other => panic!("expected UnknownIdent, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_is_unsafe_defaults_to_true() {
+        let plan = parse_query("kind:function is_unsafe").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert_eq!(steps.len(), 2);
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::IsUnsafe(true),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_is_unsafe_false_value() {
+        let plan = parse_query("kind:function is_unsafe:false").expect("parse");
+        let PlanNode::Chain { steps } = plan.root else {
+            panic!("chain");
+        };
+        assert!(matches!(
+            steps[1],
+            PlanNode::Filter {
+                predicate: Predicate::IsUnsafe(false),
+            }
+        ));
+    }
+
+    #[test]
+    fn parse_is_unsafe_rejects_non_bool_value() {
+        let err = parse_query("kind:function is_unsafe:maybe").unwrap_err();
+        match err {
+            ParseError::UnknownIdent { kind, value, .. } => {
+                assert!(
+                    kind.starts_with("is_unsafe value"),
+                    "expected is_unsafe-specific value error, got {kind:?}"
                 );
                 assert_eq!(value, "maybe");
             }

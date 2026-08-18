@@ -34,7 +34,13 @@ const outputChannelStub = {
 const vscodeStub = {
   __esModule: true,
   Uri: {
-    parse: (str: string) => ({ scheme: "file", path: str, toString: () => str }),
+    // Derive the scheme from the string instead of hardcoding "file", so a
+    // non-`file` result URI can actually be exercised against the guard.
+    parse: (str: string) => ({
+      scheme: str.includes(":") ? str.slice(0, str.indexOf(":")) : "file",
+      path: str,
+      toString: () => str,
+    }),
   },
   ViewColumn: { One: 1, Beside: 2 },
   Position: class {
@@ -97,7 +103,26 @@ const vscodeStub = {
   },
 };
 
-const mod = proxyquire("../src/commandResults", { vscode: vscodeStub }) as typeof import("../src/commandResults");
+// The real guard requires the host `vscode` module, so it is stubbed. The stub
+// reproduces guard behaviour rather than passing every URI straight through: a
+// non-`file` URI or a path under `/outside/` is rejected, and `/link/`
+// canonicalizes to `/real/` the way a symlink resolves to its target. Ordinary
+// in-workspace locations are unchanged, so the rest of the suite is untouched,
+// but building the peek from raw result URIs instead of canonical ones, or
+// dropping the filter, now fails a test. Containment itself is covered by
+// workspaceGuard.test.ts.
+const mod = proxyquire("../src/commandResults", {
+  vscode: vscodeStub,
+  "./workspaceGuard": {
+    resolveUriWithinWorkspace: (uri: { scheme?: string; toString(): string }) => {
+      const value = uri.toString();
+      if (uri.scheme !== "file" || value.includes("/outside/")) {
+        return undefined;
+      }
+      return vscodeStub.Uri.parse(value.replace("/link/", "/real/"));
+    },
+  },
+}) as typeof import("../src/commandResults");
 
 const {
   SQRY_SHOW_CALLERS,
@@ -180,6 +205,77 @@ describe("commandResults", () => {
       expect(anchorPos.line).to.equal(3);
       expect(anchorPos.character).to.equal(7);
       expect(locations).to.have.length(2);
+    });
+
+    it("builds the peek anchor and every location from canonical URIs", async () => {
+      const result = {
+        symbol: { name: "foo" },
+        results: { locations: [loc("file:///src/link/b.rs", 2)] },
+      };
+      await handleExecuteCommandResult(
+        SQRY_SHOW_CALLERS,
+        [{ uri: "file:///src/link/a.rs", position: { line: 3, character: 7 } }],
+        () => Promise.resolve(result),
+        outputChannelStub,
+      );
+
+      expect(executeCommandCalls).to.have.length(1);
+      const [anchorUri, , locations] = executeCommandCalls[0].args as [
+        { toString: () => string },
+        unknown,
+        Array<{ uri: { toString: () => string } }>,
+      ];
+      expect(anchorUri.toString()).to.equal("file:///src/real/a.rs");
+      expect(locations.map((l) => l.uri.toString())).to.deep.equal([
+        "file:///src/real/b.rs",
+      ]);
+    });
+
+    it("drops locations outside the workspace and keeps the rest", async () => {
+      const result = {
+        symbol: { name: "foo" },
+        results: {
+          locations: [loc("file:///outside/evil.rs", 1), loc("file:///b.rs", 2)],
+        },
+      };
+      await handleExecuteCommandResult(
+        SQRY_SHOW_CALLERS,
+        [CTX],
+        () => Promise.resolve(result),
+        outputChannelStub,
+      );
+
+      expect(executeCommandCalls).to.have.length(1);
+      const [, , locations] = executeCommandCalls[0].args as [
+        unknown,
+        unknown,
+        Array<{ uri: { toString: () => string } }>,
+      ];
+      expect(locations.map((l) => l.uri.toString())).to.deep.equal([
+        "file:///b.rs",
+      ]);
+    });
+
+    it("opens no peek when every location is outside the workspace", async () => {
+      const result = {
+        symbol: { name: "foo" },
+        results: {
+          locations: [
+            loc("file:///outside/evil.rs", 1),
+            loc("untitled:scratch", 2),
+          ],
+        },
+      };
+      await handleExecuteCommandResult(
+        SQRY_SHOW_CALLERS,
+        [CTX],
+        () => Promise.resolve(result),
+        outputChannelStub,
+      );
+
+      expect(executeCommandCalls).to.have.length(0);
+      expect(infoMessages).to.have.length(1);
+      expect(infoMessages[0]).to.contain("no callers");
     });
 
     it("shows an info message and no peek when there are no callers", async () => {

@@ -39,7 +39,8 @@ pub fn rule() -> ShippedRule {
         methodology: "sqry-vulnerability-hunting-methodology.md §3 Recipe R7 lines 245-263",
         seed_finding: Some("rustc-rmeta-truncated-metadata-ice.md"),
         variants: VARIANTS,
-        requires_beside_cache: true,
+        // Plan is SimilarTo over a call subgraph, no CrossSnapshotDiff; runs in-engine since L2a.
+        requires_beside_cache: false,
         requires_trace_path: false,
         baseline_ms_floor: 1,
     }

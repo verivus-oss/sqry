@@ -219,6 +219,16 @@ criteria = "safe-to-deploy"
 version = "1.1.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.aho-corasick]]
+version = "1.1.5"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.android_system_properties]]
+version = "0.1.6"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.approx]]
 version = "0.5.1"
 criteria = "safe-to-run"
@@ -299,6 +309,11 @@ criteria = "safe-to-deploy"
 version = "2.13.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.bitflags]]
+version = "2.13.1"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.blake3]]
 version = "1.8.3"
 criteria = "safe-to-deploy"
@@ -310,6 +325,11 @@ criteria = "safe-to-deploy"
 [[exemptions.blake3]]
 version = "1.8.5"
 criteria = "safe-to-deploy"
+
+[[exemptions.blake3]]
+version = "1.8.6"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.block-buffer]]
 version = "0.10.4"
@@ -334,6 +354,16 @@ criteria = "safe-to-deploy"
 [[exemptions.bstr]]
 version = "1.12.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.bstr]]
+version = "1.13.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.bstr]]
+version = "1.13.1"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.bumpalo]]
 version = "3.20.3"
@@ -395,6 +425,11 @@ criteria = "safe-to-deploy"
 version = "1.2.66"
 criteria = "safe-to-deploy"
 
+[[exemptions.cc]]
+version = "1.2.67"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.cesu8]]
 version = "1.1.0"
 criteria = "safe-to-deploy"
@@ -402,6 +437,11 @@ criteria = "safe-to-deploy"
 [[exemptions.cfg_aliases]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.cfg_aliases]]
+version = "0.2.2"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.chacha20]]
 version = "0.10.0"
@@ -423,6 +463,21 @@ criteria = "safe-to-deploy"
 version = "4.6.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap]]
+version = "4.6.4"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.clap]]
+version = "4.6.5"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.clap]]
+version = "4.6.6"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.clap_complete]]
 version = "4.6.2"
 criteria = "safe-to-deploy"
@@ -443,6 +498,16 @@ criteria = "safe-to-deploy"
 version = "4.6.7"
 criteria = "safe-to-deploy"
 
+[[exemptions.clap_complete]]
+version = "4.6.8"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.clap_complete]]
+version = "4.6.9"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.clap_derive]]
 version = "4.6.0"
 criteria = "safe-to-deploy"
@@ -450,6 +515,11 @@ criteria = "safe-to-deploy"
 [[exemptions.clap_derive]]
 version = "4.6.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.clap_derive]]
+version = "4.6.4"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.clipboard-win]]
 version = "5.4.1"
@@ -599,6 +669,11 @@ criteria = "safe-to-deploy"
 version = "2.11.0"
 criteria = "safe-to-run"
 
+[[exemptions.data-encoding]]
+version = "2.11.1"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.deranged]]
 version = "0.5.8"
 criteria = "safe-to-deploy"
@@ -635,6 +710,11 @@ criteria = "safe-to-deploy"
 version = "0.2.6"
 criteria = "safe-to-deploy"
 
+[[exemptions.displaydoc]]
+version = "0.2.7"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.dunce]]
 version = "1.0.5"
 criteria = "safe-to-run"
@@ -642,6 +722,11 @@ criteria = "safe-to-run"
 [[exemptions.either]]
 version = "1.16.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.either]]
+version = "1.17.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.email_address]]
 version = "0.2.9"
@@ -654,6 +739,11 @@ criteria = "safe-to-deploy"
 [[exemptions.encoding_rs_io]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
+
+[[exemptions.encoding_rs_io]]
+version = "0.1.8"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.endian-type]]
 version = "0.1.2"
@@ -675,9 +765,19 @@ criteria = "safe-to-deploy"
 version = "3.3.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.error-code]]
+version = "3.4.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.event-listener]]
 version = "5.4.1"
 criteria = "safe-to-run"
+
+[[exemptions.event-listener]]
+version = "5.4.2"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.event-listener-strategy]]
 version = "0.5.4"
@@ -695,6 +795,11 @@ criteria = "safe-to-deploy"
 version = "2.4.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.fastrand]]
+version = "2.5.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.filetime]]
 version = "0.2.27"
 criteria = "safe-to-deploy"
@@ -710,6 +815,16 @@ criteria = "safe-to-deploy"
 [[exemptions.find-msvc-tools]]
 version = "0.1.9"
 criteria = "safe-to-deploy"
+
+[[exemptions.find-msvc-tools]]
+version = "0.1.10"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.find-msvc-tools]]
+version = "0.1.11"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.flate2]]
 version = "1.1.9"
@@ -743,33 +858,113 @@ criteria = "safe-to-deploy"
 version = "0.3.32"
 criteria = "safe-to-deploy"
 
+[[exemptions.futures]]
+version = "0.3.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.futures]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.futures-channel]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
+
+[[exemptions.futures-channel]]
+version = "0.3.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.futures-channel]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.futures-core]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
 
+[[exemptions.futures-core]]
+version = "0.3.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.futures-core]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.futures-executor]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
+
+[[exemptions.futures-executor]]
+version = "0.3.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.futures-executor]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.futures-io]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
 
+[[exemptions.futures-io]]
+version = "0.3.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.futures-io]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.futures-macro]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
+
+[[exemptions.futures-macro]]
+version = "0.3.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.futures-macro]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.futures-sink]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
 
+[[exemptions.futures-sink]]
+version = "0.3.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.futures-sink]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.futures-task]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
+
+[[exemptions.futures-task]]
+version = "0.3.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.futures-task]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.futures-timer]]
 version = "3.0.3"
@@ -782,6 +977,16 @@ criteria = "safe-to-run"
 [[exemptions.futures-util]]
 version = "0.3.32"
 criteria = "safe-to-deploy"
+
+[[exemptions.futures-util]]
+version = "0.3.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.futures-util]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.generator]]
 version = "0.8.8"
@@ -815,9 +1020,24 @@ criteria = "safe-to-deploy"
 version = "0.3.3"
 criteria = "safe-to-run"
 
+[[exemptions.glob]]
+version = "0.3.4"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.globset]]
 version = "0.4.18"
 criteria = "safe-to-deploy"
+
+[[exemptions.globset]]
+version = "0.4.19"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.globset]]
+version = "0.4.20"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.grep]]
 version = "0.3.2"
@@ -835,6 +1055,11 @@ criteria = "safe-to-deploy"
 version = "0.1.8"
 criteria = "safe-to-deploy"
 
+[[exemptions.grep-matcher]]
+version = "0.1.9"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.grep-printer]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
@@ -851,6 +1076,11 @@ criteria = "safe-to-deploy"
 version = "0.1.16"
 criteria = "safe-to-deploy"
 
+[[exemptions.grep-searcher]]
+version = "0.1.17"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.h2]]
 version = "0.4.13"
 criteria = "safe-to-run"
@@ -861,6 +1091,10 @@ criteria = "safe-to-run"
 
 [[exemptions.h2]]
 version = "0.4.15"
+criteria = "safe-to-run"
+
+[[exemptions.h2]]
+version = "0.4.16"
 criteria = "safe-to-run"
 
 [[exemptions.half]]
@@ -886,6 +1120,11 @@ criteria = "safe-to-deploy"
 [[exemptions.hdrhistogram]]
 version = "7.5.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.hdrhistogram]]
+version = "7.6.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.headers]]
 version = "0.4.1"
@@ -923,13 +1162,33 @@ criteria = "safe-to-deploy"
 version = "1.4.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.http]]
+version = "1.5.0"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.http-body]]
 version = "1.0.1"
 criteria = "safe-to-run"
 
+[[exemptions.http-body]]
+version = "1.1.0"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.http-body-util]]
 version = "0.1.3"
 criteria = "safe-to-run"
+
+[[exemptions.http-body-util]]
+version = "0.1.4"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.http-body-util]]
+version = "0.1.5"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.httparse]]
 version = "1.10.1"
@@ -959,6 +1218,11 @@ criteria = "safe-to-deploy"
 version = "0.4.13"
 criteria = "safe-to-deploy"
 
+[[exemptions.hybrid-array]]
+version = "0.4.14"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.hyper]]
 version = "1.8.1"
 criteria = "safe-to-run"
@@ -970,6 +1234,11 @@ criteria = "safe-to-run"
 [[exemptions.hyper]]
 version = "1.10.1"
 criteria = "safe-to-run"
+
+[[exemptions.hyper]]
+version = "1.11.0"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.hyper-util]]
 version = "0.1.20"
@@ -983,29 +1252,64 @@ criteria = "safe-to-deploy"
 version = "2.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.icu_collections]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.icu_locale_core]]
 version = "2.2.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.icu_locale_core]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.icu_normalizer]]
 version = "2.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.icu_normalizer]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.icu_normalizer_data]]
 version = "2.2.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.icu_normalizer_data]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.icu_properties]]
 version = "2.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.icu_properties]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.icu_properties_data]]
 version = "2.2.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.icu_properties_data]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.icu_provider]]
 version = "2.2.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.icu_provider]]
+version = "2.3.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.ident_case]]
 version = "1.0.1"
@@ -1030,6 +1334,16 @@ criteria = "safe-to-deploy"
 [[exemptions.ignore]]
 version = "0.4.28"
 criteria = "safe-to-deploy"
+
+[[exemptions.ignore]]
+version = "0.4.31"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.ignore]]
+version = "0.4.33"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.indexmap]]
 version = "2.13.0"
@@ -1058,6 +1372,11 @@ criteria = "safe-to-deploy"
 [[exemptions.inotify]]
 version = "0.11.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.inotify]]
+version = "0.11.5"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.inotify-sys]]
 version = "0.1.8"
@@ -1127,6 +1446,11 @@ criteria = "safe-to-deploy"
 version = "0.3.103"
 criteria = "safe-to-deploy"
 
+[[exemptions.js-sys]]
+version = "0.3.104"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.jsonschema]]
 version = "0.46.10"
 criteria = "safe-to-run"
@@ -1142,6 +1466,11 @@ criteria = "safe-to-deploy"
 [[exemptions.kqueue]]
 version = "1.2.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.kqueue]]
+version = "1.2.1"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.kqueue-sys]]
 version = "1.0.4"
@@ -1163,6 +1492,11 @@ criteria = "safe-to-deploy"
 version = "0.2.186"
 criteria = "safe-to-deploy"
 
+[[exemptions.libc]]
+version = "0.2.189"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.libredox]]
 version = "0.1.16"
 criteria = "safe-to-deploy"
@@ -1174,6 +1508,16 @@ criteria = "safe-to-deploy"
 [[exemptions.libredox]]
 version = "0.1.18"
 criteria = "safe-to-deploy"
+
+[[exemptions.libredox]]
+version = "0.1.19"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.libredox]]
+version = "0.1.20"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.linux-raw-sys]]
 version = "0.4.15"
@@ -1190,6 +1534,11 @@ criteria = "safe-to-deploy"
 [[exemptions.litemap]]
 version = "0.8.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.litemap]]
+version = "0.8.3"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.lock_api]]
 version = "0.4.14"
@@ -1230,6 +1579,11 @@ criteria = "safe-to-deploy"
 [[exemptions.lru]]
 version = "0.18.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.lru]]
+version = "0.18.2"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.lsp-types]]
 version = "0.94.1"
@@ -1299,9 +1653,19 @@ criteria = "safe-to-deploy"
 version = "1.2.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.mio]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.moka]]
 version = "0.12.15"
 criteria = "safe-to-deploy"
+
+[[exemptions.moka]]
+version = "0.12.16"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.nibble_vec]]
 version = "0.1.0"
@@ -1354,6 +1718,11 @@ criteria = "safe-to-deploy"
 [[exemptions.num-conv]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+
+[[exemptions.num-integer]]
+version = "0.1.47"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.num-iter]]
 version = "0.1.46"
@@ -1411,6 +1780,11 @@ criteria = "safe-to-deploy"
 version = "0.3.33"
 criteria = "safe-to-deploy"
 
+[[exemptions.pkg-config]]
+version = "0.3.34"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.plotters]]
 version = "0.3.7"
 criteria = "safe-to-run"
@@ -1427,9 +1801,24 @@ criteria = "safe-to-run"
 version = "1.13.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.portable-atomic]]
+version = "1.14.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.portable-atomic]]
+version = "1.15.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.potential_utf]]
 version = "0.1.5"
 criteria = "safe-to-deploy"
+
+[[exemptions.potential_utf]]
+version = "0.1.6"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.powerfmt]]
 version = "0.2.0"
@@ -1450,6 +1839,11 @@ criteria = "safe-to-run"
 [[exemptions.quote]]
 version = "1.0.46"
 criteria = "safe-to-deploy"
+
+[[exemptions.quote]]
+version = "1.0.47"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.r-efi]]
 version = "5.3.0"
@@ -1474,6 +1868,11 @@ criteria = "safe-to-deploy"
 [[exemptions.rand]]
 version = "0.9.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.rand]]
+version = "0.9.5"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.rand]]
 version = "0.10.1"
@@ -1543,6 +1942,11 @@ criteria = "safe-to-deploy"
 version = "1.13.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.regex]]
+version = "1.13.1"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.regex-automata]]
 version = "0.4.14"
 criteria = "safe-to-deploy"
@@ -1550,6 +1954,16 @@ criteria = "safe-to-deploy"
 [[exemptions.regex-automata]]
 version = "0.4.15"
 criteria = "safe-to-deploy"
+
+[[exemptions.regex-automata]]
+version = "0.4.16"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.regex-automata]]
+version = "0.4.18"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.regex-syntax]]
 version = "0.8.10"
@@ -1647,9 +2061,19 @@ criteria = "safe-to-deploy"
 version = "1.2.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.schemars]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.schemars_derive]]
 version = "1.2.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.schemars_derive]]
+version = "1.2.2"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.scoped-tls]]
 version = "1.0.1"
@@ -1675,9 +2099,29 @@ criteria = "safe-to-deploy"
 version = "1.0.28"
 criteria = "safe-to-deploy"
 
+[[exemptions.serde]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.serde_core]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.serde_derive]]
+version = "1.0.229"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.serde_json]]
 version = "1.0.150"
 criteria = "safe-to-deploy"
+
+[[exemptions.serde_json]]
+version = "1.0.151"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.serde_regex]]
 version = "1.1.0"
@@ -1731,6 +2175,11 @@ criteria = "safe-to-deploy"
 version = "0.3.9"
 criteria = "safe-to-deploy"
 
+[[exemptions.simd-adler32]]
+version = "0.3.10"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.similar]]
 version = "2.7.0"
 criteria = "safe-to-deploy"
@@ -1742,6 +2191,11 @@ criteria = "safe-to-deploy"
 [[exemptions.similar]]
 version = "3.1.1"
 criteria = "safe-to-deploy"
+
+[[exemptions.similar]]
+version = "3.1.2"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.slab]]
 version = "0.4.12"
@@ -1775,204 +2229,209 @@ criteria = "safe-to-deploy"
 version = "0.6.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.socket2]]
+version = "0.6.5"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.sqry-classpath]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-cli]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-core]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-daemon]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-daemon-client]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-daemon-protocol]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-db]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-c]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-cpp]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-csharp]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-css]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-dart]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-elixir]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-go]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-groovy]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-haskell]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-html]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-java]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-javascript]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-json]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-kotlin]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-lua]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-oracle-plsql]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-perl]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-php]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-pulumi]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-puppet]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-python]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-r]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-ruby]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-rust]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-salesforce-apex]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-sap-abap]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-scala]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-servicenow-xanadu]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-servicenow-xml]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-shell]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-sql]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-support]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-svelte]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-swift]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-terraform]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-typescript]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-vue]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-zig]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lsp]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-mcp]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-mcp-redaction]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-plugin-registry]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-tree-sitter-support]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ssri]]
@@ -2015,6 +2474,16 @@ criteria = "safe-to-deploy"
 version = "2.0.118"
 criteria = "safe-to-deploy"
 
+[[exemptions.syn]]
+version = "2.0.119"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.syn]]
+version = "3.0.3"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.sync_wrapper]]
 version = "1.0.2"
 criteria = "safe-to-deploy"
@@ -2030,6 +2499,11 @@ criteria = "safe-to-deploy"
 [[exemptions.target-triple]]
 version = "1.0.0"
 criteria = "safe-to-run"
+
+[[exemptions.target-triple]]
+version = "1.0.1"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.tempfile]]
 version = "3.27.0"
@@ -2071,6 +2545,16 @@ criteria = "safe-to-deploy"
 version = "0.3.51"
 criteria = "safe-to-deploy"
 
+[[exemptions.time]]
+version = "0.3.54"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.time]]
+version = "0.3.55"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.time-core]]
 version = "0.1.8"
 criteria = "safe-to-deploy"
@@ -2095,6 +2579,11 @@ criteria = "safe-to-deploy"
 version = "0.2.30"
 criteria = "safe-to-deploy"
 
+[[exemptions.time-macros]]
+version = "0.2.32"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.tinystr]]
 version = "0.8.2"
 criteria = "safe-to-deploy"
@@ -2102,6 +2591,11 @@ criteria = "safe-to-deploy"
 [[exemptions.tinystr]]
 version = "0.8.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.tinystr]]
+version = "0.8.4"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.tokio]]
 version = "1.50.0"
@@ -2123,6 +2617,11 @@ criteria = "safe-to-deploy"
 version = "1.52.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.tokio]]
+version = "1.53.1"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.tokio-macros]]
 version = "2.6.1"
 criteria = "safe-to-deploy"
@@ -2131,13 +2630,33 @@ criteria = "safe-to-deploy"
 version = "2.7.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.tokio-macros]]
+version = "2.7.1"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.tokio-macros]]
+version = "2.7.2"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.tokio-stream]]
 version = "0.1.18"
 criteria = "safe-to-deploy"
 
+[[exemptions.tokio-stream]]
+version = "0.1.19"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.tokio-util]]
 version = "0.7.18"
 criteria = "safe-to-deploy"
+
+[[exemptions.tokio-util]]
+version = "0.7.19"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.toml]]
 version = "1.1.0+spec-1.1.0"
@@ -2146,6 +2665,16 @@ criteria = "safe-to-deploy"
 [[exemptions.toml]]
 version = "1.1.2+spec-1.1.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.toml]]
+version = "1.1.3+spec-1.1.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.toml]]
+version = "1.1.4+spec-1.1.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.toml_datetime]]
 version = "1.1.1+spec-1.1.0"
@@ -2175,9 +2704,19 @@ criteria = "safe-to-run"
 version = "0.25.12+spec-1.1.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.toml_edit]]
+version = "0.25.13+spec-1.1.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.toml_parser]]
 version = "1.1.2+spec-1.1.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.toml_parser]]
+version = "1.1.3+spec-1.1.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.toml_writer]]
 version = "1.1.0+spec-1.1.0"
@@ -2186,6 +2725,11 @@ criteria = "safe-to-deploy"
 [[exemptions.toml_writer]]
 version = "1.1.1+spec-1.1.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.toml_writer]]
+version = "1.1.2+spec-1.1.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.tower]]
 version = "0.4.13"
@@ -2251,8 +2795,18 @@ criteria = "safe-to-deploy"
 version = "0.26.10"
 criteria = "safe-to-deploy"
 
+[[exemptions.tree-sitter]]
+version = "0.26.11"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.tree-sitter]]
+version = "0.26.12"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.tree-sitter-abap-sqry]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-bash]]
@@ -2284,7 +2838,7 @@ version = "0.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-elixir-sqry]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-go]]
@@ -2292,7 +2846,7 @@ version = "0.23.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-groovy-sqry]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-haskell]]
@@ -2320,7 +2874,7 @@ version = "0.23.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-kotlin-sqry]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-language]]
@@ -2332,7 +2886,7 @@ version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-perl-sqry]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-php]]
@@ -2340,7 +2894,7 @@ version = "0.24.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-plsql-sqry]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-puppet]]
@@ -2384,7 +2938,7 @@ version = "2.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-svelte-sqry]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-swift]]
@@ -2404,7 +2958,7 @@ version = "0.23.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-vue-sqry]]
-version = "29.0.6"
+version = "30.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-yaml]]
@@ -2427,9 +2981,24 @@ criteria = "safe-to-run"
 version = "1.0.117"
 criteria = "safe-to-run"
 
+[[exemptions.trybuild]]
+version = "1.0.118"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.trybuild]]
+version = "1.0.120"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.trycmd]]
 version = "1.2.0"
 criteria = "safe-to-run"
+
+[[exemptions.trycmd]]
+version = "1.2.1"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.typed-path]]
 version = "0.12.3"
@@ -2490,6 +3059,16 @@ criteria = "safe-to-deploy"
 [[exemptions.uuid]]
 version = "1.23.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.uuid]]
+version = "1.24.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.uuid]]
+version = "1.24.1"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.uuid-simd]]
 version = "0.8.0"
@@ -2567,6 +3146,11 @@ criteria = "safe-to-deploy"
 version = "0.2.126"
 criteria = "safe-to-deploy"
 
+[[exemptions.wasm-bindgen]]
+version = "0.2.127"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.wasm-bindgen-macro]]
 version = "0.2.114"
 criteria = "safe-to-deploy"
@@ -2603,6 +3187,11 @@ criteria = "safe-to-deploy"
 version = "0.2.126"
 criteria = "safe-to-deploy"
 
+[[exemptions.wasm-bindgen-macro]]
+version = "0.2.127"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.wasm-bindgen-macro-support]]
 version = "0.2.114"
 criteria = "safe-to-deploy"
@@ -2639,6 +3228,11 @@ criteria = "safe-to-deploy"
 version = "0.2.126"
 criteria = "safe-to-deploy"
 
+[[exemptions.wasm-bindgen-macro-support]]
+version = "0.2.127"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.114"
 criteria = "safe-to-deploy"
@@ -2674,6 +3268,11 @@ criteria = "safe-to-deploy"
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.126"
 criteria = "safe-to-deploy"
+
+[[exemptions.wasm-bindgen-shared]]
+version = "0.2.127"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.web-sys]]
 version = "0.3.91"
@@ -2711,6 +3310,11 @@ criteria = "safe-to-run"
 version = "0.3.103"
 criteria = "safe-to-run"
 
+[[exemptions.web-sys]]
+version = "0.3.104"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.web-time]]
 version = "1.1.0"
 criteria = "safe-to-deploy"
@@ -2730,6 +3334,11 @@ criteria = "safe-to-deploy"
 [[exemptions.which]]
 version = "8.0.4"
 criteria = "safe-to-deploy"
+
+[[exemptions.which]]
+version = "8.0.5"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.winapi]]
 version = "0.3.9"
@@ -2891,6 +3500,11 @@ criteria = "safe-to-deploy"
 version = "1.0.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.winnow]]
+version = "1.0.4"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.wit-bindgen]]
 version = "0.57.1"
 criteria = "safe-to-deploy"
@@ -2899,9 +3513,19 @@ criteria = "safe-to-deploy"
 version = "0.6.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.writeable]]
+version = "0.6.4"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.xxhash-rust]]
 version = "0.8.16"
 criteria = "safe-to-deploy"
+
+[[exemptions.xxhash-rust]]
+version = "0.8.18"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.yansi]]
 version = "1.0.1"
@@ -2951,6 +3575,16 @@ criteria = "safe-to-run"
 version = "0.8.54"
 criteria = "safe-to-run"
 
+[[exemptions.zerocopy]]
+version = "0.8.55"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.zerocopy]]
+version = "0.8.56"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.zerocopy-derive]]
 version = "0.8.47"
 criteria = "safe-to-deploy"
@@ -2975,6 +3609,16 @@ criteria = "safe-to-run"
 version = "0.8.54"
 criteria = "safe-to-run"
 
+[[exemptions.zerocopy-derive]]
+version = "0.8.55"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.zerocopy-derive]]
+version = "0.8.56"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.zerofrom]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
@@ -2995,6 +3639,11 @@ criteria = "safe-to-deploy"
 version = "0.2.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.zerotrie]]
+version = "0.2.5"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.zerovec]]
 version = "0.11.5"
 criteria = "safe-to-deploy"
@@ -3003,6 +3652,11 @@ criteria = "safe-to-deploy"
 version = "0.11.6"
 criteria = "safe-to-deploy"
 
+[[exemptions.zerovec]]
+version = "0.11.7"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.zerovec-derive]]
 version = "0.11.2"
 criteria = "safe-to-deploy"
@@ -3010,6 +3664,11 @@ criteria = "safe-to-deploy"
 [[exemptions.zerovec-derive]]
 version = "0.11.3"
 criteria = "safe-to-deploy"
+
+[[exemptions.zerovec-derive]]
+version = "0.11.4"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.zip]]
 version = "8.5.0"
@@ -3026,6 +3685,11 @@ criteria = "safe-to-deploy"
 [[exemptions.zlib-rs]]
 version = "0.6.6"
 criteria = "safe-to-deploy"
+
+[[exemptions.zlib-rs]]
+version = "0.6.7"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.zopfli]]
 version = "0.8.3"
