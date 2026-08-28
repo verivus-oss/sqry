@@ -261,27 +261,11 @@ fn collect_languages_from_graph(graph: &CodeGraph) -> Vec<String> {
 ///
 /// Handles both short forms (js, ts, py) and long forms (javascript, typescript, python).
 fn language_matches(lang: Language, query: &str) -> bool {
-    let query = query.to_lowercase();
-    let short = lang.to_string(); // e.g., "js", "ts", "py", "rust"
-
-    // Direct match with short form
-    if short == query {
-        return true;
-    }
-
-    // Map long forms to Language variants
-
-    match lang {
-        Language::JavaScript => query == "javascript",
-        Language::TypeScript => query == "typescript",
-        Language::Python => query == "python",
-        Language::Cpp => query == "c++" || query == "cplusplus",
-        Language::CSharp => query == "c#" || query == "cs",
-        Language::Html => query == "html5",
-        Language::Shell => query == "bash" || query == "sh",
-        // For others, the short form is the canonical name
-        _ => false,
-    }
+    // Parses through the one central table rather than a local alias list.
+    // The previous hand-rolled match covered only seven languages, so
+    // `golang`, `rs`, `kt`, and `hcl` were rejected here while `from_id`
+    // accepted them elsewhere (issue #714).
+    Language::from_id(query) == Some(lang)
 }
 
 /// Build the `IndexStatus` for a member-folder request per §1.4

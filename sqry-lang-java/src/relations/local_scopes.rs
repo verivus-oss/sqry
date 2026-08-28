@@ -576,7 +576,7 @@ fn build_scopes_recursive(
     class_stack: &mut Vec<String>,
 ) -> GraphResult<()> {
     guard.enter().map_err(|e| GraphBuilderError::ParseError {
-        span: Span::from_bytes(node.start_byte(), node.end_byte()),
+        span: Span::from_node(&node),
         reason: format!("Recursion limit: {e}"),
     })?;
     let result = build_scopes_dispatch(tree, node, content, current_scope, guard, class_stack);
@@ -1446,7 +1446,7 @@ fn bind_declarations_recursive(
     guard: &mut sqry_core::query::security::RecursionGuard,
 ) -> GraphResult<()> {
     guard.enter().map_err(|e| GraphBuilderError::ParseError {
-        span: Span::from_bytes(node.start_byte(), node.end_byte()),
+        span: Span::from_node(&node),
         reason: format!("Recursion limit: {e}"),
     })?;
 
@@ -1488,7 +1488,7 @@ fn bind_pattern_scopes_recursive(
     guard: &mut sqry_core::query::security::RecursionGuard,
 ) -> GraphResult<()> {
     guard.enter().map_err(|e| GraphBuilderError::ParseError {
-        span: Span::from_bytes(node.start_byte(), node.end_byte()),
+        span: Span::from_node(&node),
         reason: format!("Recursion limit: {e}"),
     })?;
 

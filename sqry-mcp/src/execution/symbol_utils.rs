@@ -11,6 +11,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow};
+use sqry_core::graph::node::Language;
 use sqry_core::graph::unified::MacroNodeMetadata;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 pub(crate) use sqry_core::graph::unified::materialize::display_entry_qualified_name;
@@ -241,15 +242,29 @@ fn matches_language_filter_node(
         return false;
     };
 
-    let lang = snapshot.files().language_for_file(entry.file).map_or_else(
-        || "unknown".to_string(),
-        |l| l.to_string().to_ascii_lowercase(),
-    );
+    let actual = snapshot.files().language_for_file(entry.file);
 
     filters
         .languages
         .iter()
-        .any(|candidate| candidate.eq_ignore_ascii_case(&lang))
+        .any(|candidate| language_filter_selects(actual, candidate))
+}
+
+/// Does a user-supplied language filter value select this language?
+///
+/// Parses the candidate through [`Language::from_id`] and compares languages
+/// rather than strings, so every accepted spelling (`typescript`, `ts`, `TS`)
+/// selects the same set. Before issue #714 this compared against
+/// `Language::Display`, which meant `filters.language: ["typescript"]` matched
+/// nothing while the `lang:typescript` predicate on the same tool worked.
+///
+/// Files with no detected language stay addressable as the literal
+/// `"unknown"`, which is deliberately not a `Language` variant.
+pub(crate) fn language_filter_selects(actual: Option<Language>, candidate: &str) -> bool {
+    match actual {
+        Some(lang) => Language::from_id(candidate) == Some(lang),
+        None => candidate.trim().eq_ignore_ascii_case("unknown"),
+    }
 }
 
 fn matches_visibility_filter_node(

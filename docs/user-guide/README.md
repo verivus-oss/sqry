@@ -1,6 +1,6 @@
 # sqry User Guide
 
-**Version**: 23.2.0
+**Version**: 30.0.0
 
 This guide covers the stable public workflows for local semantic code search.
 
@@ -11,6 +11,11 @@ This guide covers the stable public workflows for local semantic code search.
 - [Daemon Mode](daemon.md): run `sqryd`, load and rebuild workspaces, inspect logs, and use daemon-backed MCP/LSP workflows.
 - [Revision-Aware Workspaces](revision-aware-workspaces.md): load immutable revisions, dirty snapshots, and managed agent worktrees while preserving live-workspace query defaults.
 - [MCP](mcp.md): configure AI assistants, choose standalone versus daemon mode, inspect the live tool catalog, and handle `source_root_id` safely.
+- [Query Languages](query-languages.md): tell `sqry query` apart from `sqry plan-query` / MCP `sqry_query`.
+- [Repository Overview](overview.md): one-shot orientation with `sqry overview` and MCP `generate_overview`.
+- [Rules](rules.md): run shipped or workspace declarative rules with `sqry rules` and MCP `rules_run`.
+- [Context Propagation](context-propagation.md): find Go `context.Context` plumbing breaks.
+- [Doctor](doctor.md): diagnose stable vs dev channel mix-ups.
 - [Advanced Analysis](advanced-analysis.md): use graph predicates, `resolved_via`, `returns`, context propagation, semantic diff, impact, and visualization.
 - [Structural Shape Matching](shape-match.md): find functions by identifier-blind body shape with `shape-match`, `diff --structural`, the `shape~=` predicate, and the `structural_similar` MCP tool.
 - [Visualization](visualization.md): render relationship graphs in Mermaid, DOT, and D2.
@@ -19,6 +24,7 @@ This guide covers the stable public workflows for local semantic code search.
 
 ```bash
 sqry index .
+sqry overview
 sqry query "kind:function AND visibility:public"
 sqry graph direct-callers authenticate
 sqry visualize "callers:authenticate" --format mermaid
@@ -28,7 +34,7 @@ For installation and a shorter command tour, start with [Quick Start](../../QUIC
 
 ## Current Graph Model
 
-sqry writes the current unified graph snapshot format and loads older supported formats through upconversion where available. Binding-plane name-resolution support was introduced historically in V9; current releases write the current format rather than a V9 snapshot.
+sqry writes snapshot format V17 and loads older supported formats through upconversion where available. Binding-plane name-resolution support was introduced historically in V9. V16 added definition-signal bits; V17 added import-classification signal.
 
 Use a forced rebuild after upgrading across releases that change graph semantics:
 

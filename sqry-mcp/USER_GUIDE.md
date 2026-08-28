@@ -1,6 +1,6 @@
 # sqry MCP User Guide
 
-**Version**: 30.0.0
+**Version**: 30.0.1
 
 This guide is the component-level MCP reference. For the public workflow overview, see [docs/user-guide/mcp.md](../docs/user-guide/mcp.md).
 
@@ -28,7 +28,7 @@ sqry-mcp --list-tools
 
 MCP clients can call `tools/list`. sqry MCP resources expose `sqry://meta/manifest`, `sqry://docs/tool-guide`, and `sqry://docs/capability-map`.
 
-Standalone `sqry-mcp` currently exposes 37 tools. Daemon-hosted MCP exposes a 16-tool subset.
+Standalone `sqry-mcp` currently exposes 39 tools. Daemon-hosted MCP exposes a 17-tool subset.
 
 ## Common Tools
 
@@ -41,6 +41,7 @@ Representative standalone tools include:
 - `find_cycles`, `find_duplicates`, `find_unused`, `complexity_metrics`
 - `export_graph`, `cross_language_edges`, `context_propagation`
 - `workspace_status`, `get_index_status`, `get_graph_stats`
+- `generate_overview`, `structural_similar`, `rules_run`
 - `sqry_query`
 
 The exact catalog is the live discovery output.

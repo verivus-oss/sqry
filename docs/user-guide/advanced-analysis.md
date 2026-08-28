@@ -62,6 +62,21 @@ For MCP `list_symbols`, use the structured parameter instead of a query predicat
 
 Snapshots before V16 do not carry trustworthy definition signal. When a pre-V16 graph is loaded, definition-only query predicates and `list_symbols.items_only` return a `reindexRequired` / reindex-required advisory instead of silently evaluating stale default-false marker data. Rebuild with `sqry index --force .`.
 
+## Go Error Chains And C Indirect Calls
+
+Planner text (`sqry plan-query` / MCP `sqry_query`) accepts:
+
+```bash
+sqry plan-query "kind:function wraps"
+sqry plan-query "kind:function wraps:errors_is"
+sqry plan-query "kind:function address_taken:true"
+sqry plan-query "kind:function callsite_promiscuous:true"
+```
+
+`wraps` walks Go `Wraps` edges (`fmt.Errorf("%w")`, `errors.Is` / `As` / `Join`). It is not followed by ordinary callers/callees traversal. C `address_taken` and `callsite_promiscuous` are populated by the C plugin; on other languages they evaluate to false.
+
+See [Query Languages](query-languages.md) and [Context Propagation](context-propagation.md).
+
 ## Context Propagation
 
 Go context propagation analysis detects call sites where `context.Context` is available but not threaded into ctx-accepting callees.
@@ -102,4 +117,4 @@ The relation query is positional. The old `--relation`/`--symbol` form is not th
 
 ## Snapshot Wording
 
-Binding-plane support was introduced historically in V9. Current releases write the current snapshot format, and the current writer format is V16. Avoid using historical format names as shorthand for current graph behavior.
+Binding-plane support was introduced historically in V9. Current releases write snapshot format V17. V16 added trustworthy definition-signal bits (`items:true` / `is_definition:true` / `list_symbols.items_only`). V17 added import-classification signal. Older snapshots upconvert inline on load; use `sqry index --force .` after upgrades that change graph semantics. Avoid using historical format names as shorthand for current graph behavior.

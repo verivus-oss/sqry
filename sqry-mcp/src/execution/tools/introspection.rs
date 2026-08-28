@@ -30,13 +30,28 @@ fn resolve_workspace_path(path: &str) -> anyhow::Result<Option<PathBuf>> {
     crate::execution::workspace_scope::resolve_workspace_selector_enforced(path)
 }
 /// Check if a file's language matches the filter.
-fn matches_language_filter(language: Option<&str>, filter: &str) -> bool {
-    let filter_lower = filter.to_lowercase();
-    if let Some(lang) = language {
-        lang.to_lowercase().contains(&filter_lower)
-    } else {
-        false
+fn matches_language_filter(
+    language: Option<sqry_core::graph::node::Language>,
+    filter: &str,
+) -> bool {
+    use sqry_core::graph::node::Language;
+
+    let Some(lang) = language else {
+        return false;
+    };
+
+    // Exact language match first, so `typescript` and `ts` both select
+    // TypeScript files. Before issue #714 this compared the filter against
+    // `Language::Display`, so `list_files language:typescript` matched
+    // nothing while `language:ts` worked.
+    if let Some(requested) = Language::from_id(filter) {
+        return requested == lang;
     }
+
+    // Anything that is not a recognized language stays a substring match
+    // against the canonical name, which keeps loose filters like `script`
+    // (matching javascript and typescript) working.
+    lang.canonical_name().contains(&filter.to_lowercase())
 }
 
 /// Collect filtered files with pagination.
@@ -54,7 +69,7 @@ fn collect_filtered_files(
 
         // Apply language filter if specified
         if let Some(ref filter_lang) = args.language
-            && !matches_language_filter(language.as_deref(), filter_lang)
+            && !matches_language_filter(lang_opt, filter_lang)
         {
             continue;
         }
@@ -1305,6 +1320,7 @@ pub(crate) mod inner {
 mod tests {
     use super::*;
     use crate::execution::types::ComplexityMetricData;
+    use sqry_core::graph::node::Language;
     use sqry_core::graph::unified::concurrent::CodeGraph;
     use sqry_core::graph::unified::node::NodeKind;
     use sqry_core::graph::unified::storage::arena::NodeEntry;
@@ -1598,17 +1614,38 @@ mod tests {
 
     #[test]
     fn matches_language_filter_exact_match() {
-        assert!(matches_language_filter(Some("Rust"), "rust"));
+        assert!(matches_language_filter(Some(Language::Rust), "rust"));
     }
 
     #[test]
     fn matches_language_filter_partial_match() {
-        assert!(matches_language_filter(Some("TypeScript"), "script"));
+        // Substring fallback runs against the canonical name, so `script`
+        // still selects both scripting languages.
+        assert!(matches_language_filter(
+            Some(Language::TypeScript),
+            "script"
+        ));
+        assert!(matches_language_filter(
+            Some(Language::JavaScript),
+            "script"
+        ));
+    }
+
+    #[test]
+    fn matches_language_filter_accepts_canonical_and_alias() {
+        // Issue #714: the canonical spelling used to match nothing here
+        // because the comparison ran against `Language::Display` (`ts`).
+        for spelling in ["typescript", "ts", "TypeScript", "  TS  "] {
+            assert!(
+                matches_language_filter(Some(Language::TypeScript), spelling),
+                "list_files should accept {spelling}"
+            );
+        }
     }
 
     #[test]
     fn matches_language_filter_no_match() {
-        assert!(!matches_language_filter(Some("Python"), "rust"));
+        assert!(!matches_language_filter(Some(Language::Python), "rust"));
     }
 
     #[test]

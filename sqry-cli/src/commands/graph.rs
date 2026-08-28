@@ -3517,44 +3517,9 @@ fn parse_language_filter(languages: Option<&str>) -> Result<Vec<Language>> {
 }
 
 fn parse_language(s: &str) -> Result<Language> {
-    match s.to_lowercase().as_str() {
-        // Phase 0 languages
-        "javascript" | "js" => Ok(Language::JavaScript),
-        "typescript" | "ts" => Ok(Language::TypeScript),
-        "python" | "py" => Ok(Language::Python),
-        "cpp" | "c++" | "cxx" => Ok(Language::Cpp),
-        // Phase 1 languages
-        "rust" | "rs" => Ok(Language::Rust),
-        "go" => Ok(Language::Go),
-        "java" => Ok(Language::Java),
-        "c" => Ok(Language::C),
-        "csharp" | "cs" => Ok(Language::CSharp),
-        // Phase 2 languages
-        "ruby" => Ok(Language::Ruby),
-        "php" => Ok(Language::Php),
-        "swift" => Ok(Language::Swift),
-        // Phase 3 languages
-        "kotlin" => Ok(Language::Kotlin),
-        "scala" => Ok(Language::Scala),
-        "sql" => Ok(Language::Sql),
-        "dart" => Ok(Language::Dart),
-        // Phase 5A languages
-        "lua" => Ok(Language::Lua),
-        "perl" => Ok(Language::Perl),
-        "shell" | "bash" => Ok(Language::Shell),
-        "groovy" => Ok(Language::Groovy),
-        // Phase 5B languages
-        "elixir" | "ex" => Ok(Language::Elixir),
-        "r" => Ok(Language::R),
-        // Phase 5C languages
-        "haskell" | "hs" => Ok(Language::Haskell),
-        "svelte" => Ok(Language::Svelte),
-        "vue" => Ok(Language::Vue),
-        "zig" => Ok(Language::Zig),
-        // Other
-        "http" => Ok(Language::Http),
-        _ => bail!("Unknown language: {s}"),
-    }
+    // Routes through the one central parser rather than a local table, so the
+    // CLI accepts exactly the spellings every other surface accepts (#714).
+    Language::from_id(s).ok_or_else(|| anyhow::anyhow!("Unknown language: {s}"))
 }
 
 // ===== Direct Callers/Callees =====

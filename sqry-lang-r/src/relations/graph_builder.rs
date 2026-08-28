@@ -426,7 +426,7 @@ fn is_trivia(kind: &str) -> bool {
 
 /// Convert a tree-sitter node to a Span
 fn span_from_node(node: Node<'_>) -> Span {
-    Span::from_bytes(node.start_byte(), node.end_byte())
+    Span::from_node(&node)
 }
 
 /// Convert tree-sitter Points to a Span

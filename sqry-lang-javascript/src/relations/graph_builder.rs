@@ -77,7 +77,7 @@ impl GraphBuilder for JavaScriptGraphBuilder {
 
         // Create function/method nodes for all callables
         for context in ast_graph.contexts() {
-            let span = Some(Span::from_bytes(context.span.0, context.span.1));
+            let span = Some(context.decl_span);
             // Infer visibility from naming convention: leading underscore = private
             let visibility = infer_visibility(&context.qualified_name);
 
@@ -336,7 +336,8 @@ fn build_call_edge_with_helper(
         // Create synthetic module-level context for top-level calls
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            span: (0, content.len()),
+            // Whole-file synthetic context: start of file is the honest position.
+            decl_span: Span::default(),
             is_async: false,
         };
         &module_context
@@ -415,7 +416,7 @@ fn build_http_request_edge(
         return false;
     };
 
-    let caller_id = get_caller_node_id(ast_graph, call_node, content, helper);
+    let caller_id = get_caller_node_id(ast_graph, call_node, helper);
     let target_name = info.url.as_ref().map_or_else(
         || format!("http::{}", info.method.as_str()),
         |url| format!("http::{url}"),
@@ -690,7 +691,8 @@ fn build_constructor_edge_with_helper(
     } else {
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            span: (0, content.len()),
+            // Whole-file synthetic context: start of file is the honest position.
+            decl_span: Span::default(),
             is_async: false,
         };
         &module_context
@@ -1295,7 +1297,8 @@ fn extract_string_literal(node: &Node, content: &[u8]) -> Option<String> {
 #[derive(Debug, Clone)]
 pub struct CallContext {
     pub qualified_name: String,
-    pub span: (usize, usize),
+    /// Real line/column span of the declaration.
+    pub decl_span: Span,
     pub is_async: bool,
 }
 
@@ -1388,8 +1391,6 @@ impl<'a> ASTGraphBuilder<'a> {
 
         let new_callable = if let Some(name) = callable_name {
             // This is a callable - create context
-            let start = node.start_byte();
-            let end = node.end_byte();
             let is_async = is_async_function(node, self.content);
 
             let qualified_name = if self.current_scope.is_empty() {
@@ -1404,7 +1405,7 @@ impl<'a> ASTGraphBuilder<'a> {
 
             let context = CallContext {
                 qualified_name,
-                span: (start, end),
+                decl_span: Span::from_node(&node),
                 is_async,
             };
 
@@ -2360,7 +2361,6 @@ fn build_ffi_new_edge(
         return Ok(build_webassembly_constructor_edge(
             ast_graph,
             new_node,
-            content,
             constructor_text,
             helper,
         ));
@@ -2393,7 +2393,7 @@ fn build_webassembly_call_edge(
     }
 
     // Get caller context
-    let caller_id = get_caller_node_id(ast_graph, call_node, content, helper);
+    let caller_id = get_caller_node_id(ast_graph, call_node, helper);
 
     // Try to extract module path from arguments (if it's a fetch() call or string literal)
     let wasm_module_name = extract_wasm_module_name(call_node, content)
@@ -2412,12 +2412,11 @@ fn build_webassembly_call_edge(
 fn build_webassembly_constructor_edge(
     ast_graph: &ASTGraph,
     new_node: Node<'_>,
-    content: &[u8],
     constructor_text: &str,
     helper: &mut GraphBuildHelper,
 ) -> bool {
     // Get caller context
-    let caller_id = get_caller_node_id(ast_graph, new_node, content, helper);
+    let caller_id = get_caller_node_id(ast_graph, new_node, helper);
 
     // Determine module name
     let type_name = constructor_text
@@ -2488,7 +2487,7 @@ fn build_require_ffi_edge(
 
     if is_native_addon {
         // Get caller context
-        let caller_id = get_caller_node_id(ast_graph, call_node, content, helper);
+        let caller_id = get_caller_node_id(ast_graph, call_node, helper);
 
         // Create FFI target node
         let ffi_name = format!("native::{}", simple_name(&path));
@@ -2509,7 +2508,7 @@ fn build_dlopen_edge(
     helper: &mut GraphBuildHelper,
 ) -> bool {
     // Get caller context
-    let caller_id = get_caller_node_id(ast_graph, call_node, content, helper);
+    let caller_id = get_caller_node_id(ast_graph, call_node, helper);
 
     // Try to extract filename from second argument
     let module_name = call_node
@@ -2539,7 +2538,6 @@ fn build_dlopen_edge(
 fn get_caller_node_id(
     ast_graph: &ASTGraph,
     node: Node<'_>,
-    content: &[u8],
     helper: &mut GraphBuildHelper,
 ) -> sqry_core::graph::unified::NodeId {
     let module_context;
@@ -2548,7 +2546,8 @@ fn get_caller_node_id(
     } else {
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            span: (0, content.len()),
+            // Whole-file synthetic context: start of file is the honest position.
+            decl_span: Span::default(),
             is_async: false,
         };
         &module_context
@@ -2561,7 +2560,7 @@ fn ensure_caller_node(
     helper: &mut GraphBuildHelper,
     call_context: &CallContext,
 ) -> sqry_core::graph::unified::NodeId {
-    let caller_span = Some(Span::from_bytes(call_context.span.0, call_context.span.1));
+    let caller_span = Some(call_context.decl_span);
     let qualified_name = call_context.qualified_name();
     if qualified_name.contains('.') {
         helper.ensure_method(qualified_name, caller_span, call_context.is_async, false)

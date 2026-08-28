@@ -846,7 +846,7 @@ fn add_reference_edge(
     target_id: NodeId,
     helper: &mut GraphBuildHelper,
 ) {
-    let usage_span = Span::from_bytes(usage_node.start_byte(), usage_node.end_byte());
+    let usage_span = Span::from_node(&usage_node);
     let usage_id = helper.add_node(
         &format!("{identifier}@{}", usage_node.start_byte()),
         Some(usage_span),

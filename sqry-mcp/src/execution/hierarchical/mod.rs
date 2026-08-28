@@ -482,15 +482,12 @@ fn matches_language_node(
         return false;
     };
 
-    let lang = snapshot.files().language_for_file(entry.file).map_or_else(
-        || "unknown".to_string(),
-        |l| l.to_string().to_ascii_lowercase(),
-    );
+    let actual = snapshot.files().language_for_file(entry.file);
 
     args.filters
         .languages
         .iter()
-        .any(|l| l.eq_ignore_ascii_case(&lang))
+        .any(|candidate| crate::execution::symbol_utils::language_filter_selects(actual, candidate))
 }
 
 fn matches_kind_node(

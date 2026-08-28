@@ -816,7 +816,7 @@ pub(crate) fn handle_identifier_for_reference(
     let usage_byte = node.start_byte();
     match scope_tree.resolve_identifier(usage_byte, name) {
         ResolutionOutcome::Local(binding) => {
-            let span = Span::from_bytes(node.start_byte(), node.end_byte());
+            let span = Span::from_node(&node);
             let qualified_name = format!("{}@{}", name, binding.decl_start_byte);
             let var_id = helper.add_variable(&qualified_name, Some(span));
 

@@ -88,7 +88,7 @@ impl GraphBuilder for PhpGraphBuilder {
         // Phase 1: Create function/method/class nodes
         for context in ast_graph.contexts() {
             let qualified_name = &context.qualified_name;
-            let span = Span::from_bytes(context.span.0, context.span.1);
+            let span = context.decl_span;
 
             let node_id = match &context.kind {
                 ContextKind::Function { is_async } => helper.add_function_with_signature(
@@ -179,7 +179,9 @@ enum ContextKind {
 #[derive(Debug, Clone)]
 struct CallContext {
     qualified_name: String,
-    span: (usize, usize),
+    /// Real line/column span of the declaration; the byte tuple above cannot
+    /// be resolved to one without the file content.
+    decl_span: Span,
     kind: ContextKind,
     class_name: Option<String>,
     return_type: Option<String>,
@@ -414,7 +416,7 @@ fn walk_ast(
             let _context_idx = ctx.contexts.len();
             ctx.contexts.push(CallContext {
                 qualified_name: qualified_class.clone(),
-                span: (node.start_byte(), node.end_byte()),
+                decl_span: Span::from_node(&node),
                 kind: ContextKind::Class,
                 class_name: Some(qualified_class),
                 return_type: None, // Classes don't have return types
@@ -492,7 +494,7 @@ fn walk_ast(
             let context_idx = ctx.contexts.len();
             ctx.contexts.push(CallContext {
                 qualified_name: qualified_func.clone(),
-                span: (node.start_byte(), node.end_byte()),
+                decl_span: Span::from_node(&node),
                 kind,
                 class_name,
                 return_type,

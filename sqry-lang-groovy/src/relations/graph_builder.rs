@@ -45,6 +45,8 @@ struct CallableContext {
     qualified_name: String,
     /// Byte range in source file
     byte_range: Range<usize>,
+    /// Real line/column span of the declaration; byte_range above is offsets.
+    decl_span: Span,
 }
 
 impl CallableContext {
@@ -87,10 +89,7 @@ impl GraphBuilder for GroovyGraphBuilder {
 
         // Create class/interface nodes
         for context in &class_contexts {
-            let span = Some(Span::from_bytes(
-                context.byte_range.start,
-                context.byte_range.end,
-            ));
+            let span = Some(context.decl_span);
             // Use add_interface for interface declarations, add_class for classes
             let node_id = if interface_names.contains(&context.qualified_name) {
                 helper.add_interface(&context.qualified_name, span)
@@ -104,10 +103,7 @@ impl GraphBuilder for GroovyGraphBuilder {
 
         // Create callable nodes
         for context in &callable_contexts {
-            let span = Some(Span::from_bytes(
-                context.byte_range.start,
-                context.byte_range.end,
-            ));
+            let span = Some(context.decl_span);
             let node_id = helper.add_function(&context.qualified_name, span, false, false);
             // issue #394: real declaration; opt dual-use bare helper into is_definition
             helper.mark_definition(node_id);
@@ -234,6 +230,7 @@ fn extract_classes_and_interfaces(
             class_contexts.push(CallableContext {
                 qualified_name: name,
                 byte_range: node.start_byte()..node.end_byte(),
+                decl_span: Span::from_node(&node),
             });
         }
     }
@@ -290,6 +287,7 @@ fn extract_callables_recursive(
                 contexts.push(CallableContext {
                     qualified_name,
                     byte_range: node.start_byte()..node.end_byte(),
+                    decl_span: Span::from_node(&node),
                 });
             }
         }
@@ -304,6 +302,7 @@ fn extract_callables_recursive(
                 contexts.push(CallableContext {
                     qualified_name,
                     byte_range: node.start_byte()..node.end_byte(),
+                    decl_span: Span::from_node(&node),
                 });
             }
         }
@@ -318,6 +317,7 @@ fn extract_callables_recursive(
                 contexts.push(CallableContext {
                     qualified_name,
                     byte_range: node.start_byte()..node.end_byte(),
+                    decl_span: Span::from_node(&node),
                 });
             }
         }
@@ -334,6 +334,7 @@ fn extract_callables_recursive(
                 contexts.push(CallableContext {
                     qualified_name,
                     byte_range: node.start_byte()..node.end_byte(),
+                    decl_span: Span::from_node(&node),
                 });
             }
         }
@@ -1363,7 +1364,7 @@ fn visit_node_for_calls(
                             context_to_node.get(&callee_name),
                         ) {
                             let argument_count = count_call_arguments(node);
-                            let call_span = Span::from_bytes(node.start_byte(), node.end_byte());
+                            let call_span = Span::from_node(&node);
                             helper.add_call_edge_full_with_span(
                                 caller_id,
                                 callee_id,

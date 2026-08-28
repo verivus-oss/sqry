@@ -601,7 +601,7 @@ fn normalize_protocol_relative(url: &str) -> String {
 
 /// Create span from tree-sitter node
 fn span_from_node(node: Node<'_>) -> Span {
-    Span::from_bytes(node.start_byte(), node.end_byte())
+    Span::from_node(&node)
 }
 
 #[cfg(test)]

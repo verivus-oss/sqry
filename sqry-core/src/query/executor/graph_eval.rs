@@ -876,54 +876,6 @@ fn match_path(
 // Language predicate (from FILE REGISTRY, not NodeEntry)
 // ============================================================================
 
-/// Convert Language enum to canonical string for parity with legacy index.
-///
-/// Legacy index uses canonical names like "javascript", "typescript", etc.
-/// `Language::Display` uses short forms like "js", "ts".
-/// This function provides the canonical mapping for query parity.
-fn language_to_canonical(lang: crate::graph::node::Language) -> &'static str {
-    use crate::graph::node::Language;
-    match lang {
-        Language::C => "c",
-        Language::Cpp => "cpp",
-        Language::CSharp => "csharp",
-        Language::Css => "css",
-        Language::JavaScript => "javascript",
-        Language::Python => "python",
-        Language::TypeScript => "typescript",
-        Language::Rust => "rust",
-        Language::Go => "go",
-        Language::Java => "java",
-        Language::Ruby => "ruby",
-        Language::Php => "php",
-        Language::Swift => "swift",
-        Language::Kotlin => "kotlin",
-        Language::Scala => "scala",
-        Language::Sql => "sql",
-        Language::Dart => "dart",
-        Language::Lua => "lua",
-        Language::Perl => "perl",
-        Language::Shell => "shell",
-        Language::Groovy => "groovy",
-        Language::Elixir => "elixir",
-        Language::R => "r",
-        Language::Haskell => "haskell",
-        Language::Html => "html",
-        Language::Svelte => "svelte",
-        Language::Vue => "vue",
-        Language::Zig => "zig",
-        Language::Terraform => "terraform",
-        Language::Puppet => "puppet",
-        Language::Pulumi => "pulumi",
-        Language::Http => "http",
-        Language::Plsql => "plsql",
-        Language::Apex => "apex",
-        Language::Abap => "abap",
-        Language::ServiceNow => "servicenow",
-        Language::Json => "json",
-    }
-}
-
 fn match_lang(
     ctx: &GraphEvalContext,
     entry: &NodeEntry,
@@ -935,19 +887,25 @@ fn match_lang(
         return false;
     };
 
-    // Use canonical language names for parity with legacy index
-    let actual = language_to_canonical(lang);
-
-    // Support both equality and regex operators
     match (operator, value) {
-        (Operator::Equal, Value::String(expected)) => actual == expected,
+        // Compare parsed languages rather than strings, so every accepted
+        // spelling (`typescript`, `ts`, `TS`) resolves to the same language.
+        // `Validator::normalize_condition` already canonicalizes the value,
+        // so this is the second line of defence for callers that build a
+        // condition directly (issue #714).
+        (Operator::Equal, Value::String(expected)) => {
+            crate::graph::node::Language::from_id(expected) == Some(lang)
+        }
+        // Regex matches the canonical name only. Running the pattern over
+        // every alias would make `lang~=/^ts$/` depend on the alias
+        // inventory, so aliases stay an equality convenience.
         (Operator::Regex, Value::Regex(rv)) => get_or_compile_regex(
             &rv.pattern,
             rv.flags.case_insensitive,
             rv.flags.multiline,
             rv.flags.dot_all,
         )
-        .map(|re| regex_is_match(&re, actual))
+        .map(|re| regex_is_match(&re, lang.canonical_name()))
         .unwrap_or(false),
         _ => false,
     }

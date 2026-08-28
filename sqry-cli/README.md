@@ -1,6 +1,6 @@
 # sqry CLI
 
-**Version**: 30.0.0
+**Version**: 30.0.1
 **Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
 `sqry` is the command-line interface for local semantic code search.
@@ -48,12 +48,13 @@ sqry graph trace-path main handle_request
 | --- | --- |
 | Search | `search`, top-level pattern shorthand, `hier`, `similar`, `explain` |
 | Structural query | `query`, `plan-query` |
-| Graph analysis | `graph`, `cycles`, `unused`, `duplicates`, `impact`, `diff`, `subgraph`, `visualize`, `export` |
+| Graph analysis | `graph`, `cycles`, `unused`, `duplicates`, `impact`, `diff`, `subgraph`, `visualize`, `export`, `overview`, `shape-match` |
+| Rules and language analysis | `rules`, `context-propagation` |
 | Index lifecycle | `index`, `update`, `watch`, `analyze`, `repair`, `cache` |
 | Workspace | `workspace init`, `workspace scan`, `workspace add`, `workspace remove`, `workspace query`, `workspace stats`, `workspace status`, `workspace clean` |
-| Daemon | `daemon start`, `daemon stop`, `daemon status`, `daemon logs`, `daemon load`, `daemon rebuild`, `daemon reset` |
+| Daemon | `daemon start`, `daemon stop`, `daemon status`, `daemon logs`, `daemon load`, `daemon load-revision`, `daemon list-revisions`, `daemon revision-status`, `daemon unload-revision`, `daemon prune-revisions`, `daemon rebuild`, `daemon reset` |
 | Integrations | `lsp`, `mcp setup`, `completions`, `shell`, `batch` |
-| Local state | `config`, `alias`, `history`, `insights`, `troubleshoot` |
+| Local state | `config`, `alias`, `history`, `insights`, `troubleshoot`, `doctor` |
 
 Use `sqry <command> --help` for the authoritative CLI syntax in your installed binary.
 
@@ -86,7 +87,8 @@ Workspace commands:
 sqry workspace init .
 sqry workspace scan .
 sqry workspace status . --json
-sqry workspace clean . --dry-run
+sqry workspace clean .
+sqry workspace clean . --apply
 ```
 
 Daemon commands:

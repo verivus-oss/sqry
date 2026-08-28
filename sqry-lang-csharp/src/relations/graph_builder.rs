@@ -893,7 +893,7 @@ fn process_invocation(
         .or_insert_with(|| helper.add_function(&callee_qualified, None, false, false));
 
     let argument_count = count_call_arguments(node);
-    let call_span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let call_span = Span::from_node(&node);
     helper.add_call_edge_full_with_span(
         caller_function_id,
         target_function_id,
@@ -937,7 +937,7 @@ fn process_object_creation(
         .or_insert_with(|| helper.add_method(&callee_qualified, None, false, false));
 
     let argument_count = count_call_arguments(node);
-    let call_span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let call_span = Span::from_node(&node);
     helper.add_call_edge_full_with_span(
         caller_function_id,
         target_function_id,
@@ -1052,7 +1052,7 @@ fn process_using_directive(node: Node, content: &[u8], helper: &mut GraphBuildHe
     let module_id = helper.add_module("<file>", None);
 
     // Create import node for the imported namespace/type
-    let span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let span = Span::from_node(&node);
     let import_name = if is_static {
         format!("static {imported_name}")
     } else {
@@ -1446,8 +1446,7 @@ fn process_class_member_exports(
                             && let Ok(field_name) = name_node.utf8_text(content)
                         {
                             let qualified_name = format!("{class_qualified_name}.{field_name}");
-                            let span =
-                                Span::from_bytes(field_child.start_byte(), field_child.end_byte());
+                            let span = Span::from_node(&field_child);
 
                             let field_id = if emit_constant {
                                 helper.add_constant_with_static_and_visibility(
@@ -1470,7 +1469,7 @@ fn process_class_member_exports(
                         {
                             // Property name is directly an identifier
                             let qualified_name = format!("{class_qualified_name}.{prop_name}");
-                            let span = Span::from_bytes(child.start_byte(), child.end_byte());
+                            let span = Span::from_node(&child);
 
                             let prop_id = if emit_constant {
                                 helper.add_constant_with_static_and_visibility(
@@ -1604,7 +1603,7 @@ fn process_pinvoke_method(
     };
 
     // Get or create method node (caller - the C# method declaration)
-    let method_span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let method_span = Span::from_node(&node);
     let method_id = *node_map
         .entry(qualified_method.clone())
         .or_insert_with(|| helper.add_method(&qualified_method, Some(method_span), false, true));
@@ -1777,7 +1776,7 @@ fn process_local_variables(
             && let Some(name_node) = child.child_by_field_name("name")
             && let Ok(var_name) = name_node.utf8_text(content)
         {
-            let span = Span::from_bytes(child.start_byte(), child.end_byte());
+            let span = Span::from_node(&child);
 
             // Create variable node
             let var_id = helper.add_variable(var_name, Some(span));
@@ -1866,7 +1865,7 @@ fn process_field_declaration(
                 format!("{class_name}.{field_name}")
             };
 
-            let span = Span::from_bytes(child.start_byte(), child.end_byte());
+            let span = Span::from_node(&child);
 
             // Branch on `readonly` / `const` / `static` modifiers (REQ:R0001,
             // R0003, R0004, R0005, R0018, R0019). C# semantics:
@@ -1975,7 +1974,7 @@ fn process_property_declaration(
         format!("{class_name}.{prop_name}")
     };
 
-    let span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let span = Span::from_node(&node);
 
     // Branch on modifiers + accessor shape (REQ:R0001, R0003, R0004, R0005,
     // R0018, R0019). C# property semantics:
@@ -2192,7 +2191,7 @@ fn process_method_parameters(
             let all_type_names = extract_all_type_names_from_annotation(type_node, content);
 
             // Create parameter variable node
-            let param_span = Span::from_bytes(child.start_byte(), child.end_byte());
+            let param_span = Span::from_node(&child);
             let param_id = helper.add_variable(param_name, Some(param_span));
             helper.mark_definition(param_id);
 
@@ -2263,7 +2262,7 @@ fn process_method_return_type(
     let all_type_names = extract_all_type_names_from_annotation(return_type_node, content);
 
     // Get or find the method node ID
-    let method_span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let method_span = Span::from_node(&node);
     let method_id = helper.add_method(method_name, Some(method_span), false, false);
     helper.mark_definition(method_id);
 
@@ -2364,7 +2363,7 @@ fn process_type_parameter_declarations(
         };
 
         let qualified_param = format!("{parent_qualified_name}.{param_name}");
-        let span = Span::from_bytes(name_node.start_byte(), name_node.end_byte());
+        let span = Span::from_node(&name_node);
         // AC-2: span anchored on the parameter identifier so
         // "Find Definition" / hover navigation lands on the declaration
         // site rather than the synthetic `(0, 0)` sentinel.

@@ -19,7 +19,7 @@ use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{FfiConvention, GraphBuildHelper, StagingGraph};
-use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
+use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use std::{
     collections::{HashMap, HashSet},
     path::{Path, PathBuf},
@@ -103,21 +103,6 @@ impl BuildBudget {
             });
         }
         Ok(())
-    }
-}
-
-// Helper extension trait for Span creation
-#[allow(dead_code)] // Reserved for future span-based analysis
-trait SpanExt {
-    fn from_node(node: &tree_sitter::Node) -> Self;
-}
-
-impl SpanExt for Span {
-    fn from_node(node: &tree_sitter::Node) -> Self {
-        Span::new(
-            Position::new(node.start_position().row, node.start_position().column),
-            Position::new(node.end_position().row, node.end_position().column),
-        )
     }
 }
 

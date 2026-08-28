@@ -1581,7 +1581,7 @@ fn extract_call_target(node: Node, content: &[u8]) -> GraphResult<String> {
             node.utf8_text(content)
                 .map(std::string::ToString::to_string)
                 .map_err(|_| GraphBuilderError::ParseError {
-                    span: Span::from_bytes(node.start_byte(), node.end_byte()),
+                    span: Span::from_node(&node),
                     reason: "Invalid UTF-8 in identifier".to_string(),
                 })
         }
@@ -1593,7 +1593,7 @@ fn extract_call_target(node: Node, content: &[u8]) -> GraphResult<String> {
                 return Ok(field_name.to_string());
             }
             Err(GraphBuilderError::ParseError {
-                span: Span::from_bytes(node.start_byte(), node.end_byte()),
+                span: Span::from_node(&node),
                 reason: "Failed to parse field_expression".to_string(),
             })
         }
@@ -1604,7 +1604,7 @@ fn extract_call_target(node: Node, content: &[u8]) -> GraphResult<String> {
                 return extract_call_target(arg, content);
             }
             Err(GraphBuilderError::ParseError {
-                span: Span::from_bytes(node.start_byte(), node.end_byte()),
+                span: Span::from_node(&node),
                 reason: "Failed to parse pointer_expression".to_string(),
             })
         }
@@ -1613,7 +1613,7 @@ fn extract_call_target(node: Node, content: &[u8]) -> GraphResult<String> {
             node.utf8_text(content)
                 .map(std::string::ToString::to_string)
                 .map_err(|_| GraphBuilderError::ParseError {
-                    span: Span::from_bytes(node.start_byte(), node.end_byte()),
+                    span: Span::from_node(&node),
                     reason: format!("Unknown call target kind: {}", node.kind()),
                 })
         }

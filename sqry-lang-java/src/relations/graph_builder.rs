@@ -74,7 +74,7 @@ impl GraphBuilder for JavaGraphBuilder {
         // Phase 1: Create method/constructor nodes and JNI FFI edges for native methods
         for context in ast_graph.contexts() {
             let qualified_name = context.qualified_name();
-            let span = Span::from_bytes(context.span.0, context.span.1);
+            let span = context.decl_span;
 
             if context.is_constructor {
                 helper.add_method_with_visibility(
@@ -347,8 +347,14 @@ impl ASTGraph {
 struct MethodContext {
     /// Fully qualified name: `com.example.Class.method` or `com.example.Class.<init>`
     qualified_name: String,
-    /// Byte span of the method body
+    /// Byte span of the method body. Byte offsets, used for range work such as
+    /// body resolution; NOT a source position.
     span: (usize, usize),
+    /// Real line/column span of the declaration. Kept separately because the
+    /// byte tuple above cannot be turned into one without the file content,
+    /// and feeding those offsets to Span::from_bytes is what made every Java
+    /// declaration report line 1.
+    decl_span: Span,
     /// Nesting depth (for resolving ambiguity)
     depth: usize,
     /// Whether this is a static method
@@ -543,6 +549,7 @@ fn extract_method_context(
     Some(MethodContext {
         qualified_name,
         span: (method_node.start_byte(), method_node.end_byte()),
+        decl_span: Span::from_node(&method_node),
         depth,
         is_static,
         is_constructor: false,
@@ -568,6 +575,7 @@ fn extract_constructor_context(
     MethodContext {
         qualified_name,
         span: (constructor_node.start_byte(), constructor_node.end_byte()),
+        decl_span: Span::from_node(&constructor_node),
         depth,
         is_static: false,
         is_constructor: true,
@@ -622,7 +630,7 @@ fn walk_tree_for_edges(
                         path
                     };
                 let qualified_name = format!("route::{http_method}::{full_path}");
-                let span = Span::from_bytes(node.start_byte(), node.end_byte());
+                let span = Span::from_node(&node);
                 let endpoint_id = helper.add_endpoint(&qualified_name, Some(span));
 
                 // Link endpoint to the handler method via Contains edge
@@ -701,7 +709,7 @@ fn handle_type_declaration(
         return Ok(());
     };
     let class_name = extract_identifier(name_node, content);
-    let span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let span = Span::from_node(&node);
 
     let package = PackageResolver::package_from_ast(tree, content);
     let class_stack = extract_declaration_class_stack(node, content);
@@ -960,7 +968,7 @@ fn handle_formal_parameter(
 
     // Create qualified parameter name (method::param)
     let qualified_param = format!("{method_name}::{param_name}");
-    let span = Span::from_bytes(param_node.start_byte(), param_node.end_byte());
+    let span = Span::from_node(&param_node);
 
     // Create parameter node
     let param_id = helper.add_node(&qualified_param, Some(span), NodeKind::Parameter);
@@ -1023,7 +1031,7 @@ fn handle_spread_parameter(
 
     // Create qualified parameter name (method::param)
     let qualified_param = format!("{method_name}::{param_name}");
-    let span = Span::from_bytes(param_node.start_byte(), param_node.end_byte());
+    let span = Span::from_node(&param_node);
 
     // Create parameter node
     let param_id = helper.add_node(&qualified_param, Some(span), NodeKind::Parameter);
@@ -1084,7 +1092,7 @@ fn handle_receiver_parameter(
 
     // Create qualified parameter name (method::this)
     let qualified_param = format!("{method_name}::{param_name}");
-    let span = Span::from_bytes(param_node.start_byte(), param_node.end_byte());
+    let span = Span::from_node(&param_node);
 
     // Create parameter node
     let param_id = helper.add_node(&qualified_param, Some(span), NodeKind::Parameter);
@@ -1409,7 +1417,7 @@ fn add_reference_edge_for_target(
     target_id: sqry_core::graph::unified::node::NodeId,
     helper: &mut GraphBuildHelper,
 ) {
-    let usage_span = Span::from_bytes(usage_node.start_byte(), usage_node.end_byte());
+    let usage_span = Span::from_node(&usage_node);
     let usage_id = helper.add_node(
         &format!("{}@{}", identifier_text, usage_node.start_byte()),
         Some(usage_span),
@@ -1461,7 +1469,7 @@ fn add_field_reference(
     ast_graph: &ASTGraph,
     helper: &mut GraphBuildHelper,
 ) {
-    let usage_span = Span::from_bytes(node.start_byte(), node.end_byte());
+    let usage_span = Span::from_node(&node);
     let usage_id = helper.add_node(
         &format!("{}@{}", identifier_text, node.start_byte()),
         Some(usage_span),
@@ -1651,7 +1659,7 @@ fn handle_local_variable_declaration(
             let qualified_var = format!("{}@{}", var_name, name_node.start_byte());
 
             // Create variable node
-            let span = Span::from_bytes(child.start_byte(), child.end_byte());
+            let span = Span::from_node(&child);
             let var_id = helper.add_variable(&qualified_var, Some(span));
             scope_tree.attach_node_id(&var_name, name_node.start_byte(), var_id);
 
@@ -1694,7 +1702,7 @@ fn handle_enhanced_for_declaration(
         .unwrap_or(type_text);
 
     let qualified_var = format!("{}@{}", var_name, name_node.start_byte());
-    let span = Span::from_bytes(name_node.start_byte(), name_node.end_byte());
+    let span = Span::from_node(&name_node);
     let var_id = helper.add_variable(&qualified_var, Some(span));
     scope_tree.attach_node_id(&var_name, body_node.start_byte(), var_id);
 
@@ -1729,7 +1737,7 @@ fn handle_catch_parameter_declaration(
     }
 
     let qualified_var = format!("{}@{}", var_name, name_node.start_byte());
-    let span = Span::from_bytes(param_node.start_byte(), param_node.end_byte());
+    let span = Span::from_node(&param_node);
     let var_id = helper.add_variable(&qualified_var, Some(span));
     scope_tree.attach_node_id(&var_name, name_node.start_byte(), var_id);
 
@@ -1805,7 +1813,7 @@ fn handle_lambda_parameter_declaration(
             return;
         }
         let qualified_param = format!("{lambda_prefix}::{name}");
-        let span = Span::from_bytes(params_node.start_byte(), params_node.end_byte());
+        let span = Span::from_node(&params_node);
         let param_id = helper.add_node(&qualified_param, Some(span), NodeKind::Parameter);
         scope_tree.attach_node_id(&name, params_node.start_byte(), param_id);
         return;
@@ -1820,7 +1828,7 @@ fn handle_lambda_parameter_declaration(
                     continue;
                 }
                 let qualified_param = format!("{lambda_prefix}::{name}");
-                let span = Span::from_bytes(child.start_byte(), child.end_byte());
+                let span = Span::from_node(&child);
                 let param_id = helper.add_node(&qualified_param, Some(span), NodeKind::Parameter);
                 scope_tree.attach_node_id(&name, child.start_byte(), param_id);
             }
@@ -1842,7 +1850,7 @@ fn handle_lambda_parameter_declaration(
                     .cloned()
                     .unwrap_or(type_text);
                 let qualified_param = format!("{lambda_prefix}::{name}");
-                let span = Span::from_bytes(child.start_byte(), child.end_byte());
+                let span = Span::from_node(&child);
                 let param_id = helper.add_node(&qualified_param, Some(span), NodeKind::Parameter);
                 scope_tree.attach_node_id(&name, name_node.start_byte(), param_id);
                 let type_id = helper.add_class(&resolved_type, None);
@@ -1882,7 +1890,7 @@ fn handle_try_with_resources_declaration(
             }
 
             let qualified_var = format!("{}@{}", name, name_node.start_byte());
-            let span = Span::from_bytes(resource.start_byte(), resource.end_byte());
+            let span = Span::from_node(&resource);
             let var_id = helper.add_variable(&qualified_var, Some(span));
             scope_tree.attach_node_id(&name, name_node.start_byte(), var_id);
 
@@ -1917,7 +1925,7 @@ fn handle_instanceof_pattern_declaration(
             continue;
         }
         let qualified_var = format!("{}@{}", name, name_node.start_byte());
-        let span = Span::from_bytes(name_node.start_byte(), name_node.end_byte());
+        let span = Span::from_node(&name_node);
         let var_id = helper.add_variable(&qualified_var, Some(span));
         scope_tree.attach_node_id(&name, name_node.start_byte(), var_id);
 
@@ -1951,7 +1959,7 @@ fn handle_switch_pattern_declaration(
             continue;
         }
         let qualified_var = format!("{}@{}", name, name_node.start_byte());
-        let span = Span::from_bytes(name_node.start_byte(), name_node.end_byte());
+        let span = Span::from_node(&name_node);
         let var_id = helper.add_variable(&qualified_var, Some(span));
         scope_tree.attach_node_id(&name, name_node.start_byte(), var_id);
 
@@ -2019,7 +2027,7 @@ fn handle_compact_constructor_parameters(
             .unwrap_or(type_text);
 
         let qualified_param = format!("{record_name}.<init>::{name}");
-        let span = Span::from_bytes(component.start_byte(), component.end_byte());
+        let span = Span::from_node(&component);
         let param_id = helper.add_node(&qualified_param, Some(span), NodeKind::Parameter);
         scope_tree.attach_node_id(&name, name_node.start_byte(), param_id);
 
@@ -2295,7 +2303,7 @@ fn add_call_edge(
     call_node: Node,
 ) {
     let argument_count = count_call_arguments(call_node);
-    let call_span = Span::from_bytes(call_node.start_byte(), call_node.end_byte());
+    let call_span = Span::from_node(&call_node);
     helper.add_call_edge_full_with_span(
         caller_method_id,
         target_method_id,
@@ -2814,7 +2822,7 @@ fn extract_method_invocation_name(call_node: Node, content: &[u8]) -> GraphResul
         }
 
         Err(GraphBuilderError::ParseError {
-            span: Span::from_bytes(call_node.start_byte(), call_node.end_byte()),
+            span: Span::from_node(&call_node),
             reason: "Method invocation missing name".into(),
         })
     }
@@ -2931,7 +2939,7 @@ fn process_class_member_exports(
                     if should_export && let Some(name_node) = child.child_by_field_name("name") {
                         let method_name = extract_identifier(name_node, content);
                         let qualified_name = format!("{class_qualified_name}.{method_name}");
-                        let span = Span::from_bytes(child.start_byte(), child.end_byte());
+                        let span = Span::from_node(&child);
                         let is_static = has_modifier(child, "static", content);
                         let method_id =
                             helper.add_method(&qualified_name, Some(span), false, is_static);
@@ -2941,7 +2949,7 @@ fn process_class_member_exports(
                 "constructor_declaration" => {
                     if is_public(child, content) {
                         let qualified_name = format!("{class_qualified_name}.<init>");
-                        let span = Span::from_bytes(child.start_byte(), child.end_byte());
+                        let span = Span::from_node(&child);
                         let method_id =
                             helper.add_method(&qualified_name, Some(span), false, false);
                         export_from_file_module(helper, method_id);
@@ -2983,8 +2991,7 @@ fn process_class_member_exports(
                         {
                             let const_name = extract_identifier(name_node, content);
                             let qualified_name = format!("{class_qualified_name}.{const_name}");
-                            let span =
-                                Span::from_bytes(const_child.start_byte(), const_child.end_byte());
+                            let span = Span::from_node(&const_child);
                             let const_id = helper.add_constant(&qualified_name, Some(span));
                             export_from_file_module(helper, const_id);
                         }
@@ -2995,7 +3002,7 @@ fn process_class_member_exports(
                     if let Some(name_node) = child.child_by_field_name("name") {
                         let const_name = extract_identifier(name_node, content);
                         let qualified_name = format!("{class_qualified_name}.{const_name}");
-                        let span = Span::from_bytes(child.start_byte(), child.end_byte());
+                        let span = Span::from_node(&child);
                         let const_id = helper.add_constant(&qualified_name, Some(span));
                         export_from_file_module(helper, const_id);
                     }
@@ -3727,7 +3734,7 @@ fn process_type_parameter_declarations(
         };
 
         let qualified_param = format!("{parent_qualified_name}.{param_name}");
-        let span = Span::from_bytes(name_node.start_byte(), name_node.end_byte());
+        let span = Span::from_node(&name_node);
         // AC-2: `helper.add_type(qualified_name, Some(span_from_node(name_node)))`.
         // Span MUST be `Some(...)` — anchored on the parameter identifier so
         // "Find Definition" / hover navigation lands on the declaration site

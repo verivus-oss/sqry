@@ -15,8 +15,8 @@ The registry records source roots so CLI, MCP, LSP, daemon, and VS Code workflow
 Manual root management:
 
 ```bash
-sqry workspace add /path/to/repo
-sqry workspace remove /path/to/repo
+sqry workspace add . /path/to/repo
+sqry workspace remove . /path/to/repo
 sqry workspace stats .
 sqry workspace query . "kind:function AND lang:rust"
 ```
@@ -56,16 +56,16 @@ change the already loaded revision handle.
 
 ## Cleanup
 
-Preview cleanup first:
+Preview cleanup first. `sqry workspace clean` is a dry-run unless you pass `--apply`:
 
 ```bash
-sqry workspace clean . --dry-run
+sqry workspace clean .
 ```
 
 Then remove stale generated artifacts and rebuild:
 
 ```bash
-sqry workspace clean .
+sqry workspace clean . --apply
 sqry index --force .
 ```
 

@@ -4,8 +4,9 @@ This document defines the canonical types used across all sqry interfaces (CLI, 
 All types are exported from `sqry_core::schema` and should be the single source of truth.
 Graph kinds (`NodeKind`, `EdgeKind`) are defined in `sqry-core/src/graph/unified/` and re-exported from the schema module.
 
-**Version**: 30.0.0
-**Last Updated**: 2026-08-19
+**Version**: 30.0.1
+**Last Updated**: 2026-08-29
+**Snapshot writer**: `SQRY_GRAPH_V17` (older V7–V16 snapshots upconvert inline on load)
 
 ---
 
@@ -67,12 +68,21 @@ Categories of code symbols that can be represented as graph nodes.
 | `resource` | REST/GraphQL resource | API endpoints |
 | `endpoint` | API endpoint handler | Route handlers |
 | `test` | Test function | `#[test] fn test_foo()` |
+| `type_parameter` | Generic type parameter | `T` in `class Foo<T>` |
+| `annotation` | Annotation type or usage | `@Override`, `@RequestMapping` |
+| `annotation_value` | Annotation element value | `value = "/api"` |
+| `lambda_target` | Lambda or method-reference target | `String::toUpperCase` |
+| `java_module` | Java 9+ module | `module-info.java` |
+| `enum_constant` | Enum constant | `MONDAY` in `enum DayOfWeek` |
+| `channel` | Go channel alias-class | target of `ChannelPeer` edges |
 | `other` | Custom/plugin-specific | Extensibility fallback |
+
+There are **35** `NodeKind` variants. `Other` is last (`#[serde(other)]`).
 
 **Helper Methods**:
 - `is_callable()` → `true` for Function, Method, Macro
 - `is_type_definition()` → `true` for Class, Interface, Trait, Struct, Enum, Type
-- `is_container()` → `true` for Class, Interface, Trait, Struct, Module, Enum, StyleRule, StyleAtRule
+- `is_container()` → `true` for Class, Interface, Trait, Struct, Module, Enum, StyleRule, StyleAtRule, JavaModule
 - `is_boundary()` → `true` for Import, Export
 
 ---
@@ -95,7 +105,7 @@ Relationship types between graph nodes.
 
 | Variant | Fields | Description |
 |---------|--------|-------------|
-| `calls` | `argument_count: u8`, `is_async: bool` | Function/method call |
+| `calls` | `argument_count: u8`, `is_async: bool`, `resolved_via: ResolvedVia` | Function/method call |
 | `references` | - | Read access to a symbol |
 | `imports` | `alias: Option<StringId>`, `is_wildcard: bool` | Import statement |
 | `exports` | `kind: ExportKind`, `alias: Option<StringId>` | Export statement |
@@ -139,11 +149,40 @@ Relationship types between graph nodes.
 | `file_ipc` | `path_pattern` | File-based IPC |
 | `protocol_call` | `protocol`, `metadata` | Generic protocol |
 
+**ResolvedVia values** (on `calls`): `direct`, `type_match`, `binding_plane`, `virtual_dispatch`, `interface_dispatch`, `duck_typed`, `structural`, `promiscuous_elided`
+
+#### JVM Classpath Edges
+
+| Variant | Description |
+|---------|-------------|
+| `generic_bound` | Generic type bound (`T extends Comparable<T>`) |
+| `annotated_with` | Symbol annotated with an annotation type |
+| `annotation_param` | Annotation parameter binding |
+| `lambda_captures` | Lambda captures a method-reference target |
+| `module_exports` | Java module exports a package |
+| `module_requires` | Java module requires another module |
+| `module_opens` | Java module opens a package |
+| `module_provides` | Java module provides a service |
+| `type_argument` | Generic type argument (`String` in `List<String>`) |
+| `extension_receiver` | Kotlin extension function receiver |
+| `companion_of` | Kotlin companion object |
+| `sealed_permit` | Kotlin sealed class permits a subclass |
+
+#### Go Analysis Edges
+
+| Variant | Fields | Description |
+|---------|--------|-------------|
+| `wraps` | `kind: WrapKind`, `chain_position: Option<u16>` | Error-wrapping chain. Not walked by callers/callees. Planner predicate `wraps[:kind]`. |
+| `channel_peer` | `direction`, `buffer_kind` | Send / receive / close site to a `Channel` node |
+| `instantiates` | `type_args`, `inference_kind` | Generic call-site instantiation (coexists with `Calls`) |
+
+There are **41** `EdgeKind` variants.
+
 **Helper Methods**:
 - `is_call()` → `true` for Calls, FfiCall, HttpRequest, GrpcCall, WebAssemblyCall
 - `is_structural()` → `true` for Defines, Contains
-- `is_type_relation()` → `true` for Inherits, Implements, TypeOf
-- `is_cross_boundary()` → `true` for all cross-language edges
+- `is_type_relation()` → `true` for Inherits, Implements, TypeOf, GenericBound, TypeArgument, ExtensionReceiver, SealedPermit
+- `is_cross_boundary()` → `true` for FFI / HTTP / gRPC / WASM / DB / MQ / WebSocket / GraphQL / process / file-IPC / protocol edges
 - `is_rust_specific()` → `true` for LifetimeConstraint, TraitMethodBinding, MacroExpansion
 
 ---
@@ -382,7 +421,7 @@ pub struct ProtocolRelationKind(RelationKind);
 
 | Version | Date | Changes |
 |---------|------|---------|
-| 30.0.0 | 2026-06-25 | Document the body-shape descriptor types + snapshot V15 (`ShapeDescriptor`, `CfBucket`, `SHAPE_SCHEMA_VERSION`) |
-| 30.0.0 | 2026-03-10 | Bump schema doc version to match current sqry release |
+| 30.0.1 | 2026-06-25 | Document the body-shape descriptor types + snapshot V15 (`ShapeDescriptor`, `CfBucket`, `SHAPE_SCHEMA_VERSION`) |
+| 30.0.1 | 2026-03-10 | Bump schema doc version to match current sqry release |
 | 4.9.3 | 2026-03-03 | Align version with sqry release, verify accuracy |
 | 2.10.0 | 2026-01-18 | Initial schema module creation |

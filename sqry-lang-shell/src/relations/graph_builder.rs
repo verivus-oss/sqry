@@ -78,7 +78,7 @@ impl GraphBuilder for ShellGraphBuilder {
         // Shell builtins are never defined as function_definition nodes, so they're automatically excluded.
         for context in ast_graph.contexts() {
             let qualified = context.qualified_name();
-            let span = Span::from_bytes(context.span.0, context.span.1);
+            let span = context.decl_span;
             let visibility = extract_visibility(&qualified);
             let function_id = helper.add_function_with_visibility(
                 &qualified,
@@ -258,7 +258,8 @@ fn build_call_edge_for_staging(
         // Script-level call - use module-qualified name as context
         module_context = CallContext {
             qualified_name: module_name.to_string(),
-            span: (0, content.len()),
+            // Whole-file synthetic context: start of file is the honest position.
+            decl_span: Span::default(),
         };
         &module_context
     };
@@ -488,7 +489,7 @@ fn count_arguments(call_node: Node) -> usize {
 
 /// Create Span from tree-sitter Node
 fn span_from_node(node: Node) -> Span {
-    Span::from_bytes(node.start_byte(), node.end_byte())
+    Span::from_node(&node)
 }
 
 /// Extract text from a node
@@ -508,7 +509,9 @@ fn get_node_text(node: Node, content: &[u8]) -> GraphResult<String> {
 #[derive(Debug, Clone)]
 struct CallContext {
     qualified_name: String,
-    span: (usize, usize),
+    /// Real line/column span of the declaration; the byte tuple above cannot
+    /// be resolved to one without the file content.
+    decl_span: Span,
 }
 
 impl CallContext {
@@ -564,7 +567,7 @@ impl ASTGraph {
             let context_idx = contexts.len();
             contexts.push(CallContext {
                 qualified_name: function_name,
-                span: (func_node.start_byte(), func_node.end_byte()),
+                decl_span: Span::from_node(&func_node),
             });
 
             // Map all descendant nodes to this context

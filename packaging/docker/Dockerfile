@@ -18,8 +18,8 @@
 #
 #   docker buildx build \
 #     --platform linux/amd64,linux/arm64 \
-#     --build-arg SQRY_VERSION=28.0.0 \
-#     -t ghcr.io/verivus-oss/sqry-mcp:v28.0.0 \
+#     --build-arg SQRY_VERSION=30.0.0 \
+#     -t ghcr.io/verivus-oss/sqry-mcp:v30.0.0 \
 #     packaging/docker
 #
 # Run it against a host checkout (answers MCP initialize + tools/list):
@@ -39,17 +39,19 @@ RUN apk add --no-cache curl coreutils
 
 WORKDIR /out
 RUN set -eux; \
-    test -n "${SQRY_VERSION}" || { \
-      echo "SQRY_VERSION build-arg is required (e.g. --build-arg SQRY_VERSION=28.0.0)" >&2; \
-      exit 1; \
-    }; \
     # Map the buildx arch token to the release asset arch token.
     case "${TARGETARCH}" in \
       amd64) asset="sqry-mcp-linux-x86_64-musl" ;; \
       arm64) asset="sqry-mcp-linux-arm64-musl" ;; \
       *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
-    base="https://github.com/verivus-oss/sqry/releases/download/v${SQRY_VERSION}"; \
+    # With no SQRY_VERSION the build tracks the newest published release, so a
+    # bare `docker build` (what the Glama build check runs) works unchanged.
+    if [ -n "${SQRY_VERSION:-}" ]; then \
+      base="https://github.com/verivus-oss/sqry/releases/download/v${SQRY_VERSION}"; \
+    else \
+      base="https://github.com/verivus-oss/sqry/releases/latest/download"; \
+    fi; \
     curl -fsSL -o sqry-mcp "${base}/${asset}"; \
     curl -fsSL -o SHA256SUMS.txt "${base}/SHA256SUMS.txt"; \
     # SHA256SUMS.txt lines are "<sha>  <asset-name>"; re-point the checked name

@@ -9,7 +9,7 @@
 use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
-    GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span,
+    GraphBuilder, GraphBuilderError, GraphResult, Language, Span,
     unified::{GraphBuildHelper, StagingGraph},
 };
 use std::path::Path;
@@ -964,20 +964,6 @@ fn split_schema_table(name: &str) -> (Option<&str>, &str) {
     match second {
         Some(table) if !table.is_empty() => (Some(first), table),
         _ => (None, first),
-    }
-}
-
-// Helper extension trait for Span creation
-trait SpanExt {
-    fn from_node(node: &tree_sitter::Node) -> Self;
-}
-
-impl SpanExt for Span {
-    fn from_node(node: &tree_sitter::Node) -> Self {
-        Span::new(
-            Position::new(node.start_position().row, node.start_position().column),
-            Position::new(node.end_position().row, node.end_position().column),
-        )
     }
 }
 

@@ -60,8 +60,8 @@
       "start_line": 10
     },
     {
-      "end_column": 196,
-      "end_line": 1,
+      "end_column": 1,
+      "end_line": 6,
       "file_path": "<WORKSPACE_ROOT>/tests/fixtures/polyglot_micro/app.js",
       "kind": "function",
       "metadata": {
@@ -71,8 +71,8 @@
       },
       "name": "helloJavaScript",
       "qualified_name": "helloJavaScript",
-      "start_column": 130,
-      "start_line": 1
+      "start_column": 0,
+      "start_line": 4
     },
     {
       "end_column": 1,

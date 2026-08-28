@@ -8,14 +8,14 @@
     "source": "github",
     "subfolder": "sqry-mcp"
   },
-  "version": "30.0.0",
+  "version": "30.0.1",
   "websiteUrl": "https://github.com/verivus-oss/sqry",
   "packages": [
     {
       "registryType": "cargo",
       "registryBaseUrl": "https://crates.io",
       "identifier": "sqry-mcp",
-      "version": "30.0.0",
+      "version": "30.0.1",
       "transport": {
         "type": "stdio"
       },
@@ -37,7 +37,7 @@
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/verivus-oss/sqry-mcp:v30.0.0",
+      "identifier": "ghcr.io/verivus-oss/sqry-mcp:v30.0.1",
       "runtimeArguments": [
         {
           "type": "named",

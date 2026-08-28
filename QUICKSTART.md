@@ -1,6 +1,6 @@
 # sqry Quick Start
 
-**Version**: 30.0.0
+**Version**: 30.0.1
 **Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
 This guide gets you from install to useful semantic queries.
@@ -131,7 +131,7 @@ Use workspaces for multi-root projects:
 sqry workspace init .
 sqry workspace scan .
 sqry workspace status . --json
-sqry workspace clean . --dry-run
+sqry workspace clean .
 ```
 
 See [Workspaces](docs/user-guide/workspace.md).

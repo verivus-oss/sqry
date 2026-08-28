@@ -256,12 +256,9 @@ fn should_include_in_unused_results(
     // Apply language filter
     if !args.languages.is_empty() {
         if let Some(lang) = files.language_for_file(entry.file) {
-            let lang_str = lang.to_string();
-            if !args
-                .languages
-                .iter()
-                .any(|l| l.eq_ignore_ascii_case(&lang_str))
-            {
+            if !args.languages.iter().any(|candidate| {
+                crate::execution::symbol_utils::language_filter_selects(Some(lang), candidate)
+            }) {
                 return false;
             }
         } else {
@@ -396,12 +393,12 @@ pub fn execute_cross_language_edges(
 
         // Apply language filters
         if let Some(ref fl) = args.from_lang
-            && !from_lang.to_string().eq_ignore_ascii_case(fl)
+            && !crate::execution::symbol_utils::language_filter_selects(Some(from_lang), fl)
         {
             continue;
         }
         if let Some(ref tl) = args.to_lang
-            && !to_lang.to_string().eq_ignore_ascii_case(tl)
+            && !crate::execution::symbol_utils::language_filter_selects(Some(to_lang), tl)
         {
             continue;
         }

@@ -2,6 +2,7 @@ use crate::session::SessionManager;
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use sqry_core::graph::node::Language;
 use sqry_core::query::results::QueryResults;
 use std::collections::HashSet;
 use std::path::Path;
@@ -300,12 +301,19 @@ fn append_workspace_items_from_results(
 
     for m in results.iter() {
         // Check language filter if specified
-        let lang = m.language().map_or_else(
-            || "unknown".to_string(),
-            |l| l.to_string().to_ascii_lowercase(),
-        );
-        if !language_filter.is_empty() && !matches_language_filter(&lang, language_filter) {
-            continue;
+        let lang_opt = m.language();
+        if !language_filter.is_empty() {
+            let selected = match lang_opt {
+                Some(lang) => matches_language_filter(lang, language_filter),
+                // Files with no detected language stay addressable as
+                // "unknown", which is deliberately not a Language variant.
+                None => language_filter
+                    .iter()
+                    .any(|candidate| candidate.trim().eq_ignore_ascii_case("unknown")),
+            };
+            if !selected {
+                continue;
+            }
         }
 
         let name = m.name().map(|s| s.to_string()).unwrap_or_default();
@@ -348,7 +356,10 @@ fn append_workspace_items_from_results(
 
         items.push(WorkspaceSymbolItem {
             info,
-            language: expand_language_name(&lang),
+            language: lang_opt.map_or_else(
+                || "unknown".to_string(),
+                |lang| lang.canonical_name().to_string(),
+            ),
             qualified_name,
         });
     }
@@ -376,44 +387,17 @@ fn matches_workspace_query(name: &str, qualified_name: &str, query_terms: &[Stri
         .all(|term| name_lower.contains(term) || qualified_name_lower.contains(term))
 }
 
-/// Expand short language names to their full forms for backward compatibility.
+/// Does a user-supplied language filter select this language?
 ///
-/// Language enum Display returns short forms (ts, js, py) but the LSP output
-/// should use full forms (typescript, javascript, python) for consistency.
-fn expand_language_name(lang: &str) -> String {
-    match lang {
-        "ts" => "typescript".to_string(),
-        "js" => "javascript".to_string(),
-        "py" => "python".to_string(),
-        "rb" => "ruby".to_string(),
-        "rs" => "rust".to_string(),
-        "cpp" => "cpp".to_string(),
-        _ => lang.to_string(),
-    }
-}
-
-/// Check if a language matches the filter, handling common aliases.
-///
-/// Language enum Display returns short forms (ts, js, py) but users often
-/// use long forms (typescript, javascript, python) in filters.
-fn matches_language_filter(lang: &str, filter: &HashSet<String>) -> bool {
-    if filter.contains(lang) {
-        return true;
-    }
-
-    // Map short form to long forms that users might specify
-    let aliases: &[&str] = match lang {
-        "ts" => &["typescript"],
-        "js" => &["javascript"],
-        "py" => &["python"],
-        "rb" => &["ruby"],
-        "rs" => &["rust"],
-        "cpp" => &["c++", "cxx"],
-        "csharp" => &["c#"],
-        _ => &[],
-    };
-
-    aliases.iter().any(|alias| filter.contains(*alias))
+/// Parses through `Language::from_id`, the single input parser, rather than a
+/// local alias table. This replaced two hand-rolled tables in this file whose
+/// doc comments both described the same root cause. Two arms of the filter
+/// table (`rs` and `rb`) were unreachable, because the value it received was
+/// `Language::Display`, which emits `rust` and `ruby` (issue #714).
+fn matches_language_filter(lang: Language, filter: &HashSet<String>) -> bool {
+    filter
+        .iter()
+        .any(|candidate| Language::from_id(candidate) == Some(lang))
 }
 
 fn symbol_kind_from_str(kind: &str) -> SymbolKind {
@@ -1032,92 +1016,81 @@ mod tests {
         ));
     }
 
-    // ── expand_language_name ─────────────────────────────────────────────────
-
-    #[test]
-    fn expand_language_name_short_to_long() {
-        assert_eq!(expand_language_name("ts"), "typescript");
-        assert_eq!(expand_language_name("js"), "javascript");
-        assert_eq!(expand_language_name("py"), "python");
-        assert_eq!(expand_language_name("rb"), "ruby");
-        assert_eq!(expand_language_name("rs"), "rust");
-        assert_eq!(expand_language_name("cpp"), "cpp");
-    }
-
-    #[test]
-    fn expand_language_name_unknown_passthrough() {
-        assert_eq!(expand_language_name("go"), "go");
-        assert_eq!(expand_language_name("java"), "java");
-        assert_eq!(expand_language_name("haskell"), "haskell");
-    }
-
     // ── matches_language_filter ──────────────────────────────────────────────
+    //
+    // These take a real `Language`, not a Display string. The previous
+    // versions passed "rs" and "rb" directly, values production can never
+    // produce (Display emits "rust" and "ruby"), so they stayed green over an
+    // unreachable branch (issue #714).
 
-    #[test]
-    fn matches_language_filter_direct_match() {
-        let filter: HashSet<String> = ["rust".to_string()].into_iter().collect();
-        assert!(matches_language_filter("rust", &filter));
+    fn filter_of(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|v| (*v).to_string()).collect()
     }
 
     #[test]
-    fn matches_language_filter_alias_ts_typescript() {
-        let filter: HashSet<String> = ["typescript".to_string()].into_iter().collect();
-        assert!(matches_language_filter("ts", &filter));
+    fn matches_language_filter_accepts_canonical_short_and_alias() {
+        for spelling in ["typescript", "ts", "TypeScript"] {
+            assert!(
+                matches_language_filter(Language::TypeScript, &filter_of(&[spelling])),
+                "TypeScript should be selected by {spelling}"
+            );
+        }
+        for spelling in ["rust", "rs", "RUST"] {
+            assert!(
+                matches_language_filter(Language::Rust, &filter_of(&[spelling])),
+                "Rust should be selected by {spelling}"
+            );
+        }
     }
 
     #[test]
-    fn matches_language_filter_alias_js_javascript() {
-        let filter: HashSet<String> = ["javascript".to_string()].into_iter().collect();
-        assert!(matches_language_filter("js", &filter));
+    fn matches_language_filter_preserves_lifted_aliases() {
+        // Lifted from the two local tables this replaced; consolidating onto
+        // Language::from_id must not drop any accepted spelling.
+        assert!(matches_language_filter(Language::Cpp, &filter_of(&["c++"])));
+        assert!(matches_language_filter(Language::Cpp, &filter_of(&["cxx"])));
+        assert!(matches_language_filter(
+            Language::Cpp,
+            &filter_of(&["cplusplus"])
+        ));
+        assert!(matches_language_filter(
+            Language::CSharp,
+            &filter_of(&["c#"])
+        ));
+        assert!(matches_language_filter(
+            Language::Html,
+            &filter_of(&["html5"])
+        ));
     }
 
     #[test]
-    fn matches_language_filter_alias_py_python() {
-        let filter: HashSet<String> = ["python".to_string()].into_iter().collect();
-        assert!(matches_language_filter("py", &filter));
-    }
-
-    #[test]
-    fn matches_language_filter_alias_rb_ruby() {
-        let filter: HashSet<String> = ["ruby".to_string()].into_iter().collect();
-        assert!(matches_language_filter("rb", &filter));
-    }
-
-    #[test]
-    fn matches_language_filter_alias_rs_rust() {
-        let filter: HashSet<String> = ["rust".to_string()].into_iter().collect();
-        assert!(matches_language_filter("rs", &filter));
-    }
-
-    #[test]
-    fn matches_language_filter_alias_cpp_cxx() {
-        let filter: HashSet<String> = ["cxx".to_string()].into_iter().collect();
-        assert!(matches_language_filter("cpp", &filter));
-    }
-
-    #[test]
-    fn matches_language_filter_alias_cpp_plus() {
-        let filter: HashSet<String> = ["c++".to_string()].into_iter().collect();
-        assert!(matches_language_filter("cpp", &filter));
-    }
-
-    #[test]
-    fn matches_language_filter_alias_csharp_hash() {
-        let filter: HashSet<String> = ["c#".to_string()].into_iter().collect();
-        assert!(matches_language_filter("csharp", &filter));
+    fn matches_language_filter_covers_languages_the_old_table_missed() {
+        // The replaced table had no arm for these, so the LSP rejected them
+        // while Language::from_id accepted them everywhere else.
+        assert!(matches_language_filter(
+            Language::Go,
+            &filter_of(&["golang"])
+        ));
+        assert!(matches_language_filter(
+            Language::Kotlin,
+            &filter_of(&["kt"])
+        ));
+        assert!(matches_language_filter(
+            Language::Terraform,
+            &filter_of(&["hcl"])
+        ));
     }
 
     #[test]
     fn matches_language_filter_no_match_returns_false() {
-        let filter: HashSet<String> = ["go".to_string()].into_iter().collect();
-        assert!(!matches_language_filter("rust", &filter));
-    }
-
-    #[test]
-    fn matches_language_filter_unknown_lang_no_aliases() {
-        let filter: HashSet<String> = ["haskell".to_string()].into_iter().collect();
-        // "hs" has no aliases mapped — direct "hs" != "haskell"
-        assert!(!matches_language_filter("hs", &filter));
+        assert!(!matches_language_filter(
+            Language::Rust,
+            &filter_of(&["go"])
+        ));
+        assert!(!matches_language_filter(
+            Language::Rust,
+            &filter_of(&["bogus"])
+        ));
     }
 
     // ── symbol_kind_from_str ─────────────────────────────────────────────────

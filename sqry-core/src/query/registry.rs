@@ -300,10 +300,16 @@ pub fn core_fields() -> Vec<FieldDescriptor> {
         },
         FieldDescriptor {
             name: "lang",
-            field_type: FieldType::String,
+            // Enum, not String, so an unrecognized language reports a
+            // validation error naming the valid values instead of silently
+            // matching nothing (issue #714). Members are generated from the
+            // `Language` enum, so this list cannot drift as plugins land.
+            // `Validator::normalize_value` resolves aliases to the canonical
+            // name before this membership check runs.
+            field_type: FieldType::Enum(crate::graph::node::Language::canonical_names()),
             operators: &[Operator::Equal, Operator::Regex],
             indexed: true,
-            doc: "Programming language",
+            doc: "Programming language (canonical name, e.g. `typescript`; aliases such as `ts` are accepted)",
         },
         FieldDescriptor {
             name: "repo",
@@ -583,7 +589,9 @@ mod tests {
         let lang = lang_field.unwrap();
         assert_eq!(lang.name, "lang");
         assert!(lang.indexed);
-        assert!(matches!(lang.field_type, FieldType::String));
+        // Enum since issue #714: an unrecognized language must be a
+        // validation error, not a silent empty result.
+        assert!(matches!(lang.field_type, FieldType::Enum(_)));
         assert!(lang.supports_operator(&Operator::Equal));
         assert!(lang.supports_operator(&Operator::Regex));
     }
@@ -724,10 +732,41 @@ mod tests {
 
     #[test]
     fn test_lang_enum_values() {
+        use crate::graph::node::Language;
+
         let registry = FieldRegistry::with_core_fields();
         let lang_field = registry.get("lang").unwrap();
 
-        assert!(matches!(lang_field.field_type, FieldType::String));
+        let FieldType::Enum(ref values) = lang_field.field_type else {
+            panic!("lang must be an enum field so bad values fail validation");
+        };
+
+        // Generated from the Language enum, never hand-maintained. The
+        // shipped docs table drifted exactly this way: it listed
+        // `servicenow-xanadu` and `servicenow-xml` (plugin ids, which match
+        // nothing) and omitted `csharp`, `http`, and `servicenow`.
+        assert_eq!(*values, Language::canonical_names());
+        assert_eq!(values.len(), Language::ALL.len());
+        for expected in [
+            "typescript",
+            "javascript",
+            "python",
+            "csharp",
+            "http",
+            "servicenow",
+        ] {
+            assert!(
+                values.contains(&expected),
+                "missing canonical value {expected}"
+            );
+        }
+        for plugin_id in ["servicenow-xanadu", "servicenow-xml", "ts", "js", "py"] {
+            assert!(
+                !values.contains(&plugin_id),
+                "{plugin_id} is not a canonical language name"
+            );
+        }
+
         assert!(lang_field.supports_operator(&Operator::Equal));
         assert!(lang_field.supports_operator(&Operator::Regex));
     }

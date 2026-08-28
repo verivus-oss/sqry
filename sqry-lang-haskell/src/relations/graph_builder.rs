@@ -62,7 +62,9 @@ struct FfiDeclaration {
     /// Safety modifier (propagated to graph metadata)
     safety: FfiSafety,
     /// Span in source file
-    span: (usize, usize),
+    /// Real line/column span of the declaration; the byte tuple above cannot
+    /// be resolved to one without the file content.
+    decl_span: Span,
 }
 
 /// FFI safety modifiers (tracked for potential future use)
@@ -153,7 +155,7 @@ impl GraphBuilder for HaskellGraphBuilder {
                 }
             };
 
-            let span = Some(Span::from_bytes(context.span.0, context.span.1));
+            let span = Some(context.decl_span);
             let node_id = helper.add_function_with_visibility(
                 &qualified_name,
                 span,
@@ -491,14 +493,13 @@ fn parse_foreign_import(node: Node, content: &[u8]) -> Option<FfiDeclaration> {
     };
 
     // 5. Calculate span
-    let span = (node.start_byte(), node.end_byte());
 
     Some(FfiDeclaration {
         wrapper_name,
         foreign_symbol,
         convention,
         safety,
-        span,
+        decl_span: Span::from_node(&node),
     })
 }
 
@@ -534,7 +535,7 @@ fn build_ffi_edges(
         };
 
         // Create Function node for Haskell wrapper
-        let span = Some(Span::from_bytes(decl.span.0, decl.span.1));
+        let span = Some(decl.decl_span);
         let is_unsafe = matches!(decl.safety, FfiSafety::Unsafe);
         let wrapper_node = helper.add_function(
             &qualified_name,
@@ -553,11 +554,8 @@ fn build_ffi_edges(
             _ => "unknown",
         };
         let ffi_target_name = format!("ffi::{convention_str}::{}", decl.foreign_symbol);
-        let ffi_target_node = helper.ensure_callee(
-            &ffi_target_name,
-            Span::from_bytes(decl.span.0, decl.span.1),
-            CalleeKindHint::Function,
-        );
+        let ffi_target_node =
+            helper.ensure_callee(&ffi_target_name, decl.decl_span, CalleeKindHint::Function);
 
         // Create FfiCall edge from wrapper to foreign symbol
         helper.add_ffi_edge(wrapper_node, ffi_target_node, decl.convention);
@@ -703,7 +701,7 @@ fn build_import_edge(
 
     // Create the import edge if we found a module name
     if let Some(imported_module) = module_name {
-        let span = Span::from_bytes(import_node.start_byte(), import_node.end_byte());
+        let span = Span::from_node(&import_node);
 
         // Prefix for qualified imports to distinguish semantic meaning
         let import_name = if is_qualified {
@@ -836,7 +834,7 @@ fn strip_backticks(name: &str) -> String {
 
 /// Convert a tree-sitter node to a Span
 fn span_from_node(node: Node<'_>) -> Span {
-    Span::from_bytes(node.start_byte(), node.end_byte())
+    Span::from_node(&node)
 }
 
 /// Visit nodes recursively to find function applications and create call edges
@@ -1848,7 +1846,7 @@ fn process_type_synonym(
         type_name.to_string()
     };
 
-    let span = Some(Span::from_bytes(syn_node.start_byte(), syn_node.end_byte()));
+    let span = Some(Span::from_node(&syn_node));
     let alias_id = helper.add_type(&qualified_name, span);
     // issue #394: real declaration; opt dual-use bare helper into is_definition
     helper.mark_definition(alias_id);
@@ -1984,7 +1982,7 @@ fn process_class_method_signature(
             id
         } else {
             // Method may not have a separate definition, create a function node
-            let span = Some(Span::from_bytes(sig_node.start_byte(), sig_node.end_byte()));
+            let span = Some(Span::from_node(&sig_node));
             // issue #394: real declaration (typeclass method signature); opt dual-use bare helper into is_definition
             let id = helper.add_function(&qualified_method, span, false, false);
             helper.mark_definition(id);
@@ -2117,7 +2115,7 @@ fn extract_functions_recursive(
                 let context_idx = contexts.len();
                 contexts.push(CallContext {
                     qualified_name: name,
-                    span: (node.start_byte(), node.end_byte()),
+                    decl_span: Span::from_node(&node),
                 });
 
                 // Map all descendant nodes to this context
@@ -2131,7 +2129,7 @@ fn extract_functions_recursive(
                 let context_idx = contexts.len();
                 contexts.push(CallContext {
                     qualified_name: name,
-                    span: (node.start_byte(), node.end_byte()),
+                    decl_span: Span::from_node(&node),
                 });
 
                 // Map all descendant nodes to this context
@@ -2190,7 +2188,9 @@ fn map_descendants_to_context(node: &Node, context_idx: usize, map: &mut HashMap
 #[derive(Debug, Clone)]
 struct CallContext {
     qualified_name: String,
-    span: (usize, usize),
+    /// Real line/column span of the declaration; the byte tuple above cannot
+    /// be resolved to one without the file content.
+    decl_span: Span,
 }
 
 #[cfg(test)]

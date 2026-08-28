@@ -310,46 +310,13 @@ fn normalize_seed_path(root: &std::path::Path, file_path: &str) -> String {
     relative.to_string_lossy().replace('\\', "/")
 }
 
-/// Parse a language string to Language enum
+/// Parse a language string to Language enum.
+///
+/// Delegates to the central parser so this surface cannot drift from the
+/// others (#714). The aliases this table used to carry alone (`tf`, `pl/sql`,
+/// `oracle`, `xanadu`) now live on `Language` and work everywhere.
 fn parse_language(s: &str) -> Option<Language> {
-    match s.to_lowercase().as_str() {
-        "rust" | "rs" => Some(Language::Rust),
-        "javascript" | "js" => Some(Language::JavaScript),
-        "typescript" | "ts" => Some(Language::TypeScript),
-        "python" | "py" => Some(Language::Python),
-        "go" => Some(Language::Go),
-        "java" => Some(Language::Java),
-        "ruby" | "rb" => Some(Language::Ruby),
-        "php" => Some(Language::Php),
-        "cpp" | "c++" => Some(Language::Cpp),
-        "c" => Some(Language::C),
-        "swift" => Some(Language::Swift),
-        "kotlin" | "kt" => Some(Language::Kotlin),
-        "scala" => Some(Language::Scala),
-        "sql" => Some(Language::Sql),
-        "shell" | "bash" | "sh" => Some(Language::Shell),
-        "lua" => Some(Language::Lua),
-        "perl" | "pl" => Some(Language::Perl),
-        "dart" => Some(Language::Dart),
-        "groovy" => Some(Language::Groovy),
-        "css" => Some(Language::Css),
-        "elixir" | "ex" => Some(Language::Elixir),
-        "r" => Some(Language::R),
-        "haskell" | "hs" => Some(Language::Haskell),
-        "html" => Some(Language::Html),
-        "svelte" => Some(Language::Svelte),
-        "vue" => Some(Language::Vue),
-        "zig" => Some(Language::Zig),
-        "terraform" | "tf" => Some(Language::Terraform),
-        "puppet" => Some(Language::Puppet),
-        "apex" => Some(Language::Apex),
-        "abap" => Some(Language::Abap),
-        "csharp" | "cs" | "c#" => Some(Language::CSharp),
-        "http" => Some(Language::Http),
-        "plsql" | "pl/sql" | "oracle" => Some(Language::Plsql),
-        "servicenow" | "xanadu" => Some(Language::ServiceNow),
-        _ => None,
-    }
+    Language::from_id(s)
 }
 
 /// Parse an edge filter string

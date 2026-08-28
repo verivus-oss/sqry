@@ -226,7 +226,14 @@ fn workspace_lang_filter_smoke_for_all_languages() {
             "REPORT z_demo.\nWRITE 'hi'.\n",
         ),
         (
-            "servicenow-xanadu-js",
+            // `servicenow`, the Language id, NOT `servicenow-xanadu-js`, which
+            // is a PLUGIN id. Both ServiceNow plugins (`servicenow-xanadu-js`
+            // and `servicenow-xml`) produce `Language::ServiceNow`, so a
+            // plugin-id filter would promise a distinction the graph cannot
+            // make. This entry read `servicenow-xanadu-js` until issue #714
+            // made `lang:` validate its value: before that, any string was
+            // "accepted" here because it silently matched nothing.
+            "servicenow",
             "servicenow-service",
             "script.snjs",
             "class App {}\nvar x = function() { return 1; };\n",

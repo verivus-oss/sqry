@@ -956,7 +956,7 @@ fn extract_call_info(target_node: &Node, content: &[u8]) -> GraphResult<(String,
 
 /// Convert a tree-sitter node to a Span
 fn span_from_node(node: Node<'_>) -> Span {
-    Span::from_bytes(node.start_byte(), node.end_byte())
+    Span::from_node(&node)
 }
 
 // ============================================================================

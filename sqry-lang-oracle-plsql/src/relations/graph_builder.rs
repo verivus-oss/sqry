@@ -1189,7 +1189,7 @@ fn parse_table_ops_from_statement(statement: &str) -> Vec<(TableOp, String)> {
 }
 
 fn span_from_node(node: &Node<'_>) -> Span {
-    Span::from_bytes(node.start_byte(), node.end_byte())
+    Span::from_node(node)
 }
 
 fn is_package_node(kind: &str) -> bool {

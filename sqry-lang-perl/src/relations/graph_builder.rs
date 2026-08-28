@@ -61,10 +61,7 @@ impl GraphBuilder for PerlGraphBuilder {
         // Create function nodes and track them
         let mut context_to_node: HashMap<String, NodeId> = HashMap::new();
         for context in &contexts {
-            let span = Some(Span::from_bytes(
-                context.byte_range.start,
-                context.byte_range.end,
-            ));
+            let span = Some(context.decl_span);
             let visibility = extract_visibility(&context.qualified_name);
             let node_id = helper.add_function_with_visibility(
                 &context.qualified_name,
@@ -137,6 +134,8 @@ fn extract_visibility(name: &str) -> &'static str {
 struct CallableContext {
     qualified_name: String,
     byte_range: Range<usize>,
+    /// Real line/column span of the declaration; byte_range above is offsets.
+    decl_span: Span,
 }
 
 impl CallableContext {
@@ -287,6 +286,7 @@ fn extract_subroutines(
             contexts.push(CallableContext {
                 qualified_name,
                 byte_range,
+                decl_span: Span::from_node(&node),
             });
         }
     }
@@ -347,7 +347,7 @@ fn visit_node_for_calls(
                 if !callee.is_empty() {
                     let callee_id = helper.add_function(&callee, None, false, false);
                     let argument_count = count_call_arguments(node);
-                    let call_span = Span::from_bytes(node.start_byte(), node.end_byte());
+                    let call_span = Span::from_node(&node);
                     helper.add_call_edge_full_with_span(
                         caller_id,
                         callee_id,
@@ -440,7 +440,7 @@ fn collect_import_edges(
             };
 
             // Create span for the import
-            let span = Span::from_bytes(node.start_byte(), node.end_byte());
+            let span = Span::from_node(&node);
 
             match capture_name {
                 "use.module" => {

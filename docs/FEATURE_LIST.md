@@ -6,14 +6,18 @@ This document provides a comprehensive list of all features available across sqr
 
 ## CLI Commands (`sqry`)
 
+Authoritative syntax is `sqry <command> --help`. This table tracks `sqry-cli/src/args/mod.rs` as of 30.0.0.
+
 ### Core Commands
 
 | Command | Description |
 |---------|-------------|
 | `sqry index` | Build or update the semantic index for a workspace |
-| `sqry search <query>` | Semantic code search by symbol name, regex, and fuzzy patterns |
-| `sqry query <expression>` | Execute structured queries against the symbol index |
-| `sqry graph <subcommand>` | Graph operations (nodes, edges, stats, etc.) |
+| `sqry search <pattern>` | Regex or `--exact` literal name search (not the structural parser) |
+| `sqry query <expression>` | Core query-parser structural search (`AND` / `OR` / `name~=`) |
+| `sqry plan-query <expression>` | sqry-db planner (`cfg:`, `wraps:`, `shape~=`; no `name~=`) |
+| `sqry graph <subcommand>` | Graph operations (nodes, edges, stats, provenance, hubs, ...) |
+| `sqry overview` | One-shot repository orientation map (alias `report`) |
 
 ### Graph Subcommands
 
@@ -23,6 +27,8 @@ This document provides a comprehensive list of all features available across sqr
 | `sqry graph edges` | List edges (relationships) in the code graph |
 | `sqry graph stats` | Show graph statistics |
 | `sqry graph status` | Show graph build status |
+| `sqry graph provenance` | Show why a graph fact exists |
+| `sqry graph resolve` | Resolve a symbol with `--explain` |
 | `sqry graph cycles` | Find circular dependencies in the graph |
 | `sqry graph trace-path` | Find shortest path between two symbols |
 | `sqry graph call-chain-depth` | Calculate maximum call depth from a symbol |
@@ -33,6 +39,9 @@ This document provides a comprehensive list of all features available across sqr
 | `sqry graph direct-callees` | Find direct callees of a symbol |
 | `sqry graph call-hierarchy` | Show call hierarchy tree |
 | `sqry graph is-in-cycle` | Check if a symbol is part of a cycle |
+| `sqry graph hubs` | Ranked load-bearing hubs |
+| `sqry graph subsystems` | Path/package subsystem coupling |
+| `sqry graph communities` | Graph community clusters |
 
 ### Index Management
 
@@ -57,6 +66,7 @@ Indexing behavior highlights:
 | `sqry cache stats` | Show cache statistics |
 | `sqry cache clear` | Clear the cache |
 | `sqry cache prune` | Remove stale cache entries |
+| `sqry cache expand` | Macro expansion cache (`sqry cache expand`) |
 
 ### Configuration
 
@@ -75,13 +85,14 @@ Indexing behavior highlights:
 
 | Command | Description |
 |---------|-------------|
-| `sqry workspace` | Show workspace information |
-| `sqry workspace init` | Initialize a new workspace |
-| `sqry workspace scan` | Scan workspace for files |
-| `sqry workspace add` | Add files/directories to workspace |
-| `sqry workspace remove` | Remove files/directories from workspace |
-| `sqry workspace query` | Query workspace configuration |
-| `sqry workspace stats` | Show workspace statistics |
+| `sqry workspace init <workspace>` | Initialize a `.sqry-workspace` registry |
+| `sqry workspace scan <workspace>` | Scan for repositories inside the workspace root |
+| `sqry workspace add <workspace> <repo>` | Add a repository (two positional args) |
+| `sqry workspace remove <workspace> <repo-id>` | Remove a repository by workspace-relative id |
+| `sqry workspace query <workspace> <query>` | Run a workspace-level query |
+| `sqry workspace stats <workspace>` | Emit aggregate workspace statistics |
+| `sqry workspace status <workspace>` | Aggregate per-root index status |
+| `sqry workspace clean [root]` | Dry-run artifact cleanup; pass `--apply` to delete |
 
 ### Analysis & Insights
 
@@ -105,6 +116,9 @@ Indexing behavior highlights:
 | `sqry subgraph` | Extract focused subgraph around symbols |
 | `sqry impact` | Analyze what would break if a symbol changes |
 | `sqry hier` | Hierarchical search optimized for RAG retrieval |
+| `sqry overview` | One-shot orientation map (hubs, subsystems, hotspots, issues) |
+| `sqry rules run <id-or-pack>` | Run a shipped rule/pack or workspace TOML pack |
+| `sqry context-propagation` | Go `context.Context` plumbing leaks |
 
 ### Utilities
 
@@ -123,18 +137,45 @@ Indexing behavior highlights:
 | `sqry alias rename` | Rename an alias |
 | `sqry alias export` | Export aliases to file |
 | `sqry alias import` | Import aliases from file |
+| `sqry mcp setup` | Write Claude / Codex / Gemini MCP config |
+| `sqry lsp` | Launch the language server |
+| `sqry daemon ...` | Manage `sqryd` (start, stop, status, logs, load, rebuild, reset, revision commands) |
+| `sqry doctor channels` | Diagnose stable vs dev toolchain mix-ups |
+
+### Daemon Subcommands
+
+| Subcommand | Description |
+|------------|-------------|
+| `sqry daemon start` | Start `sqryd` in the background |
+| `sqry daemon stop` | Stop the running daemon |
+| `sqry daemon status` | Version, uptime, memory, workspaces |
+| `sqry daemon logs` | Tail the configured log file |
+| `sqry daemon load <path>` | Load the live workspace |
+| `sqry daemon load-revision` | Load a ref, commit, tree, or dirty snapshot |
+| `sqry daemon list-revisions` | List resident revision handles |
+| `sqry daemon revision-status` | Show one revision handle |
+| `sqry daemon unload-revision` | Unload one revision handle |
+| `sqry daemon prune-revisions` | Dry-run prune; `--apply` to delete |
+| `sqry daemon rebuild` | In-place rebuild of a loaded workspace |
+| `sqry daemon reset` | Reset daemon state for a workspace |
 
 ---
 
-## Release Highlights (through v17.0.1)
+## Release Highlights (through 30.0.0)
 
-- C/C++ indirect (function-pointer) call resolution with `resolved_via` provenance, plus a ~10x faster indexing rewrite on large C/C++ trees
-- Nested C++ type nodes (classes/structs/enums declared inside other types)
-- V12 graph schema with `framework:` / `resolved_via:` query predicates and matching MCP filter parameters
-- Richer Go analysis: implicit interface implements, promoted methods, function-signature implementations, and struct-field `Property` nodes (also C/Haskell)
-- Edge-backed `returns:<Type>` predicate via `TypeOf{Return}` edges (Rust/Java/Python/TypeScript/Go)
-- Typed `AmbiguousSymbol` errors for bare names with multiple candidates
-- `find_duplicates` per-group member cap (default 10) with `total_members` / `members_truncated`
+Current snapshot writer is **V17**. Older snapshots upconvert inline on load.
+
+- Standalone MCP 39 tools; daemon-hosted MCP 17-tool subset (`generate_overview` and `structural_similar` included)
+- Body-shape descriptors: `sqry shape-match`, `sqry diff --structural`, MCP `structural_similar`, planner `shape~=`
+- Declarative rules: `sqry rules run`, MCP `rules_run`
+- Repository overview: `sqry overview`, MCP `generate_overview`, graph `hubs` / `subsystems` / `communities`
+- Go context-propagation leaks and `Wraps` error-chain edges (`wraps:`)
+- Go channel pairing (`NodeKind::Channel`, `EdgeKind::ChannelPeer`) and generic instantiation (`Instantiates`)
+- C/C++ indirect-call resolution with eight `resolved_via` values plus `address_taken` / `callsite_promiscuous`
+- V16 definition-signal bits (`items:true` / `is_definition:true` / `list_symbols.items_only`)
+- Revision-aware daemon loads (`load-revision`, dirty snapshots, managed worktrees)
+- Multi-root workspaces via `.sqry-workspace` and VS Code `sqry.workspace`
+- Edge-backed `returns:<Type>` via `TypeOf{Return}`
 - Homebrew tap auto-publish and native-platform release smoke gates
 
 ## MCP Tools (Model Context Protocol)
@@ -343,7 +384,8 @@ These endpoints are exposed as direct JSON-RPC custom methods (i.e., the method 
 | `sqry/listCrossLanguageRelations` | List cross-language edges |
 | `sqry/indexStatus` | Get index metadata and status |
 | `sqry/workspaceStatus` | Report logical workspace identity (`workspace_id_short`, `workspace_id_full`), source roots, and per-root aggregate index status. Params: `{ workspace_id?: string }` (optional client-side sanity-check value). Returns `SqryWorkspaceStatusResult` (flattens `WorkspaceStatusInfo`). |
-| `sqry.index` | Rebuild semantic index with progress |
+
+`sqry.index` is a VS Code `workspace/executeCommand` client-owned command. The LSP server deliberately does **not** advertise it (double-registration crash guard). It is not a `sqry/` custom JSON-RPC method.
 
 #### Diff & Comparison
 
@@ -372,7 +414,7 @@ LSP server config file.
 | `sqry.projectRootMode` | Project-root detection mode for the LSP server. Accepted values: `"gitRoot"` (default), `"workspaceFolder"`, `"workspaceRoot"`. The VS Code extension's `sqry.workspaceClassification.projectRootMode` setting uses the short forms `"gitRoot" \| "folder" \| "explicit"` for the same enum; the per-workspace `.code-workspace` `sqry.workspace.projectRootMode` block always wins when present. | `"gitRoot"` |
 | `sqry.indexRoot` | LSP server config key (parsed by `sqry-lsp/src/config.rs::apply_index_root` from `workspace/didChangeConfiguration` and the LSP server config file). Sets the index root directly. The VS Code extension also exposes `sqry.indexRoot` as a contributed setting and forwards its value through to `sqry lsp` via the LSP configuration channel. Empty string means no override. | `""` |
 | `sqry.workspaceFolderExcludes` | VS Code-side setting only. Glob patterns matched against `WorkspaceFolder.uri.fsPath`. Folders matching any pattern are excluded from every sqry enumeration loop in the extension (auto-index, status fan-out, manual rebuild). Not consumed by the LSP server directly. | `[]` |
-| `sqry.workspaceClassification` | VS Code-side setting only. Inline classification block — `sourceRoots`, `memberFolders`, `exclusions`, `projectRootMode` — parallel to the `.code-workspace` `sqry.workspace` block. Surfaces the user-editable form (the `Sqry: Edit Workspace Classification` command writes from this form into the `.code-workspace` block when one exists). When no `.code-workspace` is open today, the extension does NOT synthesize a `LogicalWorkspace` from this setting and forward it to `sqry lsp` — `sqry lsp` falls through to its `.sqry-workspace` / anonymous-multi-root branches. The contributed setting ships now so it is present when that wiring lands as a follow-up task. | `null` |
+| `sqry.workspaceClassification` | VS Code-side setting only. Inline classification block: `sourceRoots`, `memberFolders`, `exclusions`, `projectRootMode`. Parallel to the `.code-workspace` `sqry.workspace` block. Surfaces the user-editable form (the `Sqry: Edit Workspace Classification` command writes from this form into the `.code-workspace` block when one exists). When no `.code-workspace` is open today, the extension does NOT synthesize a `LogicalWorkspace` from this setting and forward it to `sqry lsp`; `sqry lsp` falls through to its `.sqry-workspace` / anonymous-multi-root branches. The contributed setting ships now so it is present when that wiring lands as a follow-up task. | `null` |
 
 > Configurable per-workspace cross-repo: sqry treats each opened tree as a single repo by default. Cross-repo classification is enabled by either committing a `.sqry-workspace` registry file (CLI / standalone LSP) or by adding a `sqry.workspace` block inside a `.code-workspace` (VS Code). Both surfaces deserialize into the same `LogicalWorkspace` value before reaching the runtime. <!-- claim:configurable-cross-repo test:resolve_logical_workspace_short_circuits_in_documented_order -->
 
@@ -392,8 +434,19 @@ The VS Code extension (`sqry-vscode`) builds on `sqry lsp` and exposes:
 | `Sqry: Search Workspace…` | Fuzzy symbol search |
 | `Sqry: Find Semantic References` | Relation lookup from cursor |
 | `Sqry: Index Workspace` | Build/rebuild index with progress |
+| `Sqry: Rebuild Index` | Rebuild the current index |
 | `Sqry: Refresh Index Stats` | Refresh index status panel |
 | `Sqry: Clear Results` | Clear the results panel |
+| `Sqry: Restart Language Server` | Restart `sqry lsp` |
+| `Sqry: Search History` | Replay prior searches |
+| `Sqry: Scan Workspace for Problems` | Duplicate / cycle / unused diagnostics |
+| `Sqry: Show Call Graph` | Call graph from the current symbol |
+| `Sqry: Show Dependencies` | Dependency view from the current symbol |
+| `Sqry: Filter Results` | Filter the results panel |
+| `Sqry: Sort Results` | Sort the results panel |
+| `Sqry: Export Results` | Export the results panel |
+| `Sqry: Edit Workspace Classification (.code-workspace)` | Edit the `sqry.workspace` block |
+| `Sqry: Show Output` | Open the Sqry output channel |
 
 ### Panels & UX
 
@@ -412,8 +465,8 @@ The VS Code extension (`sqry-vscode`) builds on `sqry lsp` and exposes:
 
 - `CodeGraph` - Arena-based graph with CSR storage
 - `GraphBuilder` - Trait for language-specific graph building
-- `NodeKind` - 28 symbol kinds (Function, Class, Method, etc.)
-- `EdgeKind` - 26 edge types with metadata (Calls, Imports, Inherits, FfiCall, HttpRequest, etc.)
+- `NodeKind` - 35 symbol kinds (Function, Class, Method, Channel, JVM annotation kinds, etc.). Canonical list: [SCHEMA.md](SCHEMA.md)
+- `EdgeKind` - 41 edge types with metadata (Calls including `resolved_via`, Wraps, ChannelPeer, Instantiates, JVM module edges, etc.)
 - `GraphSnapshot` - Immutable snapshot for concurrent reads
 
 ### Search & Query
@@ -439,6 +492,8 @@ The VS Code extension (`sqry-vscode`) builds on `sqry lsp` and exposes:
 
 ## Supported Languages (37 plugins)
 
+29 Fast plugins ship in the default index. `json` is compiled but HighWallClock (excluded unless `--include-high-cost` or `--enable-plugin json`). Apex, ABAP, ServiceNow Xanadu JS, ServiceNow XML, Terraform, Puppet, and Pulumi are Optional specialty plugins and require `--features specialty-plugins` (or the matching `plugin-*` feature) at build time.
+
 | Category | Languages |
 |----------|-----------|
 | **Systems** | C, C++, Rust, Zig |
@@ -448,22 +503,26 @@ The VS Code extension (`sqry-vscode`) builds on `sqry lsp` and exposes:
 | **Mobile** | Swift, Dart |
 | **Functional** | Haskell, Elixir, Scala |
 | **Scripting** | Shell (Bash), Lua, R |
-| **Database** | SQL, Oracle PL/SQL |
-| **Infrastructure** | Terraform, Puppet, Pulumi |
-| **Enterprise** | SAP ABAP, Salesforce Apex, ServiceNow (Xanadu), ServiceNow XML |
-| **Data / Config** | JSON |
+| **Database** | SQL, Oracle PL/SQL (plugin id `plsql`) |
+| **Infrastructure** | Terraform, Puppet, Pulumi (specialty) |
+| **Enterprise** | SAP ABAP, Salesforce Apex, ServiceNow Xanadu JS, ServiceNow XML (specialty) |
+| **Data / Config** | JSON (high-wall-clock) |
 | **.NET** | C# |
 
 ---
 
 ## Query Syntax
 
-sqry supports a structured query syntax with multiple predicates, operators, and combinators.
+sqry has two text grammars. They are not equivalent. See [Query Languages](user-guide/query-languages.md).
+
+- `sqry query` and MCP `semantic_search` `query` strings: core parser (`AND` / `OR` / `NOT`, `name~=/regex/`).
+- `sqry plan-query` and MCP `sqry_query`: planner (whitespace conjunction, no `name~=`).
+- `sqry search`: regex or `--exact` literal names only.
 
 ### Basic Predicates
 
 ```
-# Find by name (exact match)
+# Find by name (contains on `sqry query`; byte-exact on the planner and `sqry search --exact`)
 name:authenticate
 
 # Find by kind
@@ -499,8 +558,17 @@ exports:UserService
 # Find functions with specific return type
 returns:Result
 
-# Filter calls by how they were resolved (V12 graph): direct, type_match, binding_plane
+# Filter calls by how they were resolved. Live values:
+# direct, type_match, binding_plane, virtual_dispatch,
+# interface_dispatch, duck_typed, structural, promiscuous_elided
 resolved_via:binding_plane
+
+# Planner-only / planner-first
+cfg:linux
+wraps:errors_is
+shape~=parse_config
+address_taken:true
+is_definition:true
 ```
 
 ### Advanced Predicates
@@ -522,7 +590,9 @@ references:config
 shape~=parse_config
 ```
 
-### Code Quality Predicates (CD Static Analysis)
+### Code Quality Predicates (`sqry query` CD static analysis)
+
+These belong to the core query parser, not `sqry plan-query`.
 
 ```
 # Find duplicate code

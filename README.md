@@ -207,7 +207,7 @@ The parser accepts eight values:
 sqry plan-query "kind:function callers:my_read resolved_via:binding_plane"
 ```
 
-`framework` filtering is available only through MCP parameters. There is no `framework:<id>` predicate in the text grammar.
+`framework` filtering is exposed as a typed MCP parameter. The planner also parses `framework:<id>`, but framework-route metadata is only populated where extractors have run. Treat a non-match as absent metadata, not proof that a framework is unused.
 
 See [Advanced Analysis](docs/user-guide/advanced-analysis.md) for graph predicates, snapshot wording, impact analysis, semantic diff, and visualization.
 
@@ -219,7 +219,7 @@ Use a workspace when one logical project spans several repositories or folders.
 sqry workspace init .
 sqry workspace scan .
 sqry workspace status . --json
-sqry workspace clean . --dry-run
+sqry workspace clean .
 ```
 
 Workspace configuration can come from a `.sqry-workspace` registry or a VS Code `.code-workspace` file with a `sqry.workspace` block. See [Workspaces](docs/user-guide/workspace.md).
@@ -290,6 +290,11 @@ For the VS Code extension, see [sqry-vscode/README.md](sqry-vscode/README.md) an
 - [Workspaces](docs/user-guide/workspace.md)
 - [Daemon Mode](docs/user-guide/daemon.md)
 - [MCP Guide](docs/user-guide/mcp.md)
+- [Query Languages](docs/user-guide/query-languages.md)
+- [Repository Overview](docs/user-guide/overview.md)
+- [Rules](docs/user-guide/rules.md)
+- [Context Propagation](docs/user-guide/context-propagation.md)
+- [Doctor](docs/user-guide/doctor.md)
 - [Revision-Aware Workspaces](docs/user-guide/revision-aware-workspaces.md)
 - [Advanced Analysis](docs/user-guide/advanced-analysis.md)
 - [Structural Shape Matching](docs/user-guide/shape-match.md)

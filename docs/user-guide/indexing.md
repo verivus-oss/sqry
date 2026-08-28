@@ -56,16 +56,16 @@ cargo build -p sqry-cli --features specialty-plugins
 
 ## Cleanup
 
-Preview stale generated state:
-
-```bash
-sqry workspace clean . --dry-run
-```
-
-Remove artifacts only when you are ready to rebuild:
+Preview stale generated state (dry-run is the default):
 
 ```bash
 sqry workspace clean .
+```
+
+Remove artifacts only when you are ready to rebuild. Deletion requires `--apply`:
+
+```bash
+sqry workspace clean . --apply
 sqry index --force .
 ```
 

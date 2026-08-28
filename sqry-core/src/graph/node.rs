@@ -88,92 +88,241 @@ pub enum Language {
 
 impl fmt::Display for Language {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match self {
-            Language::C => write!(f, "c"),
-            Language::Cpp => write!(f, "cpp"),
-            Language::CSharp => write!(f, "csharp"),
-            Language::Css => write!(f, "css"),
-            Language::JavaScript => write!(f, "js"),
-            Language::Python => write!(f, "py"),
-            Language::TypeScript => write!(f, "ts"),
-            Language::Rust => write!(f, "rust"),
-            Language::Go => write!(f, "go"),
-            Language::Java => write!(f, "java"),
-            Language::Ruby => write!(f, "ruby"),
-            Language::Php => write!(f, "php"),
-            Language::Swift => write!(f, "swift"),
-            Language::Kotlin => write!(f, "kotlin"),
-            Language::Scala => write!(f, "scala"),
-            Language::Sql => write!(f, "sql"),
-            Language::Dart => write!(f, "dart"),
-            Language::Lua => write!(f, "lua"),
-            Language::Perl => write!(f, "perl"),
-            Language::Shell => write!(f, "shell"),
-            Language::Groovy => write!(f, "groovy"),
-            Language::Elixir => write!(f, "elixir"),
-            Language::R => write!(f, "r"),
-            Language::Haskell => write!(f, "haskell"),
-            Language::Html => write!(f, "html"),
-            Language::Svelte => write!(f, "svelte"),
-            Language::Vue => write!(f, "vue"),
-            Language::Zig => write!(f, "zig"),
-            Language::Terraform => write!(f, "terraform"),
-            Language::Puppet => write!(f, "puppet"),
-            Language::Pulumi => write!(f, "pulumi"),
-            Language::Http => write!(f, "http"),
-            Language::Plsql => write!(f, "plsql"),
-            Language::Apex => write!(f, "apex"),
-            Language::Abap => write!(f, "abap"),
-            Language::ServiceNow => write!(f, "servicenow"),
-            Language::Json => write!(f, "json"),
-        }
+        // Delegates to `short_name` so the emitted spelling has exactly one
+        // definition. This is the legacy wire form (`ts`, `js`, `py`) and is
+        // deliberately unchanged: manifest confidence keys and textual
+        // `NodeId` both persist it (issue #714).
+        f.write_str(self.short_name())
     }
 }
 
 impl Language {
+    /// Every language variant, in declaration order.
+    ///
+    /// The single list every generated surface derives from: the query
+    /// field registry's accepted values, validation help text, and the
+    /// documented language table. Hand-maintained copies drift, this does
+    /// not.
+    pub const ALL: &'static [Self] = &[
+        Self::C,
+        Self::Cpp,
+        Self::CSharp,
+        Self::Css,
+        Self::JavaScript,
+        Self::Python,
+        Self::TypeScript,
+        Self::Rust,
+        Self::Go,
+        Self::Java,
+        Self::Ruby,
+        Self::Php,
+        Self::Swift,
+        Self::Kotlin,
+        Self::Scala,
+        Self::Sql,
+        Self::Dart,
+        Self::Lua,
+        Self::Perl,
+        Self::Shell,
+        Self::Groovy,
+        Self::Elixir,
+        Self::R,
+        Self::Haskell,
+        Self::Html,
+        Self::Svelte,
+        Self::Vue,
+        Self::Zig,
+        Self::Terraform,
+        Self::Puppet,
+        Self::Pulumi,
+        Self::Http,
+        Self::Plsql,
+        Self::Apex,
+        Self::Abap,
+        Self::ServiceNow,
+        Self::Json,
+    ];
+
+    /// The canonical machine identifier for this language.
+    ///
+    /// This is the vocabulary every query predicate and machine-facing
+    /// filter speaks (`typescript`, not `ts`). Distinct from
+    /// [`Self::short_name`], which is the legacy display spelling.
+    #[must_use]
+    pub const fn canonical_name(self) -> &'static str {
+        match self {
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::CSharp => "csharp",
+            Self::Css => "css",
+            Self::JavaScript => "javascript",
+            Self::Python => "python",
+            Self::TypeScript => "typescript",
+            Self::Rust => "rust",
+            Self::Go => "go",
+            Self::Java => "java",
+            Self::Ruby => "ruby",
+            Self::Php => "php",
+            Self::Swift => "swift",
+            Self::Kotlin => "kotlin",
+            Self::Scala => "scala",
+            Self::Sql => "sql",
+            Self::Dart => "dart",
+            Self::Lua => "lua",
+            Self::Perl => "perl",
+            Self::Shell => "shell",
+            Self::Groovy => "groovy",
+            Self::Elixir => "elixir",
+            Self::R => "r",
+            Self::Haskell => "haskell",
+            Self::Html => "html",
+            Self::Svelte => "svelte",
+            Self::Vue => "vue",
+            Self::Zig => "zig",
+            Self::Terraform => "terraform",
+            Self::Puppet => "puppet",
+            Self::Pulumi => "pulumi",
+            Self::Http => "http",
+            Self::Plsql => "plsql",
+            Self::Apex => "apex",
+            Self::Abap => "abap",
+            Self::ServiceNow => "servicenow",
+            Self::Json => "json",
+        }
+    }
+
+    /// The short display spelling, as emitted by [`fmt::Display`].
+    ///
+    /// Differs from [`Self::canonical_name`] only for JavaScript (`js`),
+    /// Python (`py`), and TypeScript (`ts`). Kept as a separate concept
+    /// because it is persisted in graph manifests and textual node ids, so
+    /// it cannot be changed without a migration.
+    #[must_use]
+    pub const fn short_name(self) -> &'static str {
+        match self {
+            Self::C => "c",
+            Self::Cpp => "cpp",
+            Self::CSharp => "csharp",
+            Self::Css => "css",
+            Self::JavaScript => "js",
+            Self::Python => "py",
+            Self::TypeScript => "ts",
+            Self::Rust => "rust",
+            Self::Go => "go",
+            Self::Java => "java",
+            Self::Ruby => "ruby",
+            Self::Php => "php",
+            Self::Swift => "swift",
+            Self::Kotlin => "kotlin",
+            Self::Scala => "scala",
+            Self::Sql => "sql",
+            Self::Dart => "dart",
+            Self::Lua => "lua",
+            Self::Perl => "perl",
+            Self::Shell => "shell",
+            Self::Groovy => "groovy",
+            Self::Elixir => "elixir",
+            Self::R => "r",
+            Self::Haskell => "haskell",
+            Self::Html => "html",
+            Self::Svelte => "svelte",
+            Self::Vue => "vue",
+            Self::Zig => "zig",
+            Self::Terraform => "terraform",
+            Self::Puppet => "puppet",
+            Self::Pulumi => "pulumi",
+            Self::Http => "http",
+            Self::Plsql => "plsql",
+            Self::Apex => "apex",
+            Self::Abap => "abap",
+            Self::ServiceNow => "servicenow",
+            Self::Json => "json",
+        }
+    }
+
+    /// Additional accepted spellings beyond the canonical and short names.
+    ///
+    /// [`Self::from_id`] accepts the union of canonical, short, and these,
+    /// so an alias added here is immediately valid everywhere input is
+    /// parsed.
+    #[must_use]
+    pub const fn aliases(self) -> &'static [&'static str] {
+        match self {
+            Self::C => &[],
+            Self::Cpp => &["c++", "cplusplus", "cxx"],
+            Self::CSharp => &["c#", "cs"],
+            Self::Css => &[],
+            Self::JavaScript => &[],
+            Self::Python => &[],
+            Self::TypeScript => &[],
+            Self::Rust => &["rs"],
+            Self::Go => &["golang"],
+            Self::Java => &[],
+            Self::Ruby => &["rb"],
+            Self::Php => &[],
+            Self::Swift => &[],
+            Self::Kotlin => &["kt"],
+            Self::Scala => &[],
+            Self::Sql => &[],
+            Self::Dart => &[],
+            Self::Lua => &[],
+            Self::Perl => &["pl"],
+            Self::Shell => &["bash", "sh"],
+            Self::Groovy => &[],
+            Self::Elixir => &["ex", "exs"],
+            Self::R => &[],
+            Self::Haskell => &["hs"],
+            Self::Html => &["html5"],
+            Self::Svelte => &[],
+            Self::Vue => &[],
+            Self::Zig => &[],
+            Self::Terraform => &["hcl", "tf"],
+            Self::Puppet => &[],
+            Self::Pulumi => &[],
+            Self::Http => &[],
+            Self::Plsql => &["pl/sql", "oracle"],
+            Self::Apex => &["salesforce"],
+            Self::Abap => &[],
+            Self::ServiceNow => &["xanadu"],
+            Self::Json => &[],
+        }
+    }
+
+    /// Every spelling this language accepts on input, canonical first.
+    #[must_use]
+    pub fn accepted_names(self) -> Vec<&'static str> {
+        let mut names = vec![self.canonical_name()];
+        if self.short_name() != self.canonical_name() {
+            names.push(self.short_name());
+        }
+        names.extend_from_slice(self.aliases());
+        names
+    }
+
+    /// The canonical identifier of every language, in declaration order.
+    ///
+    /// Feeds the `lang` field registry and the documented value table so
+    /// neither can fall out of step with the enum.
+    #[must_use]
+    pub fn canonical_names() -> Vec<&'static str> {
+        Self::ALL.iter().map(|lang| lang.canonical_name()).collect()
+    }
+
     /// Parse a language identifier or common alias into a `Language`.
+    ///
+    /// Accepts the canonical name, the short display name, and every alias,
+    /// after trimming and case folding. This is the only input parser: every
+    /// surface that accepts a user-supplied language routes through it, so
+    /// no surface can accept a different set of spellings than another
+    /// (issue #714).
     #[must_use]
     pub fn from_id(value: &str) -> Option<Self> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "c" => Some(Self::C),
-            "cpp" | "c++" => Some(Self::Cpp),
-            "csharp" | "c#" | "cs" => Some(Self::CSharp),
-            "css" => Some(Self::Css),
-            "javascript" | "js" => Some(Self::JavaScript),
-            "python" | "py" => Some(Self::Python),
-            "typescript" | "ts" => Some(Self::TypeScript),
-            "rust" | "rs" => Some(Self::Rust),
-            "go" | "golang" => Some(Self::Go),
-            "java" => Some(Self::Java),
-            "ruby" | "rb" => Some(Self::Ruby),
-            "php" => Some(Self::Php),
-            "swift" => Some(Self::Swift),
-            "kotlin" | "kt" => Some(Self::Kotlin),
-            "scala" => Some(Self::Scala),
-            "sql" => Some(Self::Sql),
-            "dart" => Some(Self::Dart),
-            "lua" => Some(Self::Lua),
-            "perl" | "pl" => Some(Self::Perl),
-            "shell" | "bash" | "sh" => Some(Self::Shell),
-            "groovy" => Some(Self::Groovy),
-            "elixir" | "ex" | "exs" => Some(Self::Elixir),
-            "r" => Some(Self::R),
-            "haskell" | "hs" => Some(Self::Haskell),
-            "html" => Some(Self::Html),
-            "svelte" => Some(Self::Svelte),
-            "vue" => Some(Self::Vue),
-            "zig" => Some(Self::Zig),
-            "terraform" | "hcl" => Some(Self::Terraform),
-            "puppet" => Some(Self::Puppet),
-            "pulumi" => Some(Self::Pulumi),
-            "http" => Some(Self::Http),
-            "plsql" => Some(Self::Plsql),
-            "apex" | "salesforce" => Some(Self::Apex),
-            "abap" => Some(Self::Abap),
-            "servicenow" => Some(Self::ServiceNow),
-            "json" => Some(Self::Json),
-            _ => None,
-        }
+        let needle = value.trim().to_ascii_lowercase();
+        Self::ALL.iter().copied().find(|lang| {
+            lang.canonical_name() == needle
+                || lang.short_name() == needle
+                || lang.aliases().contains(&needle.as_str())
+        })
     }
 }
 
@@ -279,7 +428,48 @@ impl Span {
         Self { start, end }
     }
 
-    /// Create a span from byte offsets (legacy compatibility)
+    /// Create a span from a tree-sitter node's real row and column.
+    ///
+    /// This is what a plugin should call when it has the node in hand, which
+    /// is nearly always. It takes the node by reference to match the private
+    /// extension traits that the cpp, kotlin and sql plugins had each already
+    /// written for themselves, which this replaces.
+    ///
+    /// Prefer it over [`Span::from_bytes`] without
+    /// exception: the two return the same type and look equally correct at a
+    /// call site, but `from_bytes` stores byte offsets in the line and column
+    /// fields, so anything built from it reports line 1 with a nonsense
+    /// column.
+    #[must_use]
+    pub fn from_node(node: &tree_sitter::Node<'_>) -> Self {
+        let start = node.start_position();
+        let end = node.end_position();
+        Self {
+            start: Position {
+                line: start.row,
+                column: start.column,
+            },
+            end: Position {
+                line: end.row,
+                column: end.column,
+            },
+        }
+    }
+
+    /// Create a span from raw byte offsets, WITHOUT resolving them to a line
+    /// and column.
+    ///
+    /// This is lossy and the loss is invisible: it stores the offsets in the
+    /// `line`/`column` fields and sets `line: 0`, which every display path
+    /// renders as line 1. A `Span` built this way is indistinguishable by type
+    /// from a correct one, which is how ten language plugins came to report
+    /// every declaration at line 1 with the byte offset as the column, found
+    /// by audit on 2026-08-22.
+    ///
+    /// Use [`Span::from_node`] when a node is available. This remains only for
+    /// call sites that genuinely hold nothing but offsets, such as a scope or
+    /// call-context tuple, and whose spans are not surfaced as symbol
+    /// positions.
     #[must_use]
     pub fn from_bytes(start: usize, end: usize) -> Self {
         Self {
@@ -448,6 +638,77 @@ mod tests {
 
         assert_eq!(span.start.line, 10);
         assert_eq!(span.end.line, 20);
+    }
+
+    #[test]
+    fn every_variant_round_trips_through_from_id() {
+        // The invariant that makes the #714 bug class unrepresentable: every
+        // spelling a language publishes must parse back to that language.
+        for &lang in Language::ALL {
+            assert_eq!(
+                Language::from_id(lang.canonical_name()),
+                Some(lang),
+                "{} canonical name does not round-trip",
+                lang.canonical_name()
+            );
+            assert_eq!(
+                Language::from_id(lang.short_name()),
+                Some(lang),
+                "{} short name does not round-trip",
+                lang.short_name()
+            );
+            for alias in lang.aliases() {
+                assert_eq!(
+                    Language::from_id(alias),
+                    Some(lang),
+                    "alias {alias} does not round-trip"
+                );
+            }
+            // Case and surrounding whitespace must not change the answer.
+            assert_eq!(
+                Language::from_id(&format!("  {}  ", lang.canonical_name().to_uppercase())),
+                Some(lang)
+            );
+        }
+    }
+
+    #[test]
+    fn language_all_is_complete_and_unique() {
+        assert_eq!(Language::ALL.len(), 37);
+        let names = Language::canonical_names();
+        let unique: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len(), "canonical names must be unique");
+    }
+
+    #[test]
+    fn canonical_and_short_names_are_pinned() {
+        // Guards both directions of the split that caused #714. The canonical
+        // name is what every predicate and machine-facing filter speaks; the
+        // short name is persisted in manifest confidence keys and textual
+        // NodeIds, so neither may drift silently.
+        assert_eq!(Language::TypeScript.canonical_name(), "typescript");
+        assert_eq!(Language::TypeScript.short_name(), "ts");
+        assert_eq!(Language::JavaScript.canonical_name(), "javascript");
+        assert_eq!(Language::JavaScript.short_name(), "js");
+        assert_eq!(Language::Python.canonical_name(), "python");
+        assert_eq!(Language::Python.short_name(), "py");
+        // Display is the short name, unchanged: it is a persisted contract.
+        assert_eq!(Language::TypeScript.to_string(), "ts");
+        assert_eq!(Language::JavaScript.to_string(), "js");
+        assert_eq!(Language::Python.to_string(), "py");
+    }
+
+    #[test]
+    fn unknown_is_not_a_language() {
+        // Several surfaces map a language-less file to the literal "unknown".
+        // It must never become a Language variant, or those surfaces would
+        // start conflating "no language" with a real one.
+        assert_eq!(Language::from_id("unknown"), None);
+        assert_eq!(Language::from_id("bogus"), None);
+        assert_eq!(Language::from_id(""), None);
+        // Plugin ids are not language ids.
+        assert_eq!(Language::from_id("servicenow-xanadu"), None);
+        assert_eq!(Language::from_id("servicenow-xml"), None);
     }
 
     #[test]

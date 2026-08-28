@@ -46,8 +46,8 @@
       "start_line": 4
     },
     {
-      "end_column": 164,
-      "end_line": 1,
+      "end_column": 5,
+      "end_line": 6,
       "file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/javascript_async.js",
       "kind": "function",
       "metadata": {
@@ -57,12 +57,12 @@
       },
       "name": "anon:arrow:0bac925c",
       "qualified_name": "anon:arrow:0bac925c",
-      "start_column": 95,
-      "start_line": 1
+      "start_column": 23,
+      "start_line": 4
     },
     {
-      "end_column": 150,
-      "end_line": 1,
+      "end_column": 40,
+      "end_line": 5,
       "file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/javascript_async.js",
       "kind": "function",
       "metadata": {
@@ -72,8 +72,8 @@
       },
       "name": "anon:arrow:60e38c78",
       "qualified_name": "anon:arrow:60e38c78",
-      "start_column": 129,
-      "start_line": 1
+      "start_column": 19,
+      "start_line": 5
     },
     {
       "end_column": 44,
@@ -106,8 +106,8 @@
       "start_line": 3
     },
     {
-      "end_column": 168,
-      "end_line": 1,
+      "end_column": 1,
+      "end_line": 7,
       "file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/javascript_async.js",
       "kind": "function",
       "metadata": {
@@ -118,8 +118,8 @@
       },
       "name": "fetchData",
       "qualified_name": "fetchData",
-      "start_column": 43,
-      "start_line": 1
+      "start_column": 0,
+      "start_line": 3
     },
     {
       "end_column": 1,
@@ -326,8 +326,8 @@
       "start_line": 8
     },
     {
-      "end_column": 222,
-      "end_line": 1,
+      "end_column": 1,
+      "end_line": 11,
       "file_path": "<WORKSPACE_ROOT>/tests/fixtures/metadata_consistency/async_functions/javascript_async.js",
       "kind": "function",
       "metadata": {
@@ -337,8 +337,8 @@
       },
       "name": "syncFunction",
       "qualified_name": "syncFunction",
-      "start_column": 170,
-      "start_line": 1
+      "start_column": 0,
+      "start_line": 9
     },
     {
       "end_column": 1,

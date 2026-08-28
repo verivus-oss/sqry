@@ -484,6 +484,29 @@ impl Validator {
         candidates
     }
 
+    /// Canonicalize a closed-vocabulary field's VALUE, mirroring the field-name
+    /// canonicalization above.
+    ///
+    /// #522 made `file:` a true alias of `path:` by resolving the field name
+    /// once here, at the single chokepoint every query passes through before
+    /// validation and execution. The same defect existed one level down: the
+    /// registry knows `lang` accepts `ts`, but the executor compares canonical
+    /// names, so `lang:ts` validated cleanly and then silently matched nothing.
+    ///
+    /// Resolving the value here fixes every sqry-core-parser surface at once,
+    /// and it must happen BEFORE `validate_enum_value`, which is exact and
+    /// case-sensitive. An unrecognized value is passed through untouched so
+    /// that enum validation reports it rather than this silently swallowing it.
+    fn normalize_value(canonical_field: &str, value: Value) -> Value {
+        match (canonical_field, &value) {
+            ("lang", Value::String(raw)) => crate::graph::node::Language::from_id(raw).map_or_else(
+                || value.clone(),
+                |lang| Value::String(lang.canonical_name().to_string()),
+            ),
+            _ => value,
+        }
+    }
+
     fn normalize_condition(&self, condition: &Condition) -> Result<Condition, ValidationError> {
         // Normalize a nested subquery value first, recursively, so alias
         // resolution reaches every field inside a relation subquery, e.g.
@@ -514,10 +537,11 @@ impl Validator {
             .map(std::string::ToString::to_string);
         if let Some(canonical) = canonical {
             let mut resolved = condition.clone();
+            // Normalize the value before moving `canonical` into the field.
+            resolved.value = Self::normalize_value(&canonical, normalized_value);
             if canonical != field_name {
                 resolved.field = Field::new(canonical);
             }
-            resolved.value = normalized_value;
             return Ok(resolved);
         }
 
@@ -930,6 +954,89 @@ mod tests {
         };
         let result = validator.normalize_condition(&cond);
         assert!(result.is_err(), "disabled fuzzy should reject typos");
+    }
+
+    // ── issue #714: the chokepoint canonicalizes VALUES, not just field names ──
+
+    fn lang_condition(value: &str) -> Condition {
+        Condition {
+            field: Field::new("lang"),
+            operator: Operator::Equal,
+            value: Value::String(value.to_string()),
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn normalize_canonicalizes_language_aliases() {
+        let validator = Validator::new(FieldRegistry::with_core_fields());
+
+        // #522 made `file:` a true alias of `path:` by resolving the field
+        // NAME here. The same defect lived one level down in the value: the
+        // registry knows `ts` is TypeScript, but the executor compares
+        // canonical names, so `lang:ts` validated and matched nothing.
+        for spelling in ["ts", "TS", "  TypeScript  ", "typescript"] {
+            let normalized = validator
+                .normalize_condition(&lang_condition(spelling))
+                .expect("alias must validate");
+            assert_eq!(
+                normalized.value,
+                Value::String("typescript".to_string()),
+                "{spelling} should canonicalize to typescript"
+            );
+        }
+
+        // The `language:` field alias and a value alias must resolve together.
+        let cond = Condition {
+            field: Field::new("language"),
+            operator: Operator::Equal,
+            value: Value::String("rs".to_string()),
+            span: Span::default(),
+        };
+        let normalized = validator.normalize_condition(&cond).expect("must validate");
+        assert_eq!(normalized.field.as_str(), "lang");
+        assert_eq!(normalized.value, Value::String("rust".to_string()));
+    }
+
+    #[test]
+    fn normalize_leaves_other_fields_values_alone() {
+        let validator = Validator::new(FieldRegistry::with_core_fields());
+        let cond = Condition {
+            field: Field::new("name"),
+            operator: Operator::Equal,
+            value: Value::String("ts".to_string()),
+            span: Span::default(),
+        };
+        let normalized = validator.normalize_condition(&cond).expect("must validate");
+        // `ts` is a language alias but this is a symbol name, not a language.
+        assert_eq!(normalized.value, Value::String("ts".to_string()));
+    }
+
+    #[test]
+    fn unknown_language_is_a_validation_error_not_a_silent_zero() {
+        let validator = Validator::new(FieldRegistry::with_core_fields());
+        let expr = Expr::Condition(lang_condition("bogus"));
+
+        let normalized = validator
+            .normalize_expr(&expr)
+            .expect("normalize passes an unknown value through untouched");
+        let err = validator
+            .validate(&normalized)
+            .expect_err("an unrecognized language must fail validation");
+
+        match err {
+            ValidationError::InvalidEnumValue {
+                ref field,
+                ref value,
+                ref valid_values,
+                ..
+            } => {
+                assert_eq!(field, "lang");
+                assert_eq!(value, "bogus");
+                assert!(valid_values.contains(&"typescript"));
+            }
+            other => panic!("expected InvalidEnumValue, got {other:?}"),
+        }
     }
 
     #[test]

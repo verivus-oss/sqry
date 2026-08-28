@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [30.0.1](https://github.com/verivus-oss/sqry/compare/v30.0.0...v30.0.1) - 2026-08-28
+
+### Documentation
+
+- align customer-facing docs with 30.0.0 product surface ([#749](https://github.com/verivus-oss/sqry/pull/749))
+
+### Fixed
+
+- *(query)* make lang: accept every language spelling sqry itself reports ([#717](https://github.com/verivus-oss/sqry/pull/717))
 ## [30.0.0](https://github.com/verivus-oss/sqry/compare/v29.0.6...v30.0.0) - 2026-08-18
 
 ### Added

@@ -16,27 +16,13 @@ use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{GraphBuildHelper, StagingGraph};
-use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
+use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 use tree_sitter::{Node, Tree};
 
 use crate::relations::local_scopes::{self, KotlinScopeTree, ResolutionOutcome};
 use crate::relations::type_extractor::{extract_all_type_names_from_kotlin_type, is_type_node};
-
-// Helper extension trait for Span creation
-trait SpanExt {
-    fn from_node(node: &tree_sitter::Node) -> Self;
-}
-
-impl SpanExt for Span {
-    fn from_node(node: &tree_sitter::Node) -> Self {
-        Span::new(
-            Position::new(node.start_position().row, node.start_position().column),
-            Position::new(node.end_position().row, node.end_position().column),
-        )
-    }
-}
 
 /// Kotlin-specific `GraphBuilder` implementation.
 ///

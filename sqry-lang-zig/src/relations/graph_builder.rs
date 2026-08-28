@@ -83,7 +83,7 @@ impl GraphBuilder for ZigGraphBuilder {
         // Phase 1: Insert function contexts as nodes
         for context in ast_graph.contexts() {
             let qualified = context.qualified_name();
-            let span = Span::from_bytes(context.span.0, context.span.1);
+            let span = context.decl_span;
             let visibility = if context.is_pub {
                 Some("public")
             } else {
@@ -94,8 +94,7 @@ impl GraphBuilder for ZigGraphBuilder {
 
         // Phase 1b: Insert type/const declarations as nodes
         for decl in ast_graph.decl_nodes() {
-            let decl_id =
-                helper.add_type(&decl.name, Some(Span::from_bytes(decl.span.0, decl.span.1)));
+            let decl_id = helper.add_type(&decl.name, Some(decl.decl_span));
             // issue #394: real declaration; opt dual-use bare helper into is_definition
             helper.mark_definition(decl_id);
         }
@@ -152,7 +151,7 @@ impl GraphBuilder for ZigGraphBuilder {
                 // Get the importing context (module or function)
                 let importer_id = if let Some(ctx) = ast_graph.get_callable_context(node.id()) {
                     helper.get_node(&ctx.qualified_name()).unwrap_or_else(|| {
-                        let span = Span::from_bytes(ctx.span.0, ctx.span.1);
+                        let span = ctx.decl_span;
                         helper.add_function(&ctx.qualified_name(), Some(span), false, false)
                     })
                 } else {
@@ -160,7 +159,7 @@ impl GraphBuilder for ZigGraphBuilder {
                 };
 
                 // Create import node and edge
-                let span = Span::from_bytes(node.start_byte(), node.end_byte());
+                let span = Span::from_node(&node);
                 let import_node_id = helper.add_import(&module_name, Some(span));
                 helper.add_import_edge(importer_id, import_node_id);
             }
@@ -170,7 +169,7 @@ impl GraphBuilder for ZigGraphBuilder {
                 && let Some((caller_id, callee_id, argument_count)) =
                     build_call_edge_ids(&ast_graph, node, content, &mut helper)
             {
-                let call_span = Span::from_bytes(node.start_byte(), node.end_byte());
+                let call_span = Span::from_node(&node);
                 helper.add_call_edge_full_with_span(
                     caller_id,
                     callee_id,
@@ -324,7 +323,8 @@ fn build_call_edge_ids(
         // Create synthetic module-level context for top-level expressions
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            span: (0, content.len()),
+            // Whole-file synthetic context: start of file is the honest position.
+            decl_span: Span::default(),
             is_pub: false,
         };
         &module_context
@@ -342,7 +342,7 @@ fn build_call_edge_ids(
     let source_id = if helper.has_node(&call_context.qualified_name()) {
         helper.get_node(&call_context.qualified_name()).unwrap()
     } else {
-        let span = Span::from_bytes(call_context.span.0, call_context.span.1);
+        let span = call_context.decl_span;
         helper.add_function(&call_context.qualified_name(), Some(span), false, false)
     };
 
@@ -514,7 +514,9 @@ struct ASTGraph {
 #[derive(Debug, Clone)]
 struct DeclNode {
     name: String,
-    span: (usize, usize),
+    /// Real line/column span of the declaration; the byte tuple above cannot
+    /// be resolved to one without the file content.
+    decl_span: Span,
     is_pub: bool,
 }
 
@@ -575,7 +577,7 @@ fn extract_functions_recursive(
         let context_idx = contexts.len();
         contexts.push(CallContext {
             qualified_name: qualified_name.clone(),
-            span: (node.start_byte(), node.end_byte()),
+            decl_span: Span::from_node(&node),
             is_pub,
         });
 
@@ -665,7 +667,7 @@ fn extract_declarations_recursive(
     {
         decl_nodes.push(DeclNode {
             name,
-            span: (node.start_byte(), node.end_byte()),
+            decl_span: Span::from_node(&node),
             is_pub: true,
         });
     }
@@ -745,7 +747,9 @@ fn map_descendants_to_context(node: &Node, context_idx: usize, map: &mut HashMap
 #[derive(Debug, Clone)]
 struct CallContext {
     qualified_name: String,
-    span: (usize, usize),
+    /// Real line/column span of the declaration; the byte tuple above cannot
+    /// be resolved to one without the file content.
+    decl_span: Span,
     is_pub: bool,
 }
 
@@ -872,7 +876,7 @@ fn handle_variable_declaration(
                 id
             } else {
                 // Create variable node if it doesn't exist
-                let span = Span::from_bytes(node.start_byte(), node.end_byte());
+                let span = Span::from_node(&node);
                 // issue #394: real declaration; opt dual-use bare helper into is_definition
                 let id = helper.add_variable(&name, Some(span));
                 helper.mark_definition(id);
@@ -1066,7 +1070,7 @@ fn handle_container_field(
         let field_id = if let Some(id) = helper.get_node(&cache_key) {
             id
         } else {
-            let span = Span::from_bytes(field_node.start_byte(), field_node.end_byte());
+            let span = Span::from_node(&field_node);
             helper.add_property_with_static_and_visibility(&qualified_name, Some(span), false, None)
         };
 
@@ -1133,7 +1137,7 @@ fn handle_container_member_decl(
     let member_id = if let Some(id) = helper.get_node(&cache_key) {
         id
     } else {
-        let span = Span::from_bytes(decl_node.start_byte(), decl_node.end_byte());
+        let span = Span::from_node(&decl_node);
         if is_const {
             helper.add_constant_with_static_and_visibility(&qualified_name, Some(span), true, None)
         } else {
@@ -2197,11 +2201,29 @@ pub const PublicContainer = struct {
         })
     }
 
+    /// 1-indexed line and 0-indexed column of `needle`'s first occurrence in
+    /// `source`, in the shape `add_node_internal` stores on a `NodeEntry`
+    /// (`start_line = span.start.line + 1`, `start_column = span.start.column`,
+    /// the column being a byte offset within its line, as tree-sitter reports
+    /// it). Deriving the expectation from the fixture text keeps the assertion
+    /// honest if the fixture is ever reflowed.
+    fn line_and_column_of(source: &str, needle: &str) -> (u32, u32) {
+        let offset = source
+            .find(needle)
+            .unwrap_or_else(|| panic!("`{needle}` must appear in the fixture"));
+        let prefix = &source[..offset];
+        let line = u32::try_from(prefix.matches('\n').count() + 1).expect("line fits in u32");
+        let line_start = prefix.rfind('\n').map_or(0, |i| i + 1);
+        let column = u32::try_from(offset - line_start).expect("column fits in u32");
+        (line, column)
+    }
+
     /// AC-1 + AC-5: instance struct fields emit Property nodes whose
     /// canonical qualified name is `Container::field` (the helper-layer
     /// `canonicalize_graph_qualified_name` normalizes the source-form
     /// `Container.field` we pass in), with `is_static = false` and
-    /// `visibility = None`. Span must be set (non-zero byte range).
+    /// `visibility = None`. Span must be set to the field's real line and
+    /// column, over a non-empty range.
     #[test]
     fn test_container_field_emits_property_with_attrs() {
         let source = r"
@@ -2234,27 +2256,31 @@ const Point = struct {
             x_entry.visibility.is_none(),
             "Zig has no member-level visibility — visibility must be None"
         );
-        // `Span::from_bytes` packs bytes into `Position::column` with
-        // `line = 0`; `add_node_internal` then stores
-        // `start_line = saturating_add(0, 1) = 1`, `start_column = start_byte`,
-        // `end_line = 1`, `end_column = end_byte`. Pin exact byte bounds
-        // anchored to the fixture string so the assertion fails loudly
-        // both on zero-width spans and on accidental drift in which AST
-        // node we hand to `Span::from_bytes` (e.g. swapping the
-        // `container_field` node for the surrounding `field_list`).
+        // `Span::from_node` records the node's real row and column;
+        // `add_node_internal` then stores `start_line = row + 1` and
+        // `start_column = column`. Pin both ends to the fixture's literal
+        // `x: i32` text so the assertion fails loudly both on zero-width
+        // spans and on accidental drift in which AST node we hand to
+        // `Span::from_node` (e.g. swapping the `container_field` node for
+        // the surrounding `field_list`).
         let field_text = "x: i32";
-        let expected_start = u32::try_from(source.find(field_text).expect("x: i32 in fixture"))
-            .expect("byte offset fits in u32");
+        let (expected_line, expected_start) = line_and_column_of(source, field_text);
         let expected_end = expected_start + u32::try_from(field_text.len()).unwrap();
-        assert_eq!(x_entry.start_line, 1, "Span line packing → start_line == 1");
-        assert_eq!(x_entry.end_line, 1, "Span line packing → end_line == 1");
+        assert_eq!(
+            x_entry.start_line, expected_line,
+            "field span must report the real `x: i32` line, not line 1"
+        );
+        assert_eq!(
+            x_entry.end_line, expected_line,
+            "`x: i32` is single-line, so end_line must match start_line"
+        );
         assert_eq!(
             x_entry.start_column, expected_start,
-            "field span start_column must match `x: i32` start byte"
+            "field span start_column must match `x: i32`'s column within its line"
         );
         assert_eq!(
             x_entry.end_column, expected_end,
-            "field span end_column must match `x: i32` end byte (tree-sitter \
+            "field span end_column must match `x: i32`'s end column (tree-sitter \
              container_field excludes the trailing comma)"
         );
         assert!(
@@ -2312,30 +2338,28 @@ const Point = struct {
             origin_entry.visibility.is_none(),
             "Zig has no member-level visibility — visibility must be None"
         );
-        // Pin span byte bounds against the fixture's literal
-        // `const ORIGIN: i32 = 0;` text. The container-level decl path
-        // uses the entire `variable_declaration` node span (statement
-        // including the trailing semicolon).
+        // Pin the span against the fixture's literal `const ORIGIN: i32 = 0;`
+        // text. The container-level decl path uses the entire
+        // `variable_declaration` node span (statement including the trailing
+        // semicolon).
         let decl_text = "const ORIGIN: i32 = 0;";
-        let expected_start =
-            u32::try_from(source.find(decl_text).expect("const ORIGIN in fixture"))
-                .expect("byte offset fits in u32");
+        let (expected_line, expected_start) = line_and_column_of(source, decl_text);
         let expected_end = expected_start + u32::try_from(decl_text.len()).unwrap();
         assert_eq!(
-            origin_entry.start_line, 1,
-            "Span line packing → start_line == 1"
+            origin_entry.start_line, expected_line,
+            "container-const span must report the real declaration line, not line 1"
         );
         assert_eq!(
-            origin_entry.end_line, 1,
-            "Span line packing → end_line == 1"
+            origin_entry.end_line, expected_line,
+            "the declaration is single-line, so end_line must match start_line"
         );
         assert_eq!(
             origin_entry.start_column, expected_start,
-            "container-const span start_column must match `const ORIGIN: i32 = 0;` start byte"
+            "container-const span start_column must match the `const` keyword's column"
         );
         assert_eq!(
             origin_entry.end_column, expected_end,
-            "container-const span end_column must match the trailing-`;` end byte \
+            "container-const span end_column must match the trailing-`;` end column \
              (variable_declaration spans the full statement)"
         );
         assert!(

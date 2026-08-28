@@ -519,7 +519,8 @@ Used in `semantic_search` and `hierarchical_search` `query` parameter.
 | Field | Values | Example |
 |-------|--------|---------|
 | `kind` | function, method, class, interface, trait, struct, enum, module, variable, constant, type, macro, import, export, component, service, endpoint, test | `kind:function` |
-| `lang` | rust, python, javascript, typescript, java, go, cpp, c, ruby, php, kotlin, scala, swift, dart, lua, perl, elixir, haskell, zig, shell, sql, css, html, json, terraform, puppet, pulumi, groovy, r, vue, svelte, abap, apex, plsql, servicenow-xanadu, servicenow-xml | `lang:rust` |
+| `lang` | c, cpp, csharp, css, javascript, python, typescript, rust, go, java, ruby, php, swift, kotlin, scala, sql, dart, lua, perl, shell, groovy, elixir, r, haskell, html, svelte, vue, zig, terraform, puppet, pulumi, http, plsql, apex, abap, servicenow, json | `lang:rust` |
+| | Common aliases are accepted too (`ts`, `js`, `py`, `rs`, `golang`, `c++`, `c#`, `kt`, `hcl`), and values are case-insensitive. | `lang:ts` |
 | `vis` | public, private | `vis:public` |
 | `name` | Any string or glob pattern | `name:parse*` |
 | `file` | Path glob pattern | `file:src/lib.rs` |
