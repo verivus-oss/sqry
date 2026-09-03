@@ -19,9 +19,7 @@ use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::{NodeId, NodeKind};
 use tree_sitter::Node;
 
-use crate::relations::graph_builder::{
-    is_go_predeclared_type, span_from_byte_range, span_from_node,
-};
+use crate::relations::graph_builder::{is_go_predeclared_type, span_from_node};
 
 /// `C_SUPPRESS`: flag a freshly-staged Variable node as synthetic via
 /// the metadata-store bit.
@@ -110,8 +108,7 @@ pub(crate) fn build(
     helper: &mut GraphBuildHelper,
     package: &str,
 ) -> GraphResult<GoScopeTree> {
-    let content_len = content.len();
-    let mut tree = GoScopeTree::new(content_len);
+    let mut tree = GoScopeTree::new(content);
 
     let mut guard = local_scopes::load_recursion_guard();
     build_scopes_recursive(&mut tree, root, content, None, &mut guard)?;
@@ -476,7 +473,6 @@ fn bind_var_spec(
                 NodeKind::Variable,
                 type_text.as_deref(),
                 TypeOfContext::Variable,
-                content,
             );
         }
     }
@@ -640,7 +636,6 @@ fn bind_expression_list_names(
                     NodeKind::Variable,
                     type_text,
                     TypeOfContext::Variable,
-                    content,
                 );
             }
         }
@@ -686,7 +681,6 @@ fn bind_parameter_list(
                         NodeKind::Parameter,
                         type_text.as_deref(),
                         TypeOfContext::Parameter,
-                        content,
                     );
                 }
             }
@@ -719,7 +713,6 @@ fn bind_parameter_list(
                     NodeKind::Parameter,
                     elem_type.as_deref(),
                     TypeOfContext::Parameter,
-                    content,
                 );
             }
         }
@@ -760,13 +753,12 @@ fn materialise_local_binding(
     kind: NodeKind,
     type_text: Option<&str>,
     type_context: TypeOfContext,
-    content: &[u8],
 ) {
     // Mirror the lazy emission path in `handle_identifier_for_reference`
     // (and `add_reference_edge` below) so eager and lazy binding nodes
-    // carry identical `Span` derivations: full `(line, column)` from
-    // byte offsets via `span_from_byte_range`.
-    let span = span_from_byte_range(content, decl_start_byte, decl_end_byte);
+    // carry identical `Span` derivations: full `(line, column)` resolved by
+    // the scope tree's shared line index.
+    let span = tree.span_for_bytes(decl_start_byte, decl_end_byte);
     let qualified_var = format!("{name}@{decl_start_byte}");
     let node_id = helper.add_node(&qualified_var, Some(span), kind);
     flag_synthetic(helper, node_id);
@@ -859,8 +851,7 @@ pub(crate) fn handle_identifier_for_reference(
             let target_id = if let Some(node_id) = binding.node_id {
                 node_id
             } else {
-                let span =
-                    span_from_byte_range(content, binding.decl_start_byte, binding.decl_end_byte);
+                let span = binding.decl_span;
                 let qualified_var = format!("{identifier}@{}", binding.decl_start_byte);
                 // C_SUPPRESS: per-binding-site declaration-target
                 // Variable. Marked synthetic so it does not leak into

@@ -5,7 +5,7 @@ use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::edge::{ExportKind, FfiConvention, HttpMethod};
 use sqry_core::graph::unified::storage::shape::SignatureShape;
-use sqry_core::graph::unified::{GraphBuildHelper, StagingGraph};
+use sqry_core::graph::unified::{GraphBuildHelper, NodeKind, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use sqry_core::relations::SyntheticNameBuilder;
 use tree_sitter::{Node, Tree};
@@ -741,6 +741,13 @@ fn build_call_edge_with_helper(
         // Synthetic module context for top-level calls
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
+            // Whole-file synthetic context, and a field NOTHING READS on this
+            // path: the caller node is minted by `ensure_callee` from the
+            // call-site span, so this value never reaches a node. It is set to
+            // `Span::default()` to match master, so the next reader does not
+            // have to work out which of two conventions is live. Reviewers
+            // confirmed it empirically: mutating this line survives the full
+            // package suite.
             span: Span::default(),
             is_async: false,
             return_type: None,
@@ -833,6 +840,13 @@ fn build_constructor_edge_with_helper(
     } else {
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
+            // Whole-file synthetic context, and a field NOTHING READS on this
+            // path: the caller node is minted by `ensure_callee` from the
+            // call-site span, so this value never reaches a node. It is set to
+            // `Span::default()` to match master, so the next reader does not
+            // have to work out which of two conventions is live. Reviewers
+            // confirmed it empirically: mutating this line survives the full
+            // package suite.
             span: Span::default(),
             is_async: false,
             return_type: None,
@@ -1095,8 +1109,15 @@ fn build_export_edges(
                         .unwrap_or_default();
 
                     if !source_text.is_empty() {
-                        let source_id =
-                            helper.add_module(&source_text, Some(span_from_node(export_node)));
+                        // The extent is the export statement in THIS file; the
+                        // re-exported module is declared elsewhere (issue #748).
+                        // The JavaScript plugin's matching path passes no span at
+                        // all, so this also brings the two into line.
+                        let source_id = helper.add_call_site_node(
+                            &source_text,
+                            span_from_node(export_node),
+                            NodeKind::Module,
+                        );
                         helper.add_export_edge_full(module_id, source_id, kind, alias.as_deref());
                     }
                 }
@@ -2866,7 +2887,11 @@ fn build_webassembly_call_edge(
         .unwrap_or_else(|| format!("wasm::{method_name}"));
 
     // Create WASM module node with qualified name
-    let wasm_node_id = helper.add_module(&wasm_module_name, Some(span_from_node(call_node)));
+    let wasm_node_id = helper.add_call_site_node(
+        &wasm_module_name,
+        span_from_node(call_node),
+        NodeKind::Module,
+    );
 
     // Add WebAssembly edge
     helper.add_webassembly_edge(caller_id, wasm_node_id);
@@ -2892,7 +2917,11 @@ fn build_webassembly_constructor_edge(
     let wasm_module_name = format!("wasm::{type_name}");
 
     // Create WASM module node
-    let wasm_node_id = helper.add_module(&wasm_module_name, Some(span_from_node(new_node)));
+    let wasm_node_id = helper.add_call_site_node(
+        &wasm_module_name,
+        span_from_node(new_node),
+        NodeKind::Module,
+    );
 
     // Add WebAssembly edge
     helper.add_webassembly_edge(caller_id, wasm_node_id);
@@ -2942,7 +2971,8 @@ fn build_require_ffi_edge(
 
     // Create FFI target node
     let ffi_name = format!("native::{}", module_basename(&path));
-    let ffi_node_id = helper.add_module(&ffi_name, Some(span_from_node(call_node)));
+    let ffi_node_id =
+        helper.add_call_site_node(&ffi_name, span_from_node(call_node), NodeKind::Module);
 
     // Add FFI edge with C convention (Node.js native addons use N-API/C ABI)
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -2976,7 +3006,8 @@ fn build_dlopen_edge(
         );
 
     // Create FFI target node
-    let ffi_node_id = helper.add_module(&module_name, Some(span_from_node(call_node)));
+    let ffi_node_id =
+        helper.add_call_site_node(&module_name, span_from_node(call_node), NodeKind::Module);
 
     // Add FFI edge
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -2997,6 +3028,14 @@ fn get_caller_node_id(
     } else {
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
+            // Whole-file synthetic context. `Span::default()` reports line 1
+            // column 0, the honest position for module-level code, and it is
+            // what master carries here. Where this mint creates the node, the
+            // degenerate end also keeps a non-body out of the body-hash and
+            // shape planes via `has_valid_body_span`. Where another path mints
+            // the same name first, that span stands: `ensure_callee` returns a
+            // cache hit untouched, so the FIRST mint decides and nothing later
+            // widens it. Both orderings match master.
             span: Span::default(),
             is_async: false,
             return_type: None,
@@ -3097,7 +3136,8 @@ fn build_http_request_edge(
         || format!("http::{}", info.method.as_str()),
         |url| format!("http::{url}"),
     );
-    let target_id = helper.add_module(&target_name, Some(span_from_node(call_node)));
+    let target_id =
+        helper.add_call_site_node(&target_name, span_from_node(call_node), NodeKind::Module);
 
     helper.add_http_request_edge(caller_id, target_id, info.method, info.url.as_deref());
     true
@@ -3345,11 +3385,21 @@ fn detect_route_endpoint(
     {
         let handler_name = handler_name.trim();
         if !handler_name.is_empty() {
-            let handler_id = helper.ensure_function(
+            // The extent is the identifier ARGUMENT in the route registration,
+            // not the handler's own declaration (issue #748). `ensure_callee`
+            // keeps the cross-kind reuse `ensure_function` provided.
+            //
+            // This is the one site in the #748 sweep that changes a recorded
+            // LOCATION as well as provenance, and the change is the point:
+            // `ensure_callee` returns an exact-kind cache hit as-is, so a
+            // handler already declared in this file keeps its DECLARATION's
+            // location instead of having it overwritten by the wider route
+            // registration. `ensure_function` fell through to the cached-node
+            // update and applied the argument span.
+            let handler_id = helper.ensure_callee(
                 handler_name,
-                Some(span_from_node(handler_arg)),
-                false,
-                false,
+                span_from_node(handler_arg),
+                CalleeKindHint::Function,
             );
             helper.add_contains_edge(endpoint_id, handler_id);
         }

@@ -23,6 +23,7 @@ use tree_sitter::{Node, Tree};
 
 use crate::relations::local_scopes::{self, KotlinScopeTree, ResolutionOutcome};
 use crate::relations::type_extractor::{extract_all_type_names_from_kotlin_type, is_type_node};
+use sqry_core::graph::unified::node::NodeKind;
 
 /// Kotlin-specific `GraphBuilder` implementation.
 ///
@@ -2170,8 +2171,10 @@ fn build_jni_external_function_edge(
         )
     };
 
-    // Create a module node representing the native implementation
-    let target_id = helper.add_module(&ffi_name, Some(span));
+    // Create a module node representing the native implementation. The span
+    // in hand is the Kotlin `external` declaration's, which the native module
+    // does not own (issue #748).
+    let target_id = helper.add_call_site_node(&ffi_name, span, NodeKind::Module);
 
     // Add FFI edge (Kotlin uses C calling convention for both JNI and Kotlin/Native)
     helper.add_ffi_edge(caller_id, target_id, FfiConvention::C);
@@ -2235,7 +2238,7 @@ fn handle_identifier_for_reference(
             let target_id = if let Some(node_id) = binding.node_id {
                 node_id
             } else {
-                let span = Span::from_bytes(binding.decl_start_byte, binding.decl_end_byte);
+                let span = binding.decl_span;
                 let qualified_var = format!("{identifier_text}@{}", binding.decl_start_byte);
                 let var_id = helper.add_variable(&qualified_var, Some(span));
                 // issue #394: real declaration (local binding materialized with its

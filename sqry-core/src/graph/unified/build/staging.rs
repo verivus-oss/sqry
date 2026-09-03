@@ -241,6 +241,106 @@ pub struct PendingIndirectCallsite {
     pub is_async: bool,
 }
 
+/// What a span offered to a staged node IS, at the site that offered it.
+///
+/// A span answers "what source extent is this node recorded at". The body
+/// plane (`body_hash` + the shape descriptor) needs a different answer: "what
+/// extent, if any, is a body this node owns". Those two questions diverge in
+/// both directions.
+///
+/// - [`GraphBuildHelper::ensure_callee`] mints a call-target stub with the
+///   **call site's** extent so the stub is never spanless. That extent is a
+///   genuine, non-degenerate range that
+///   [`has_valid_body_span`](super::body_hash::has_valid_body_span) accepts,
+///   so the stub enters the body plane carrying a body belonging to whoever
+///   wrote the call, and every stub minted from the same call site hashes
+///   identically (issue #748).
+/// - A node that DOES own a body can be recorded elsewhere. Type references
+///   are offered to the same node as its declaration, and
+///   [`apply_span_to_entry`] keeps whichever extent ENDS LATEST, comparing end
+///   position and never width. A reference below the declaration wins the
+///   recorded location.
+///
+/// The body plane must not be a hostage of that second rule. So the origin is
+/// not a property of the node, it is a property of each OFFER, and
+/// [`StagingGraph::record_span_origin`] keeps the declaration extents in a
+/// side table of their own. Only [`SpanOrigin::Declaration`] writes there, and
+/// nothing a reference does can take an extent back out. The recorded location
+/// keeps its existing policy, untouched.
+///
+/// The discriminator is the **call path**, which is known statically at every
+/// minting site, not flag state. In particular it is not `is_definition`: that
+/// flag answers "is this symbol declared somewhere in the workspace", a fact
+/// about identity, and it is monotonic. `extern "C"` prototypes are real
+/// declarations that never opt into it, and (before this change) a reference
+/// site could set it.
+///
+/// [`GraphBuildHelper::ensure_callee`]: super::helper::GraphBuildHelper::ensure_callee
+/// [`apply_span_to_entry`]: fn@apply_span_to_entry
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpanOrigin {
+    /// The span is a declaration of this node that carries a body: a function
+    /// with a block, a `struct X { ... }`, a class with members. The bytes in
+    /// the range belong to the node, so the range is recorded as its body
+    /// extent and the body plane fingerprints it.
+    Declaration,
+    /// The span is a genuine declaration of the node's identity that carries
+    /// NO body: a C `struct Config;` forward declaration, a C++ `class
+    /// Widget;`. The node is a definition and the location is its own, but
+    /// there is no body to fingerprint, so this offer is not recorded as a
+    /// body extent.
+    BodylessDeclaration,
+    /// The span belongs to a site that merely referenced the node: a call
+    /// site, or a type reference such as `struct payload *p` in a parameter
+    /// list. Neither the extent nor the identity is the node's own.
+    CallSite,
+}
+
+/// A source extent recorded as a node's own body, in the `NodeEntry`
+/// coordinate system (1-based lines, 0-based columns).
+///
+/// Build-time only. It never reaches a `NodeEntry` field or the snapshot: the
+/// only thing downstream needs is the `body_hash` computed from it, and
+/// consumers of the body plane already key on that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BodySpan {
+    /// 1-based first line of the body.
+    pub start_line: u32,
+    /// 0-based column on `start_line` where the body begins.
+    pub start_column: u32,
+    /// 1-based last line of the body.
+    pub end_line: u32,
+    /// 0-based column on `end_line` where the body ends.
+    pub end_column: u32,
+}
+
+impl BodySpan {
+    /// Convert a plugin-supplied [`Span`](crate::graph::node::Span), whose
+    /// lines are 0-based, into the `NodeEntry` coordinate system.
+    #[must_use]
+    pub fn from_span(span: &crate::graph::node::Span) -> Self {
+        Self {
+            start_line: u32::try_from(span.start.line.saturating_add(1)).unwrap_or(u32::MAX),
+            start_column: u32::try_from(span.start.column).unwrap_or(u32::MAX),
+            end_line: u32::try_from(span.end.line.saturating_add(1)).unwrap_or(u32::MAX),
+            end_column: u32::try_from(span.end.column).unwrap_or(u32::MAX),
+        }
+    }
+
+    /// True when `self` ends after `other`, the same comparison
+    /// [`apply_span_to_entry`] uses to settle competing extents.
+    ///
+    /// Applying it here means the body extent is the one the recorded location
+    /// WOULD have been, had only bodied declaration sites spoken.
+    ///
+    /// [`apply_span_to_entry`]: fn@apply_span_to_entry
+    #[must_use]
+    fn ends_after(&self, other: &Self) -> bool {
+        self.end_line > other.end_line
+            || (self.end_line == other.end_line && self.end_column > other.end_column)
+    }
+}
+
 /// Metadata flags that are monotonic when merging duplicate staged nodes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NodeMetadataFlag {
@@ -491,6 +591,11 @@ fn apply_node_metadata(entry: &mut NodeEntry, update: &NodeMetadataUpdate) {
 
 /// Apply a source span to a `NodeEntry`, updating line/column info if the new span
 /// extends the existing range.
+///
+/// The comparison is on END POSITION alone, not on width: a span that ends
+/// before the recorded one loses even when it is the wider of the two. This
+/// settles the RECORDED location only. A declaration that loses it still owns
+/// its body, which [`StagingGraph::record_span_origin`] files separately.
 fn apply_span_to_entry(entry: &mut NodeEntry, span: &crate::graph::node::Span) {
     let start_line = u32::try_from(span.start.line.saturating_add(1)).unwrap_or(u32::MAX);
     let start_column = u32::try_from(span.start.column).unwrap_or(u32::MAX);
@@ -853,6 +958,25 @@ pub struct StagingGraph {
     /// the Rust builder at Pass 2.5 to populate its `MacroBoundaryConfig`.
     /// Empty on every non-Rust staging graph (the other plugins never read it).
     macro_options: super::entrypoint::MacroBuildOptions,
+    /// The extent each staged node owns as its BODY, as offered by a bodied
+    /// declaration site (issue #748).
+    ///
+    /// Not the extent the node is recorded at, which is a different question
+    /// a later reference can win. A node absent from this table has never been
+    /// offered a span by a bodied declaration: it is a call-target stub, a type
+    /// reference, or a bodyless forward declaration.
+    ///
+    /// Build-time only: [`Self::attach_body_hashes`] fingerprints exactly these
+    /// ranges, and nothing carries the table past commit. That is deliberate. `NodeMetadataFlag` is a transport onto
+    /// `NodeEntry` booleans, so expressing this as a flag would add a
+    /// persisted `NodeEntry` field and force a snapshot-format migration for
+    /// a fact only the build seam ever reads. Declining to attach here is
+    /// enough: the node reaches the snapshot with `body_hash: None`, and every
+    /// consumer of the body plane keys on that.
+    ///
+    /// Keyed by the `expected_id` [`Self::add_node`] hands out, which restarts
+    /// at zero after [`Self::rollback`], so rollback clears this too.
+    declaration_spans: HashMap<NodeId, BodySpan>,
 }
 
 impl StagingGraph {
@@ -875,6 +999,7 @@ impl StagingGraph {
             c_indirect: None,
             go_hints: GoHints::default(),
             macro_options: super::entrypoint::MacroBuildOptions::default(),
+            declaration_spans: HashMap::with_capacity(nodes),
         }
     }
 
@@ -928,6 +1053,11 @@ impl StagingGraph {
         let ops_bytes = self.operations.len() * std::mem::size_of::<StagingOp>();
         let map_bytes =
             self.node_id_map.len() * (std::mem::size_of::<usize>() + std::mem::size_of::<NodeId>());
+        // The body-extent table is one entry per node a declaration site
+        // offered a span to, so on a declaration-dense file it is the same
+        // order as `node_id_map` (issue #748).
+        let extent_bytes = self.declaration_spans.len()
+            * (std::mem::size_of::<NodeId>() + std::mem::size_of::<BodySpan>());
 
         // Account for heap allocations inside each StagingOp variant.
         let heap_bytes: usize = self
@@ -943,7 +1073,7 @@ impl StagingGraph {
             })
             .sum();
 
-        ops_bytes + map_bytes + heap_bytes
+        ops_bytes + map_bytes + extent_bytes + heap_bytes
     }
 
     /// Stage a node addition.
@@ -972,6 +1102,10 @@ impl StagingGraph {
     /// Update an existing staged node entry with additional metadata.
     ///
     /// Returns true if the node was found and updated.
+    ///
+    /// Span provenance is left untouched. Use
+    /// [`Self::update_node_entry_tracking_span_origin`] from any path that
+    /// knows where its span came from.
     pub fn update_node_entry(&mut self, node_id: NodeId, update: &NodeMetadataUpdate) -> bool {
         for op in &mut self.operations {
             if let StagingOp::AddNode {
@@ -989,6 +1123,119 @@ impl StagingGraph {
         }
 
         false
+    }
+
+    /// [`Self::update_node_entry`] plus body-extent bookkeeping.
+    ///
+    /// The two are independent, deliberately. `apply_node_metadata` settles
+    /// the RECORDED location under the existing latest-ending rule, which a
+    /// type reference below the declaration can win. `record_span_origin`
+    /// settles the BODY extent, which only a bodied declaration can write.
+    /// A declaration therefore keeps its body even when a later reference
+    /// takes over the location it is reported at.
+    ///
+    /// Returns true if the node was found and updated.
+    pub fn update_node_entry_tracking_span_origin(
+        &mut self,
+        node_id: NodeId,
+        update: &NodeMetadataUpdate,
+        origin: SpanOrigin,
+    ) -> bool {
+        let mut found = false;
+        for op in &mut self.operations {
+            if let StagingOp::AddNode {
+                entry,
+                expected_id: Some(expected_id),
+            } = op
+            {
+                if *expected_id != node_id {
+                    continue;
+                }
+
+                apply_node_metadata(entry, update);
+                found = true;
+                break;
+            }
+        }
+
+        if found && let Some(span) = update.span.as_ref() {
+            self.record_span_origin(node_id, span, origin);
+        }
+
+        found
+    }
+
+    /// Record what a span offered to a staged node IS.
+    ///
+    /// Only [`SpanOrigin::Declaration`] writes anything: it files the extent
+    /// as a body this node owns. [`SpanOrigin::CallSite`] and
+    /// [`SpanOrigin::BodylessDeclaration`] are no-ops, so a reference can
+    /// never take a body extent back out of the table once a declaration has
+    /// put one in. Competing declaration extents settle by
+    /// [`BodySpan::ends_after`], matching the recorded-location rule.
+    pub fn record_span_origin(
+        &mut self,
+        node_id: NodeId,
+        span: &crate::graph::node::Span,
+        origin: SpanOrigin,
+    ) {
+        if !matches!(origin, SpanOrigin::Declaration) {
+            return;
+        }
+        self.offer_declaration_span(node_id, BodySpan::from_span(span));
+    }
+
+    /// The single place a body extent is filed.
+    ///
+    /// Both public entry points route through here so the settling rule cannot
+    /// differ between them: an earlier draft had `set_declaration_span`
+    /// overwriting unconditionally, which made two direct offers
+    /// arrival-order dependent and contradicted the invariant the rest of the
+    /// change rests on.
+    fn offer_declaration_span(&mut self, node_id: NodeId, candidate: BodySpan) {
+        match self.declaration_spans.entry(node_id) {
+            std::collections::hash_map::Entry::Occupied(mut slot) => {
+                if candidate.ends_after(slot.get()) {
+                    slot.insert(candidate);
+                }
+            }
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(candidate);
+            }
+        }
+    }
+
+    /// The extent a staged node owns as its body, if any declaration site has
+    /// offered one.
+    ///
+    /// `None` means the node is outside both halves of the body plane: it is a
+    /// call-target stub, a type reference, or a bodyless forward declaration.
+    /// [`Self::attach_body_hashes`] fingerprints exactly this extent.
+    #[must_use]
+    pub fn declaration_span(&self, node_id: NodeId) -> Option<BodySpan> {
+        self.declaration_spans.get(&node_id).copied()
+    }
+
+    /// File a body extent directly, for a caller that stages through
+    /// [`Self::add_node`] rather than through
+    /// [`GraphBuildHelper`](super::helper::GraphBuildHelper).
+    ///
+    /// `add_node` is the raw primitive: it records a `NodeEntry`, which says
+    /// where the node is REPORTED, and nothing about whether the bytes there
+    /// are a body the node owns. Every plugin goes through the helper, which
+    /// files the extent from the sink it was given. A direct `add_node` caller
+    /// that wants the node in the body plane has to say so here.
+    ///
+    /// Staying silent is the right answer for the two direct callers in the
+    /// tree. `sqry-classpath`'s emitter builds nodes from JVM bytecode and
+    /// never runs [`Self::attach_body_hashes`] at all. The ServiceNow XML
+    /// replay re-stages nodes whose extents are in delegated-script
+    /// coordinates, which the parent's XML-bytes pass must not read.
+    /// Competing offers settle by [`BodySpan::ends_after`], exactly as they do
+    /// through [`Self::record_span_origin`]. The two must not diverge: a raw
+    /// caller offering two extents has to get the same answer a plugin would.
+    pub fn set_declaration_span(&mut self, node_id: NodeId, span: BodySpan) {
+        self.offer_declaration_span(node_id, span);
     }
 
     /// Stage an edge addition.
@@ -1637,6 +1884,16 @@ impl StagingGraph {
         self.stats = StagingStats::default();
         self.confidence = None;
         self.c_indirect = None;
+        // `next_node_index` restarts at 0, so the next `add_node` reissues
+        // `NodeId { index: 0, .. }`. EVERY side table keyed by the ids this
+        // graph handed out therefore aliases brand-new nodes unless it is
+        // dropped here: a stale provenance mark silently denies a real
+        // declaration its body hash, a stale metadata entry lands on the wrong
+        // node, and a stale Go hint is remapped and committed against an
+        // identity that no longer means what it did.
+        self.declaration_spans.clear();
+        self.macro_metadata = crate::graph::unified::storage::metadata::NodeMetadataStore::new();
+        self.go_hints = GoHints::default();
     }
 
     /// Clear the staging buffer after successful commit.
@@ -1669,14 +1926,17 @@ impl StagingGraph {
     ///
     /// # Notes
     ///
-    /// - Only nodes with valid body spans (`start_line` > 0, end > start) are hashed.
-    ///   Shape descriptors share that exact gate, so a `{0,0}` data-quality span
-    ///   suppresses both identically (SPEC §7).
+    /// - Only nodes with a recorded body extent are hashed, and only when that
+    ///   extent is valid (`start_line` > 0, end > start). A node with no body
+    ///   extent has never been offered a span by a bodied declaration site: it
+    ///   is a call-target stub, a type reference, or a forward declaration.
+    ///   Shape descriptors are gated on the hash itself, so the two halves of
+    ///   the body plane are lock-step by construction (SPEC §7).
     /// - Bodies smaller than 4 bytes are not hashed to avoid trivial matches; the
     ///   shape walker independently emits an explicit `unhashable` marker for tiny
     ///   bodies (it never silently drops one).
     pub fn attach_body_hashes(&mut self, content: &[u8], shape: Option<&ShapeAttachCtx<'_>>) {
-        use super::body_hash::{build_line_offsets, compute_node_body_hash, has_valid_body_span};
+        use super::body_hash::{build_line_offsets, compute_body_hash_at};
         use crate::graph::unified::node::kind::NodeKind;
 
         let line_offsets = build_line_offsets(content);
@@ -1691,19 +1951,49 @@ impl StagingGraph {
             crate::graph::unified::storage::shape::ShapeDescriptor,
         )> = Vec::new();
 
+        // Disjoint field borrows: the walk holds `self.operations` mutably while
+        // reading the body-extent table, which is a separate field.
+        let declaration_spans = &self.declaration_spans;
+
         for op in &mut self.operations {
             if let StagingOp::AddNode { entry, expected_id } = op {
-                if entry.body_hash.is_none() {
-                    entry.body_hash = compute_node_body_hash(content, entry, &line_offsets);
+                // Issue #748: fingerprint the extent a DECLARATION offered this
+                // node, not the extent the node happens to be recorded at.
+                //
+                // The two differ in both directions. A call-target stub is
+                // recorded at the caller's extent, which is a genuine range
+                // `has_valid_body_span` cannot tell from a body, so every stub
+                // minted from one call site would hash identically. And a real
+                // declaration can be recorded at a later type reference, which
+                // would cost it a body it genuinely owns.
+                //
+                // No body extent means no declaration site ever offered one:
+                // the node is a stub, a type reference, or a bodyless forward
+                // declaration. It leaves the body plane.
+                let body_span = expected_id.and_then(|node_id| declaration_spans.get(&node_id));
+
+                if entry.body_hash.is_none()
+                    && let Some(body_span) = body_span
+                {
+                    entry.body_hash =
+                        compute_body_hash_at(content, entry.kind, *body_span, &line_offsets);
                 }
                 // Sibling computation: identifier-blind shape descriptor for
-                // Function/Method bodies, gated on the same span-validity contract
-                // as body_hash above.
+                // Function/Method bodies, over the same extent.
+                //
+                // Gated on `body_hash.is_some()` rather than on repeating the
+                // span-validity contract, which makes the two halves of the body
+                // plane lock-step BY CONSTRUCTION instead of by measurement. The
+                // two conditions are not the same: `compute_body_hash_at` also
+                // declines a body under its minimum length, so a valid but tiny
+                // extent used to earn a descriptor and no hash. The corpus never
+                // showed one, but "never showed one" is not an invariant.
                 if let Some(ctx) = shape
+                    && entry.body_hash.is_some()
+                    && let Some(body_span) = body_span
                     && let Some(node_id) = *expected_id
                     && matches!(entry.kind, NodeKind::Function | NodeKind::Method)
-                    && has_valid_body_span(entry)
-                    && let Some(descriptor) = ctx.descriptor_for(entry)
+                    && let Some(descriptor) = ctx.descriptor_at(*body_span)
                 {
                     pending_descriptors.push((node_id, descriptor));
                 }
@@ -1886,11 +2176,16 @@ impl<'a> ShapeAttachCtx<'a> {
     /// The recorded span is first converted to a byte range with the same
     /// `resolve_body_span` `body_hash` uses. Going through the byte range (rather than
     /// feeding the recorded line/column straight to `descendant_for_point_range`) is
-    /// what makes this work across the whole plugin set: most plugins record true
-    /// `(row, column)`, but several (php, perl, r, elixir, plsql, ...) encode the
-    /// span as line 1 plus an absolute byte offset in the column. `resolve_body_span`
-    /// maps both conventions to the correct bytes via `line_offsets`, exactly as it
-    /// does for `body_hash`, so the two seams stay in lock-step.
+    /// what makes this work across the whole plugin set. Historically several
+    /// plugins (php, perl, r, elixir, plsql, ...) encoded the span as line 1 plus
+    /// an absolute byte offset in the column, and `resolve_body_span` maps that to
+    /// the correct bytes via `line_offsets` because `line_offsets[0]` is 0. NO
+    /// PLUGIN EMITS THAT ENCODING ANY MORE: every span reaching a mint is now built
+    /// from a tree-sitter node or resolved through `LineIndex`. The tolerance is
+    /// kept because it costs nothing and old snapshots still carry such spans, but
+    /// it is legacy tolerance, not a live plugin convention, and a new plugin must
+    /// not rely on it. Going through the byte range also keeps this seam in
+    /// lock-step with `body_hash`.
     ///
     /// `descendant_for_byte_range` returns the SMALLEST node spanning the range,
     /// which for a recorded function/method span is the function node itself. A
@@ -1899,16 +2194,16 @@ impl<'a> ShapeAttachCtx<'a> {
     /// belong to a different content buffer), so we return `None` rather than
     /// fingerprint the wrong node, the same conservative stance `body_hash` takes for
     /// an invalid span.
-    fn descriptor_for(
+    fn descriptor_at(
         &self,
-        entry: &NodeEntry,
+        body_span: BodySpan,
     ) -> Option<crate::graph::unified::storage::shape::ShapeDescriptor> {
         let (start_byte, end_byte) = crate::graph::unified::build::body_hash::resolve_body_span(
             &self.line_offsets,
-            entry.start_line,
-            entry.start_column,
-            entry.end_line,
-            entry.end_column,
+            body_span.start_line,
+            body_span.start_column,
+            body_span.end_line,
+            body_span.end_column,
             self.src.len(),
         )?;
         let node = self
@@ -2713,8 +3008,28 @@ mod tests {
         var_entry.end_line = 2;
         var_entry.end_column = 10;
 
-        staging.add_node(func_entry);
-        staging.add_node(var_entry);
+        // `add_node` is the raw primitive and says nothing about bodies, so
+        // declare the extents the way `GraphBuildHelper` does (issue #748).
+        let func_id = staging.add_node(func_entry);
+        let var_id = staging.add_node(var_entry);
+        staging.set_declaration_span(
+            func_id,
+            BodySpan {
+                start_line: 1,
+                start_column: 0,
+                end_line: 1,
+                end_column: 23,
+            },
+        );
+        staging.set_declaration_span(
+            var_id,
+            BodySpan {
+                start_line: 2,
+                start_column: 0,
+                end_line: 2,
+                end_column: 10,
+            },
+        );
 
         // Content for the file
         let content = b"fn foo() { return 42; }\nlet x = 42";
@@ -2835,6 +3150,27 @@ mod tests {
         var_entry.end_column = 38;
         let var_node_id = staging.add_node(var_entry);
 
+        // `add_node` is the raw primitive and says nothing about bodies, so
+        // declare the extents the way `GraphBuildHelper` does (issue #748).
+        staging.set_declaration_span(
+            func_node_id,
+            BodySpan {
+                start_line: u32::try_from(sp.row).unwrap() + 1,
+                start_column: u32::try_from(sp.column).unwrap(),
+                end_line: u32::try_from(ep.row).unwrap() + 1,
+                end_column: u32::try_from(ep.column).unwrap(),
+            },
+        );
+        staging.set_declaration_span(
+            var_node_id,
+            BodySpan {
+                start_line: 1,
+                start_column: 24,
+                end_line: 1,
+                end_column: 38,
+            },
+        );
+
         let ctx = ShapeAttachCtx::new(&tree, src.as_bytes(), &SeamTestMapping);
         staging.attach_body_hashes(src.as_bytes(), Some(&ctx));
 
@@ -2875,6 +3211,573 @@ mod tests {
         assert!(
             staging.take_macro_metadata().shape_descriptors().is_empty(),
             "without a shape context no descriptors are produced"
+        );
+    }
+
+    /// Source used by the span-provenance tests below. `callee` is called on
+    /// line 1 and declared on line 2, which is the ordering that lets the
+    /// call-site extent reach the node first.
+    const PROVENANCE_SRC: &str = "fn caller() { callee(1); }\n\
+         fn callee(x: i32) -> i32 { let y = x + 1; if y > 0 { return y; } y }\n";
+
+    /// Locate the `callee(1)` call expression and the `fn callee` item in
+    /// [`PROVENANCE_SRC`].
+    fn provenance_nodes(
+        tree: &tree_sitter::Tree,
+    ) -> (tree_sitter::Node<'_>, tree_sitter::Node<'_>) {
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        let items: Vec<_> = root
+            .named_children(&mut cursor)
+            .filter(|n| n.kind() == "function_item")
+            .collect();
+        let caller = items[0];
+        let declaration = items[1];
+        // The call expression sits inside `caller`'s body.
+        let mut stack = vec![caller];
+        let mut call = None;
+        while let Some(node) = stack.pop() {
+            if node.kind() == "call_expression" {
+                call = Some(node);
+                break;
+            }
+            let mut c = node.walk();
+            for child in node.named_children(&mut c) {
+                stack.push(child);
+            }
+        }
+        (call.expect("call_expression present"), declaration)
+    }
+
+    /// Issue #748: a node minted by `ensure_callee` holds the CALLER's extent.
+    /// That extent is a genuine range, so the span-validity gate admitted it and
+    /// the stub was fingerprinted as if it owned the caller's body. Both halves
+    /// of the body plane must decline it.
+    #[test]
+    fn ensure_callee_stub_gets_no_body_hash_and_no_shape_descriptor() {
+        use crate::graph::node::{Language, Span};
+        use crate::graph::unified::build::helper::{CalleeKindHint, GraphBuildHelper};
+
+        let tree = parse_rust(PROVENANCE_SRC);
+        let (call, _) = provenance_nodes(&tree);
+
+        let mut staging = StagingGraph::new();
+        let stub_id = {
+            let mut helper =
+                GraphBuildHelper::new(&mut staging, std::path::Path::new("t.rs"), Language::Rust);
+            helper.ensure_callee("callee", Span::from_node(&call), CalleeKindHint::Function)
+        };
+
+        assert!(
+            staging.declaration_span(stub_id).is_none(),
+            "a stub minted from a call site owns no body extent"
+        );
+
+        let ctx = ShapeAttachCtx::new(&tree, PROVENANCE_SRC.as_bytes(), &SeamTestMapping);
+        staging.attach_body_hashes(PROVENANCE_SRC.as_bytes(), Some(&ctx));
+
+        let stub_entry = staging
+            .nodes()
+            .find(|n| n.expected_id == Some(stub_id))
+            .expect("stub is staged")
+            .entry;
+        assert!(
+            stub_entry.body_hash.is_none(),
+            "a call-site stub must not carry a body hash"
+        );
+        assert!(
+            !staging
+                .take_macro_metadata()
+                .shape_descriptors()
+                .contains_key(&stub_id),
+            "a call-site stub must not carry a shape descriptor either: the two \
+             halves of the body plane stay in lock-step"
+        );
+    }
+
+    /// The other half of the contract: a symbol called above its own definition
+    /// is the common case, so a declaration reaching the same node later must
+    /// file its own extent as the node's body, or the fix would silently strip
+    /// real bodies.
+    #[test]
+    fn declaration_after_ensure_callee_restores_the_body_plane() {
+        use crate::graph::node::{Language, Span};
+        use crate::graph::unified::build::helper::{CalleeKindHint, GraphBuildHelper};
+
+        let tree = parse_rust(PROVENANCE_SRC);
+        let (call, declaration) = provenance_nodes(&tree);
+
+        let mut staging = StagingGraph::new();
+        let node_id = {
+            let mut helper =
+                GraphBuildHelper::new(&mut staging, std::path::Path::new("t.rs"), Language::Rust);
+            let stub_id =
+                helper.ensure_callee("callee", Span::from_node(&call), CalleeKindHint::Function);
+            // The declaration handler reaches the same cached node afterwards.
+            let declared_id = helper.add_function_with_visibility(
+                "callee",
+                Some(Span::from_node(&declaration)),
+                false,
+                false,
+                None,
+            );
+            assert_eq!(
+                stub_id, declared_id,
+                "the declaration must land on the node the call site already minted"
+            );
+            declared_id
+        };
+
+        let body_span = staging
+            .declaration_span(node_id)
+            .expect("the declaration files its own extent as the node's body");
+        assert_eq!(
+            (body_span.start_line, body_span.end_line),
+            (2, 2),
+            "and the extent is the declaration's, on line 2"
+        );
+
+        let ctx = ShapeAttachCtx::new(&tree, PROVENANCE_SRC.as_bytes(), &SeamTestMapping);
+        staging.attach_body_hashes(PROVENANCE_SRC.as_bytes(), Some(&ctx));
+
+        let entry = staging
+            .nodes()
+            .find(|n| n.expected_id == Some(node_id))
+            .expect("node is staged")
+            .entry;
+        assert!(
+            entry.body_hash.is_some(),
+            "a declared function keeps its body hash even when a call site minted it first"
+        );
+        assert!(
+            staging
+                .take_macro_metadata()
+                .shape_descriptors()
+                .contains_key(&node_id),
+            "a declared function keeps its shape descriptor too"
+        );
+    }
+
+    /// A reference below a declaration wins the RECORDED LOCATION and must
+    /// not take the body with it.
+    ///
+    /// This is the regression for the loss round 4 reproduced. The old model
+    /// asked "is the extent this node is recorded at a body it owns", so the
+    /// declaration losing the location cost it its hash, and two files holding
+    /// identical bodies stopped being reported as duplicates the moment either
+    /// one added a later reference. The body extent is now recorded separately
+    /// and nothing a reference does can take it back out.
+    ///
+    /// Note which span wins the location. `apply_span_to_entry` compares end
+    /// position and nothing else, so the call site on line 2 beats the
+    /// declaration on line 1 even though the declaration is the WIDER of the
+    /// two (14 columns against 8). Width never enters that comparison.
+    #[test]
+    fn a_later_call_site_takes_the_location_but_not_the_body() {
+        use crate::graph::node::{Language, Span};
+        use crate::graph::unified::build::helper::GraphBuildHelper;
+
+        // `twin` is byte-identical to `callee` and nothing references it, so it
+        // is the control: the shape descriptor is identifier-blind, so the two
+        // must agree if and only if `callee`'s was computed over its own
+        // declaration.
+        //
+        // The bodies carry real control flow on purpose. An empty body and a
+        // call expression both produce an all-zero histogram under the seam's
+        // test mapping, so a trivial fixture cannot tell a descriptor of the
+        // function from a descriptor of the call.
+        let src = "fn callee(x: i32) -> i32 { let y = x + 1; if y > 0 { return y; } y }\n\
+                   fn caller() { callee(1); }\n\
+                   fn twin(x: i32) -> i32 { let y = x + 1; if y > 0 { return y; } y }\n";
+        let tree = parse_rust(src);
+        let root = tree.root_node();
+        let mut cursor = root.walk();
+        let items: Vec<_> = root
+            .named_children(&mut cursor)
+            .filter(|n| n.kind() == "function_item")
+            .collect();
+        let declaration = items[0];
+        let twin_declaration = items[2];
+        // The real `call_expression` node, so the reference offers an extent
+        // that resolves exactly. That makes the wrong-extent failure mode
+        // compute a descriptor FOR THE CALL rather than decline one.
+        let call = {
+            let mut stack = vec![items[1]];
+            let mut found = None;
+            while let Some(node) = stack.pop() {
+                if node.kind() == "call_expression" {
+                    found = Some(node);
+                    break;
+                }
+                let mut c = node.walk();
+                for child in node.named_children(&mut c) {
+                    stack.push(child);
+                }
+            }
+            found.expect("call_expression present")
+        };
+
+        let mut staging = StagingGraph::new();
+        let (node_id, twin_id) = {
+            let mut helper =
+                GraphBuildHelper::new(&mut staging, std::path::Path::new("t.rs"), Language::Rust);
+            // Declaration on line 1 FIRST, then the call site on line 2
+            // (0-indexed row 1), which is the order that used to cost the
+            // declaration its body.
+            let declared_id = helper.add_function_with_visibility(
+                "callee",
+                Some(Span::from_node(&declaration)),
+                false,
+                false,
+                None,
+            );
+            let call_site = Span::from_node(&call);
+            // Through the public reference sink rather than `ensure_callee`,
+            // which returns an exact-kind cache hit untouched and so would not
+            // offer the span at all. This is the shape a C++ elaborated type
+            // reference below its declaration takes.
+            let stub_id = helper.add_call_site_node("callee", call_site, NodeKind::Function);
+            assert_eq!(
+                stub_id, declared_id,
+                "the reference must land on the node the declaration already minted"
+            );
+            let twin_id = helper.add_function_with_visibility(
+                "twin",
+                Some(Span::from_node(&twin_declaration)),
+                false,
+                false,
+                None,
+            );
+            (declared_id, twin_id)
+        };
+
+        let entry = staging
+            .nodes()
+            .find(|n| n.expected_id == Some(node_id))
+            .expect("node is staged")
+            .entry;
+        assert_eq!(
+            (entry.start_line, entry.end_line),
+            (2, 2),
+            "apply_span_to_entry keeps the extent that ends latest, and line 2 \
+             ends after line 1, so the call site takes the recorded location \
+             even though the declaration is wider"
+        );
+
+        let body_span = staging
+            .declaration_span(node_id)
+            .expect("the declaration's extent stays on file as the node's body");
+        assert_eq!(
+            (body_span.start_line, body_span.end_line),
+            (1, 1),
+            "and it is line 1, the declaration, not line 2"
+        );
+
+        let ctx = ShapeAttachCtx::new(&tree, src.as_bytes(), &SeamTestMapping);
+        staging.attach_body_hashes(src.as_bytes(), Some(&ctx));
+        let hashed = staging
+            .nodes()
+            .find(|n| n.expected_id == Some(node_id))
+            .expect("node is staged")
+            .entry
+            .body_hash;
+        let line_offsets =
+            crate::graph::unified::build::body_hash::build_line_offsets(src.as_bytes());
+        let expected = crate::graph::unified::build::body_hash::compute_body_hash_at(
+            src.as_bytes(),
+            NodeKind::Function,
+            body_span,
+            &line_offsets,
+        );
+        assert!(expected.is_some(), "line 1 is a hashable body");
+        assert_eq!(
+            hashed, expected,
+            "the hash is over `fn callee() {{}}` on line 1, not over the call \
+             site the node is reported at"
+        );
+
+        // The shape descriptor rides the same extent. Presence alone proves
+        // nothing here: `callee()` on line 2 is a real `call_expression` with an
+        // exact byte range, so a descriptor computed over the RECORDED span
+        // would exist too, it would just describe the wrong thing. Compare the
+        // content against the untouched twin instead.
+        let metadata = staging.take_macro_metadata();
+        let descriptors = metadata.shape_descriptors();
+        let got = descriptors
+            .get(&node_id)
+            .expect("the declared function has a descriptor");
+        let twin = descriptors
+            .get(&twin_id)
+            .expect("so does its byte-identical twin");
+        assert_eq!(
+            got.shape_hash, twin.shape_hash,
+            "the descriptor is computed over the declaration, so it matches the \
+             identical twin nothing references; a descriptor over the call site \
+             would not"
+        );
+        assert_eq!(
+            got.cf_histogram, twin.cf_histogram,
+            "and so does the control-flow histogram it is built from"
+        );
+    }
+
+    /// Two declaration sites offering the same node an extent settle by END
+    /// POSITION, not by arrival order.
+    ///
+    /// That is the rule that makes the invariant true: the body extent is the
+    /// one the RECORDED location would have been had only bodied declaration
+    /// sites spoken, and the recorded location keeps whichever extent ends
+    /// latest. Last-offer-wins would agree whenever a plugin happens to walk in
+    /// source order and disagree the moment one does not.
+    #[test]
+    fn competing_declaration_extents_settle_by_end_position_not_arrival_order() {
+        use crate::graph::node::{Language, Position, Span};
+        use crate::graph::unified::build::helper::GraphBuildHelper;
+
+        // No tree is parsed here: the two spans are constructed directly, so
+        // the offers arrive in an order no source walk would produce. That is
+        // the point of the case.
+        let mut staging = StagingGraph::new();
+        let node_id = {
+            let mut helper =
+                GraphBuildHelper::new(&mut staging, std::path::Path::new("t.rs"), Language::Rust);
+            // Offer the LATER-ending extent first (line 2), then an
+            // earlier-ending one (line 1). Arrival order and end position
+            // disagree here, which is the whole point.
+            let later = Span::new(
+                Position { line: 1, column: 0 },
+                Position {
+                    line: 1,
+                    column: 15,
+                },
+            );
+            let id = helper.add_function_with_visibility("dup", Some(later), false, false, None);
+            let earlier = Span::new(
+                Position { line: 0, column: 0 },
+                Position {
+                    line: 0,
+                    column: 35,
+                },
+            );
+            let again =
+                helper.add_function_with_visibility("dup", Some(earlier), false, false, None);
+            assert_eq!(id, again, "both offers land on one cached node");
+            id
+        };
+
+        let body_span = staging
+            .declaration_span(node_id)
+            .expect("a declaration filed an extent");
+        assert_eq!(
+            (body_span.start_line, body_span.end_line),
+            (2, 2),
+            "the extent that ends latest stands, even though the earlier-ending \
+             one arrived second and is the wider of the two"
+        );
+    }
+
+    /// The raw `set_declaration_span` entry point settles competing offers the
+    /// same way the plugin path does.
+    ///
+    /// It used to overwrite unconditionally, so two direct offers were
+    /// arrival-order dependent while two plugin offers were not. A raw caller
+    /// has to get the same answer a plugin would, or the invariant is only
+    /// true of one of the two doors into the table.
+    #[test]
+    fn the_raw_extent_api_settles_offers_the_same_way_the_plugin_path_does() {
+        let mut staging = StagingGraph::new();
+        let node_id = staging.add_node(NodeEntry::new(
+            NodeKind::Function,
+            StringId::new(1),
+            FileId::new(0),
+        ));
+
+        let later = BodySpan {
+            start_line: 9,
+            start_column: 0,
+            end_line: 9,
+            end_column: 4,
+        };
+        let earlier = BodySpan {
+            start_line: 1,
+            start_column: 0,
+            end_line: 2,
+            end_column: 40,
+        };
+
+        // Offer the later-ending extent FIRST, then the earlier-ending one,
+        // which is the order where arrival and end position disagree.
+        staging.set_declaration_span(node_id, later);
+        staging.set_declaration_span(node_id, earlier);
+        assert_eq!(
+            staging.declaration_span(node_id),
+            Some(later),
+            "the extent that ends latest stands, even though the earlier-ending \
+             one arrived second and covers more lines"
+        );
+
+        // And the reverse order reaches the same answer, which is the whole
+        // point of settling on a property of the spans rather than on order.
+        let mut staging = StagingGraph::new();
+        let node_id = staging.add_node(NodeEntry::new(
+            NodeKind::Function,
+            StringId::new(1),
+            FileId::new(0),
+        ));
+        staging.set_declaration_span(node_id, earlier);
+        staging.set_declaration_span(node_id, later);
+        assert_eq!(staging.declaration_span(node_id), Some(later));
+    }
+
+    /// The body-extent table is real memory and the build-time telemetry has
+    /// to see it.
+    ///
+    /// `estimated_byte_size` feeds the indexing memory instrumentation. A
+    /// per-node side table that the estimate ignores understates every
+    /// declaration-dense file.
+    #[test]
+    fn the_body_extent_table_counts_toward_the_staging_size_estimate() {
+        let mut staging = StagingGraph::new();
+        let node_id = staging.add_node(NodeEntry::new(
+            NodeKind::Function,
+            StringId::new(1),
+            FileId::new(0),
+        ));
+        let before = staging.estimated_byte_size();
+
+        staging.set_declaration_span(
+            node_id,
+            BodySpan {
+                start_line: 1,
+                start_column: 0,
+                end_line: 3,
+                end_column: 1,
+            },
+        );
+
+        assert!(
+            staging.estimated_byte_size() > before,
+            "filing a body extent allocates, so the estimate must grow (was \
+             {before}, now {})",
+            staging.estimated_byte_size()
+        );
+    }
+
+    /// `rollback` restarts `next_node_index` at zero, so every id this graph
+    /// handed out is about to be reissued. The body extents keyed by those ids
+    /// must go with them, or the first node staged after a rollback is hashed
+    /// over an unrelated file's extent.
+    #[test]
+    fn rollback_clears_body_extents_so_reissued_ids_do_not_alias() {
+        use crate::graph::node::{Language, Position, Span};
+        use crate::graph::unified::build::helper::GraphBuildHelper;
+
+        let tree = parse_rust(PROVENANCE_SRC);
+        let (_, declaration) = provenance_nodes(&tree);
+
+        // A declaration on the FIRST file's line 2, which is a real body
+        // extent. If it survived the rollback it would be mistaken for the
+        // second file's node's body.
+        let mut staging = StagingGraph::new();
+        let first_id = {
+            let mut helper =
+                GraphBuildHelper::new(&mut staging, std::path::Path::new("a.rs"), Language::Rust);
+            helper.add_function_with_visibility(
+                "callee",
+                Some(Span::from_node(&declaration)),
+                false,
+                false,
+                None,
+            )
+        };
+        assert!(staging.declaration_span(first_id).is_some());
+
+        staging.rollback();
+        assert!(
+            staging.declaration_span(first_id).is_none(),
+            "rollback must drop body extents keyed by ids it is about to reissue"
+        );
+
+        // Stage a node with NO body of its own into the reused graph. It gets
+        // the same NodeId the first file's declaration had.
+        let stub_id = {
+            let mut helper =
+                GraphBuildHelper::new(&mut staging, std::path::Path::new("b.rs"), Language::Rust);
+            let call_site = Span::new(
+                Position { line: 0, column: 4 },
+                Position {
+                    line: 0,
+                    column: 12,
+                },
+            );
+            helper.add_call_site_node("callee", call_site, NodeKind::Function)
+        };
+        assert_eq!(
+            stub_id, first_id,
+            "the reused graph is expected to reissue the same id, which is what \
+             makes a stale body extent dangerous"
+        );
+
+        let ctx = ShapeAttachCtx::new(&tree, PROVENANCE_SRC.as_bytes(), &SeamTestMapping);
+        staging.attach_body_hashes(PROVENANCE_SRC.as_bytes(), Some(&ctx));
+
+        let entry = staging
+            .nodes()
+            .find(|n| n.expected_id == Some(stub_id))
+            .expect("stub is staged")
+            .entry;
+        assert!(
+            entry.body_hash.is_none(),
+            "a stub staged after a rollback must not inherit the rolled-back \
+             declaration's body extent"
+        );
+    }
+
+    /// Body extents are not the only side table keyed by ids `rollback` is
+    /// about to reissue. The metadata store and the Go hint buffers are too,
+    /// and a stale entry in either lands on an unrelated new node.
+    #[test]
+    fn rollback_clears_every_side_table_keyed_by_reissued_node_ids() {
+        use crate::graph::unified::storage::metadata::NodeMetadataStore;
+
+        let mut staging = StagingGraph::new();
+        let file_id = FileId::new(0);
+        let name_id = StringId::new(1);
+        let node_id = staging.add_node(NodeEntry::new(NodeKind::Function, name_id, file_id));
+
+        let mut store = NodeMetadataStore::new();
+        store.mark_synthetic(node_id);
+        staging.merge_macro_metadata(&store);
+        staging
+            .go_hints_mut()
+            .receiver_calls
+            .push(GoReceiverCallHint {
+                call_site: node_id,
+                callee_method: node_id,
+                method_name: StringId::new(3),
+                receiver: GoReceiverHintKind::TypePrefixed {
+                    type_text: "pkg.Outer".to_string(),
+                },
+                argument_count: 0,
+                is_async: false,
+                file: file_id,
+            });
+        assert!(!staging.go_hints().receiver_calls.is_empty());
+
+        staging.rollback();
+
+        assert!(
+            staging.declaration_span(node_id).is_none(),
+            "body extents must not survive rollback"
+        );
+        assert!(
+            staging.go_hints().receiver_calls.is_empty(),
+            "Go hints carry staging-local NodeIds and must not survive rollback"
+        );
+        let drained = staging.take_macro_metadata();
+        assert!(
+            drained.is_empty() && drained.shape_descriptors().is_empty(),
+            "metadata keyed by reissued ids must not survive rollback, found {drained:?}"
         );
     }
 

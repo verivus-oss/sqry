@@ -46,6 +46,7 @@ use tree_sitter::{Node, Tree};
 
 use super::phpdoc_parser::{extract_phpdoc_comment, parse_phpdoc_tags};
 use super::type_extractor::{canonical_type_string, extract_type_names};
+use sqry_core::graph::unified::node::NodeKind;
 
 /// Maximum namespace nesting depth to prevent pathological cases.
 const DEFAULT_MAX_SCOPE_DEPTH: usize = 5;
@@ -1059,7 +1060,10 @@ fn process_extends_clause(
                     let span = span_from_node(child);
                     let parent_id = *node_map
                         .entry(parent_name.to_string())
-                        .or_insert_with(|| helper.add_class(parent_name, Some(span)));
+                        // Reference to a class declared elsewhere (issue #748).
+                        .or_insert_with(|| {
+                            helper.add_call_site_node(parent_name, span, NodeKind::Class)
+                        });
 
                     helper.add_inherits_edge(class_id, parent_id);
                 }
@@ -1088,7 +1092,10 @@ fn process_implements_clause(
                 let span = span_from_node(child);
                 let interface_id = *node_map
                     .entry(interface_name.to_string())
-                    .or_insert_with(|| helper.add_interface(interface_name, Some(span)));
+                    // Reference to an interface declared elsewhere (issue #748).
+                    .or_insert_with(|| {
+                        helper.add_call_site_node(interface_name, span, NodeKind::Interface)
+                    });
 
                 helper.add_implements_edge(class_id, interface_id);
             }
@@ -1133,11 +1140,9 @@ fn process_trait_use(
                 // Use add_node for traits since there's no dedicated add_trait method
                 // We'll use the Trait NodeKind
                 let trait_id = *node_map.entry(trait_name.to_string()).or_insert_with(|| {
-                    helper.add_node(
-                        trait_name,
-                        Some(span),
-                        sqry_core::graph::unified::node::NodeKind::Trait,
-                    )
+                    // A `use TraitName;` reference: the extent is the use clause in
+                    // THIS class, and the trait is declared elsewhere (issue #748).
+                    helper.add_call_site_node(trait_name, span, NodeKind::Trait)
                 });
 
                 // Trait usage is modeled as an Implements edge
@@ -1189,7 +1194,10 @@ fn process_interface_inheritance(
                         let span = span_from_node(base_child);
                         let parent_id = *node_map
                             .entry(parent_name.to_string())
-                            .or_insert_with(|| helper.add_interface(parent_name, Some(span)));
+                            // Reference to an interface declared elsewhere (#748).
+                            .or_insert_with(|| {
+                                helper.add_call_site_node(parent_name, span, NodeKind::Interface)
+                            });
 
                         // Interface inheritance uses Inherits edge
                         helper.add_inherits_edge(interface_id, parent_id);
@@ -2484,7 +2492,7 @@ fn process_ffi_member_call(
     // Create a native module node for the C function
     let ffi_name = format!("native::ffi::{method_name}");
     let call_span = span_from_node(node);
-    let target_id = helper.add_module(&ffi_name, Some(call_span));
+    let target_id = helper.add_call_site_node(&ffi_name, call_span, NodeKind::Module);
 
     // Add FFI edge (PHP FFI uses C calling convention)
     helper.add_ffi_edge(source_id, target_id, FfiConvention::C);
@@ -2522,7 +2530,7 @@ fn process_ffi_static_call(
     // Create a native module node for the library
     let ffi_name = format!("native::{library_name}");
     let call_span = span_from_node(node);
-    let target_id = helper.add_module(&ffi_name, Some(call_span));
+    let target_id = helper.add_call_site_node(&ffi_name, call_span, NodeKind::Module);
 
     // Add FFI edge (PHP FFI uses C calling convention)
     helper.add_ffi_edge(source_id, target_id, FfiConvention::C);

@@ -452,6 +452,11 @@ notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh
 version = "0.10.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.chacha20]]
+version = "0.10.2"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.chrono]]
 version = "0.4.44"
 criteria = "safe-to-deploy"
@@ -569,6 +574,11 @@ criteria = "safe-to-deploy"
 [[exemptions.cpufeatures]]
 version = "0.3.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.cpufeatures]]
+version = "0.3.1"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.crc32fast]]
 version = "1.5.0"
@@ -845,6 +855,11 @@ notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh
 version = "1.1.9"
 criteria = "safe-to-deploy"
 
+[[exemptions.flate2]]
+version = "1.1.10"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.float-cmp]]
 version = "0.10.0"
 criteria = "safe-to-deploy"
@@ -1117,6 +1132,11 @@ version = "0.4.18"
 criteria = "safe-to-run"
 notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
+[[exemptions.h2]]
+version = "0.4.19"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.half]]
 version = "2.7.1"
 criteria = "safe-to-run"
@@ -1260,6 +1280,11 @@ version = "1.11.0"
 criteria = "safe-to-run"
 notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
+[[exemptions.hyper]]
+version = "1.11.1"
+criteria = "safe-to-run"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.hyper-util]]
 version = "0.1.20"
 criteria = "safe-to-run"
@@ -1377,6 +1402,11 @@ criteria = "safe-to-deploy"
 [[exemptions.indexmap]]
 version = "2.14.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.indexmap]]
+version = "2.14.1"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.indicatif]]
 version = "0.18.6"
@@ -1544,6 +1574,11 @@ version = "0.1.20"
 criteria = "safe-to-deploy"
 notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
+[[exemptions.libredox]]
+version = "0.1.21"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.linux-raw-sys]]
 version = "0.4.15"
 criteria = "safe-to-run"
@@ -1612,6 +1647,11 @@ criteria = "safe-to-deploy"
 
 [[exemptions.lru]]
 version = "0.18.2"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.lru]]
+version = "0.18.3"
 criteria = "safe-to-deploy"
 notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
@@ -1781,6 +1821,11 @@ criteria = "safe-to-run"
 [[exemptions.owo-colors]]
 version = "4.3.0"
 criteria = "safe-to-deploy"
+
+[[exemptions.owo-colors]]
+version = "4.4.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.parking_lot]]
 version = "0.12.5"
@@ -2270,203 +2315,203 @@ criteria = "safe-to-deploy"
 notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.sqry-classpath]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-cli]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-core]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-daemon]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-daemon-client]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-daemon-protocol]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-db]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-c]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-cpp]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-csharp]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-css]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-dart]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-elixir]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-go]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-groovy]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-haskell]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-html]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-java]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-javascript]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-json]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-kotlin]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-lua]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-oracle-plsql]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-perl]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-php]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-pulumi]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-puppet]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-python]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-r]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-ruby]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-rust]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-salesforce-apex]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-sap-abap]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-scala]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-servicenow-xanadu]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-servicenow-xml]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-shell]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-sql]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-support]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-svelte]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-swift]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-terraform]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-typescript]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-vue]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lang-zig]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-lsp]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-mcp]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-mcp-redaction]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-plugin-registry]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.sqry-tree-sitter-support]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ssri]]
@@ -2851,7 +2896,7 @@ criteria = "safe-to-deploy"
 notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
 [[exemptions.tree-sitter-abap-sqry]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-bash]]
@@ -2883,7 +2928,7 @@ version = "0.0.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-elixir-sqry]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-go]]
@@ -2891,7 +2936,7 @@ version = "0.23.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-groovy-sqry]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-haskell]]
@@ -2919,19 +2964,24 @@ version = "0.23.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-kotlin-sqry]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-language]]
 version = "0.1.7"
 criteria = "safe-to-deploy"
 
+[[exemptions.tree-sitter-language]]
+version = "0.1.8"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
 [[exemptions.tree-sitter-lua]]
 version = "0.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-perl-sqry]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-php]]
@@ -2939,7 +2989,7 @@ version = "0.24.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-plsql-sqry]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-puppet]]
@@ -2983,7 +3033,7 @@ version = "2.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-svelte-sqry]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-swift]]
@@ -3003,7 +3053,7 @@ version = "0.23.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-vue-sqry]]
-version = "30.0.1"
+version = "31.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.tree-sitter-yaml]]
@@ -3117,6 +3167,11 @@ notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh
 
 [[exemptions.uuid]]
 version = "1.25.0"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.uuid]]
+version = "1.26.0"
 criteria = "safe-to-deploy"
 notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 
@@ -3387,6 +3442,11 @@ criteria = "safe-to-deploy"
 
 [[exemptions.which]]
 version = "8.0.5"
+criteria = "safe-to-deploy"
+notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
+
+[[exemptions.which]]
+version = "8.0.6"
 criteria = "safe-to-deploy"
 notes = "auto roll-forward of an already-trusted crate (vet-rollforward-apply.sh)"
 

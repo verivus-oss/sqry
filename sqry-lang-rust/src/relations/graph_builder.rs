@@ -1954,8 +1954,13 @@ fn walk_tree_for_staging(
                     build_ctx.file_module_path.as_deref(),
                 );
                 let span = span_from_node(node);
-                // Get or create the type node (may already exist from struct/enum definition)
-                let type_id = helper.add_struct(&qualified, Some(span));
+                // Get or create the type node (may already exist from struct/enum
+                // definition). The extent in hand is the `impl` BLOCK, which the
+                // type does not own, so this goes through the call-site sink for
+                // the same reason the `impl Trait for Type` path below does
+                // (issue #748). Inherent and trait impls sit in the same handler
+                // and the first pass converted only one of them.
+                let type_id = helper.add_call_site_node(&qualified, span, NodeKind::Struct);
                 build_trait_bound_reference_edges(node, content, helper, type_id)?;
 
                 // Emit per-type-parameter Type nodes + Constraint
@@ -2574,7 +2579,10 @@ fn build_impl_trait_for_staging(
 
     // Add the type node (as a struct, since we don't know the exact kind)
     // The struct may already exist if defined in this file
-    let type_id = helper.add_struct(&qualified_type, Some(span));
+    // The extent is the `impl` block, which the type does not own: its real
+    // declaration is the `struct`/`enum` item (issue #748). The sibling trait
+    // node below already passes no span for the same reason.
+    let type_id = helper.add_call_site_node(&qualified_type, span, NodeKind::Struct);
 
     // Add the trait node (as an interface/trait)
     // The trait may already exist if defined in this file

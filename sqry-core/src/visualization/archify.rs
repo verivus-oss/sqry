@@ -1347,20 +1347,35 @@ mod tests {
         let edges = BidirectionalEdgeStore::new();
         let indices = AuxiliaryIndices::new();
 
+        // Absolute paths on purpose. `FileRegistry::normalize_path` resolves a
+        // RELATIVE path against the process-wide current directory, and
+        // `sqry-core/src/session/manager.rs` mutates that from another test in
+        // this same binary. With relative fixture paths, the boundary labels
+        // `output_is_stable_across_parallel_rebuilds` compares came out rooted
+        // at whichever directory happened to be live, so the two renderings
+        // disagreed and the test failed intermittently. A synthetic absolute
+        // root removes the dependency without touching the session test.
+        // Absolute on BOTH platforms: `/x` has no prefix on Windows, so
+        // `Path::is_absolute` is false there and `normalize_path` would rejoin
+        // the process cwd, leaving the race in place.
+        #[cfg(windows)]
+        let root = Path::new(r"C:\sqry-archify-fixture");
+        #[cfg(not(windows))]
+        let root = Path::new("/sqry-archify-fixture");
         let f_web = files
-            .register_with_language(Path::new("web/app.jsx"), Some(Language::JavaScript))
+            .register_with_language(&root.join("web/app.jsx"), Some(Language::JavaScript))
             .unwrap();
         let f_routes = files
-            .register_with_language(Path::new("api/routes.rs"), Some(Language::Rust))
+            .register_with_language(&root.join("api/routes.rs"), Some(Language::Rust))
             .unwrap();
         let f_handlers = files
-            .register_with_language(Path::new("api/handlers.rs"), Some(Language::Rust))
+            .register_with_language(&root.join("api/handlers.rs"), Some(Language::Rust))
             .unwrap();
         let f_queries = files
-            .register_with_language(Path::new("db/queries.rs"), Some(Language::Rust))
+            .register_with_language(&root.join("db/queries.rs"), Some(Language::Rust))
             .unwrap();
         let f_schema = files
-            .register_with_language(Path::new("db/schema.sql"), Some(Language::Sql))
+            .register_with_language(&root.join("db/schema.sql"), Some(Language::Sql))
             .unwrap();
 
         let dashboard = node(

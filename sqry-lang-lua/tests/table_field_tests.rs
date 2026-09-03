@@ -4,10 +4,10 @@
 
 use std::path::Path;
 
+use sqry_core::graph::GraphBuilder;
 use sqry_core::graph::unified::StagingGraph;
 use sqry_core::graph::unified::build::StagingOp;
 use sqry_core::graph::unified::node::NodeKind;
-use sqry_core::graph::{GraphBuilder, Span};
 use sqry_lang_lua::relations::LuaGraphBuilder;
 use tree_sitter::Parser;
 
@@ -37,8 +37,14 @@ fn build_string_lookup(staging: &StagingGraph) -> HashMap<u32, String> {
     lookup
 }
 
-/// Helper to extract Property nodes from staging operations
-fn extract_property_nodes(staging: &StagingGraph) -> Vec<(String, Option<Span>)> {
+/// Helper to extract Property node NAMES from staging operations.
+///
+/// Names only. This used to return `(String, Option<Span>)` where the span was
+/// rebuilt with `Span::from_bytes` and then discarded by every one of the six
+/// callers, all of which map `|(name, _)|`. A reviewer pointed out that keeping
+/// a deprecated byte-offset constructor alive to feed a value nobody reads is
+/// not "asserting byte-range behaviour".
+fn extract_property_nodes(staging: &StagingGraph) -> Vec<String> {
     let strings = build_string_lookup(staging);
     staging
         .operations()
@@ -51,8 +57,7 @@ fn extract_property_nodes(staging: &StagingGraph) -> Vec<(String, Option<Span>)>
                     .get(&entry.name.index())
                     .cloned()
                     .unwrap_or_default();
-                let span = Span::from_bytes(entry.start_byte as usize, entry.end_byte as usize);
-                return Some((name, Some(span)));
+                return Some(name);
             }
             None
         })
@@ -85,7 +90,7 @@ fn test_table_constructor_fields() {
         "Expected at least 3 property nodes for table fields"
     );
 
-    let field_names: Vec<String> = properties.iter().map(|(name, _)| name.clone()).collect();
+    let field_names: Vec<String> = properties.clone();
 
     assert!(
         field_names.contains(&"host".to_string()),
@@ -127,7 +132,7 @@ fn test_nested_table_constructors() {
     let properties = extract_property_nodes(&staging);
 
     // Should track all fields including nested ones
-    let field_names: Vec<String> = properties.iter().map(|(name, _)| name.clone()).collect();
+    let field_names: Vec<String> = properties.clone();
 
     assert!(
         field_names.contains(&"database".to_string()),
@@ -168,7 +173,7 @@ fn test_dot_field_access() {
 
     let properties = extract_property_nodes(&staging);
 
-    let field_names: Vec<String> = properties.iter().map(|(name, _)| name.clone()).collect();
+    let field_names: Vec<String> = properties.clone();
 
     assert!(
         field_names.contains(&"config".to_string()),
@@ -201,7 +206,7 @@ fn test_bracket_field_access_string() {
 
     let properties = extract_property_nodes(&staging);
 
-    let field_names: Vec<String> = properties.iter().map(|(name, _)| name.clone()).collect();
+    let field_names: Vec<String> = properties.clone();
 
     assert!(
         field_names.contains(&"field_name".to_string()),
@@ -238,7 +243,7 @@ fn test_mixed_field_access_patterns() {
 
     let properties = extract_property_nodes(&staging);
 
-    let field_names: Vec<String> = properties.iter().map(|(name, _)| name.clone()).collect();
+    let field_names: Vec<String> = properties.clone();
 
     // Should track fields from both constructor and accesses
     assert!(
@@ -283,7 +288,7 @@ fn test_table_as_module_pattern() {
 
     let properties = extract_property_nodes(&staging);
 
-    let field_names: Vec<String> = properties.iter().map(|(name, _)| name.clone()).collect();
+    let field_names: Vec<String> = properties.clone();
 
     // Should track module fields
     assert!(

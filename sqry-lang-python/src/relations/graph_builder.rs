@@ -7,6 +7,7 @@ use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeId as UnifiedNodeId;
+use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
@@ -148,6 +149,11 @@ impl GraphBuilder for PythonGraphBuilder {
             &mut guard,
             &mut scope_tree,
         )?;
+
+        // Every binding the walk did not reach through a reference. Without
+        // this, an assignment nothing refers to never enters the graph and
+        // `sqry search` reports it absent (verivus-oss/sqry#758).
+        local_scopes::mint_unreferenced_bindings(&mut scope_tree, &mut helper);
 
         Ok(())
     }
@@ -355,7 +361,7 @@ fn walk_tree_for_graph(
             process_all_assignment(node, content, helper);
 
             // Check for annotated assignments (type hints on variables)
-            process_annotated_assignment(node, content, ast_graph, helper);
+            process_annotated_assignment(node, content, helper);
         }
         "function_definition" => {
             // Extract function context from AST graph
@@ -572,6 +578,14 @@ fn build_call_for_staging(
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
             span: (0, content.len()),
+            // Whole-file synthetic context, and a field NOTHING READS on this
+            // path: the caller node is minted by `ensure_callee` from the
+            // call-site span, so this value never reaches a node. It is set to
+            // `Span::default()` to match master, so the next reader does not
+            // have to work out which of two conventions is live. Reviewers
+            // confirmed it empirically: mutating this line survives the full
+            // package suite.
+            decl_span: Span::default(),
             is_async: false,
             is_method: false,
             class_name: None,
@@ -886,8 +900,10 @@ fn process_all_list(list_node: Node<'_>, content: &[u8], helper: &mut GraphBuild
             // Create a node for the exported symbol
             // We use add_function here as a generic symbol; the actual type
             // will be resolved later by cross-file analysis
+            // The extent is the __all__ string literal, not a declaration of
+            // the exported symbol (issue #748).
             let span = span_from_node(child);
-            let export_id = helper.add_function(&export_name, Some(span), false, false);
+            let export_id = helper.add_call_site_node(&export_name, span, NodeKind::Function);
 
             // Add export edge (Direct export, no alias for Python __all__)
             export_from_file_module(helper, export_id);
@@ -964,8 +980,10 @@ fn process_class_inheritance(
                 if let Ok(base_name) = child.utf8_text(content) {
                     let base_name = base_name.trim();
                     if !base_name.is_empty() {
+                        // The extent is the base-class NAME in the subclass's
+                        // header; the base is declared elsewhere (issue #748).
                         let span = span_from_node(child);
-                        let base_id = helper.add_class(base_name, Some(span));
+                        let base_id = helper.add_call_site_node(base_name, span, NodeKind::Class);
                         helper.add_inherits_edge(class_id, base_id);
                     }
                 }
@@ -975,8 +993,10 @@ fn process_class_inheritance(
                 if let Ok(base_name) = child.utf8_text(content) {
                     let base_name = base_name.trim();
                     if !base_name.is_empty() {
+                        // The extent is the base-class NAME in the subclass's
+                        // header; the base is declared elsewhere (issue #748).
                         let span = span_from_node(child);
-                        let base_id = helper.add_class(base_name, Some(span));
+                        let base_id = helper.add_call_site_node(base_name, span, NodeKind::Class);
                         helper.add_inherits_edge(class_id, base_id);
                     }
                 }
@@ -989,8 +1009,10 @@ fn process_class_inheritance(
                 {
                     let base_name = base_name.trim();
                     if !base_name.is_empty() {
+                        // The extent is the base-class NAME in the subclass's
+                        // header; the base is declared elsewhere (issue #748).
                         let span = span_from_node(child);
-                        let base_id = helper.add_class(base_name, Some(span));
+                        let base_id = helper.add_call_site_node(base_name, span, NodeKind::Class);
                         helper.add_inherits_edge(class_id, base_id);
                     }
                 }
@@ -1003,8 +1025,10 @@ fn process_class_inheritance(
                 {
                     let base_name = base_name.trim();
                     if !base_name.is_empty() {
+                        // The extent is the base-class NAME in the subclass's
+                        // header; the base is declared elsewhere (issue #748).
                         let span = span_from_node(child);
-                        let base_id = helper.add_class(base_name, Some(span));
+                        let base_id = helper.add_call_site_node(base_name, span, NodeKind::Class);
                         helper.add_inherits_edge(class_id, base_id);
                     }
                 }
@@ -1023,6 +1047,10 @@ struct CallContext {
     qualified_name: String,
     #[allow(dead_code)] // Reserved for scope analysis
     span: (usize, usize),
+    /// Real line/column span of the declaration. The byte tuple above cannot be
+    /// resolved to one without the file content, and feeding those offsets to
+    /// `Span::from_bytes` reports the declaration at line 1.
+    decl_span: Span,
     is_async: bool,
     is_method: bool,
     class_name: Option<String>,
@@ -1153,6 +1181,7 @@ fn walk_ast(
             contexts.push(CallContext {
                 qualified_name: qualified_func.clone(),
                 span: (node.start_byte(), node.end_byte()),
+                decl_span: Span::from_node(&node),
                 is_async,
                 is_method,
                 class_name,
@@ -1347,7 +1376,8 @@ fn build_ctypes_ffi_edge(
         .unwrap_or_else(|| "ctypes::unknown".to_string());
 
     let ffi_name = format!("native::{}", ffi_library_simple_name(&library_name));
-    let ffi_node_id = helper.add_module(&ffi_name, Some(span_from_node(call_node)));
+    let ffi_node_id =
+        helper.add_call_site_node(&ffi_name, span_from_node(call_node), NodeKind::Module);
 
     // Add FFI edge
     helper.add_ffi_edge(caller_id, ffi_node_id, convention);
@@ -1370,7 +1400,8 @@ fn build_cffi_ffi_edge(
         extract_ffi_library_name(call_node, content).unwrap_or_else(|| "cffi::unknown".to_string());
 
     let ffi_name = format!("native::{}", ffi_library_simple_name(&library_name));
-    let ffi_node_id = helper.add_module(&ffi_name, Some(span_from_node(call_node)));
+    let ffi_node_id =
+        helper.add_call_site_node(&ffi_name, span_from_node(call_node), NodeKind::Module);
 
     // cffi uses C calling convention
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -1392,6 +1423,16 @@ fn get_ffi_caller_node_id(
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
             span: (0, content.len()),
+            // Whole-file synthetic context, and the ONE site on this branch
+            // that changes body-hash plane membership. Master minted this node
+            // from `Span::from_bytes(0, content.len())`, a span that passes
+            // `has_valid_body_span`, so a module-level `ctypes.CDLL(...)` gave
+            // `<module>` a body hash and a shape descriptor covering the entire
+            // file. It then competed with real functions in `shape-match`
+            // (measured at 0.703 against a real one). `Span::default()` reports
+            // the same honest line 1 column 0 and keeps a whole file out of the
+            // function-body planes.
+            decl_span: Span::default(),
             is_async: false,
             is_method: false,
             class_name: None,
@@ -1399,7 +1440,7 @@ fn get_ffi_caller_node_id(
         &module_context
     };
 
-    let caller_span = Some(Span::from_bytes(call_context.span.0, call_context.span.1));
+    let caller_span = Some(call_context.decl_span);
     helper.ensure_function(
         &call_context.qualified_name(),
         caller_span,
@@ -1461,7 +1502,10 @@ fn build_native_import_ffi_edge(
 
     // Create node for the native module
     let ffi_name = format!("native::{}", simple_name(module_name));
-    let ffi_node_id = helper.add_module(&ffi_name, Some(span_from_node(import_node)));
+    // The extent is the `import` statement, not a declaration of the native
+    // module (issue #748).
+    let ffi_node_id =
+        helper.add_call_site_node(&ffi_name, span_from_node(import_node), NodeKind::Module);
 
     // Add FFI edge (C convention for Python C extensions)
     helper.add_ffi_edge(importer_id, ffi_node_id, FfiConvention::C);
@@ -1736,47 +1780,6 @@ fn extract_visibility_from_name(name: &str) -> &'static str {
 // Type Hint Processing - TypeOf and Reference Edges
 // ============================================================================
 
-/// Find the containing scope (function/class) for a node to create scope-qualified names.
-///
-/// This walks up the AST to find the nearest enclosing function or class definition.
-/// Returns:
-/// - Empty string for module-level
-/// - Class name for class-level (e.g., "`MyClass`")
-/// - Function qualified name for function-level (e.g., "MyClass.method" or "process")
-fn find_containing_scope(node: Node<'_>, content: &[u8], ast_graph: &ASTGraph) -> String {
-    let mut current = node;
-    let mut found_class_name: Option<String> = None;
-
-    // Walk up the tree to find enclosing function or class
-    while let Some(parent) = current.parent() {
-        match parent.kind() {
-            "function_definition" => {
-                // Found enclosing function - get its qualified name
-                if let Some(ctx) = ast_graph.get_callable_context(parent.id()) {
-                    return ctx.qualified_name.clone();
-                }
-            }
-            "class_definition" => {
-                // Remember the class name but continue walking up
-                // to check if we're inside a function within this class
-                if found_class_name.is_none() {
-                    // Extract class name directly from node
-                    if let Some(name_node) = parent.child_by_field_name("name")
-                        && let Ok(class_name) = name_node.utf8_text(content)
-                    {
-                        found_class_name = Some(class_name.to_string());
-                    }
-                }
-            }
-            _ => {}
-        }
-        current = parent;
-    }
-
-    // If we found a class but no enclosing function, it's a class attribute
-    found_class_name.unwrap_or_default()
-}
-
 /// Extract return type annotation from a function definition.
 ///
 /// Python AST structure:
@@ -1928,17 +1931,12 @@ fn process_typed_parameter(
 fn process_annotated_assignment(
     expr_stmt_node: Node<'_>,
     content: &[u8],
-    ast_graph: &ASTGraph,
     helper: &mut GraphBuildHelper,
 ) {
-    // Get the containing scope for scope qualification
-    // For assignments, we need to find the enclosing function/class
-    let scope_prefix = find_containing_scope(expr_stmt_node, content, ast_graph);
-
     // Look for expression_statement containing an assignment
     for child in expr_stmt_node.children(&mut expr_stmt_node.walk()) {
         if child.kind() == "assignment" {
-            process_typed_assignment(child, content, &scope_prefix, helper);
+            process_typed_assignment(child, content, helper);
         }
     }
 }
@@ -1949,7 +1947,6 @@ fn process_annotated_assignment(
 fn process_typed_assignment(
     assignment_node: Node<'_>,
     content: &[u8],
-    scope_prefix: &str,
     helper: &mut GraphBuildHelper,
 ) {
     // Check if this is a typed assignment by looking for type annotation
@@ -1974,22 +1971,28 @@ fn process_typed_assignment(
         return;
     };
 
-    // Create scope-qualified variable name to prevent cross-scope contamination
-    // For class attributes (module-level or class-level), use simple name
-    // For function-local variables, use qualified name
-    let qualified_var_name = if scope_prefix.is_empty() {
-        // Module-level variable
-        var_name.to_string()
-    } else if scope_prefix.contains('.') && !scope_prefix.contains(':') {
-        // Class attribute (scope_prefix is class name without function)
-        format!("{scope_prefix}.{var_name}")
-    } else {
-        // Function-local variable
-        format!("{scope_prefix}:{var_name}")
-    };
+    // Name the declaration by the identifier offset, exactly as the
+    // local-scope paths do (`handle_identifier_for_reference` and
+    // `mint_unreferenced_bindings`).
+    //
+    // This used to build a scope-qualified name instead, so an ANNOTATED
+    // declaration was represented twice: once here as `NAME`, and again by the
+    // reference path as `NAME@<decl offset>`. A referenced annotated constant
+    // produced three variable nodes for two things, which inflated every
+    // consumer that counts nodes, `sqry unused` among them. The offset is
+    // already unique per declaration and per scope, so it subsumes what the
+    // scope prefix was doing about cross-scope contamination.
+    //
+    // Both mints must also agree on the SPAN, so this uses the identifier and
+    // not the whole assignment: the declaration is the name, and reporting its
+    // position is what verivus-oss/sqry#725 is about.
+    let qualified_var_name = format!("{var_name}@{}", left.start_byte());
 
-    // Create variable node with qualified name
-    let var_id = helper.add_variable(&qualified_var_name, Some(span_from_node(assignment_node)));
+    let var_id = helper.add_variable_with_semantic_name(
+        var_name,
+        &qualified_var_name,
+        Some(span_from_node(left)),
+    );
 
     // Create type node
     let type_id = helper.add_type(&type_name, None);

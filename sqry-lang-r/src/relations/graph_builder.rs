@@ -429,11 +429,17 @@ fn span_from_node(node: Node<'_>) -> Span {
     Span::from_node(&node)
 }
 
-/// Convert tree-sitter Points to a Span
+/// Convert tree-sitter Points to a Span.
+///
+/// `Position::line` is 0-based, exactly as tree-sitter's `Point::row` is. The
+/// conversion to a 1-based line belongs to the staging layer, which does
+/// `span.start.line.saturating_add(1)`. Adding one here as well reported every R
+/// declaration a line too low; two reviewers measured it independently on a
+/// function declared on line 3 that surfaced at line 4.
 fn span_from_points(start: Point, end: Point) -> Span {
     Span::new(
-        Position::new(start.row + 1, start.column),
-        Position::new(end.row + 1, end.column),
+        Position::new(start.row, start.column),
+        Position::new(end.row, end.column),
     )
 }
 

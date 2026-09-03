@@ -158,7 +158,7 @@ pub use progress::GraphBuildProgressTracker;
 pub use reindex::{ReindexStats, allocate_new_segment, reindex_files};
 pub use staging::{
     GoEmbeddingHint, GoHints, GoMethodReceiverHint, GoNamedTypeConversionHint, GoReceiverCallHint,
-    GoReceiverHintKind, StagedEdgeRef, StagedNodeRef, StagingGraph, StagingOp,
+    GoReceiverHintKind, SpanOrigin, StagedEdgeRef, StagedNodeRef, StagingGraph, StagingOp,
 };
 
 // Body hash utilities for duplicate detection

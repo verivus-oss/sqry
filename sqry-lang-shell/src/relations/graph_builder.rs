@@ -69,8 +69,16 @@ impl GraphBuilder for ShellGraphBuilder {
             .and_then(|s| s.to_str())
             .unwrap_or("script");
         let module_qualified = format!("{script_name}::module");
-        let module_id =
-            helper.add_module(&module_qualified, Some(Span::from_bytes(0, content.len())));
+        let module_id = helper.add_module(
+            &module_qualified,
+            // The script module genuinely spans the file. This replaces
+            // `Span::from_bytes(0, content.len())`, which put the file's byte
+            // length in the end column; the resolved byte range, and so the
+            // body hash, is identical.
+            Some(sqry_core::graph::local_scopes::LineIndex::whole_file_span(
+                content,
+            )),
+        );
 
         // Phase 1: Insert function contexts as nodes and emit Export edges
         // All shell functions are exported from the script module
@@ -258,7 +266,10 @@ fn build_call_edge_for_staging(
         // Script-level call - use module-qualified name as context
         module_context = CallContext {
             qualified_name: module_name.to_string(),
-            // Whole-file synthetic context: start of file is the honest position.
+            // Script-level context. Nothing reads this field: the caller node
+            // is minted by `add_module` above, and `build_call_edge_for_staging`
+            // hands `ensure_callee` the call-site span. `Span::default()` is
+            // what master carried here, so this stays at master.
             decl_span: Span::default(),
         };
         &module_context

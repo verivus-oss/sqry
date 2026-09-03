@@ -45,7 +45,7 @@ use super::super::edge::kind::{LifetimeConstraintKind, MacroExpansionKind, TypeO
 use super::super::resolution::canonicalize_graph_qualified_name;
 use super::staging::{
     CIndirectStagingPayload, NodeMetadataFlag, NodeMetadataUpdate, PendingBinding,
-    PendingIndirectCallsite, StagingGraph,
+    PendingIndirectCallsite, SpanOrigin, StagingGraph,
 };
 use crate::graph::node::{Language, Span};
 use crate::graph::unified::edge::kind::{
@@ -298,12 +298,20 @@ impl<'a> GraphBuildHelper<'a> {
         self.add_function_inner(qualified_name, span, is_async, is_unsafe, false)
     }
 
-    /// Internal function-node sink shared by the public declaration helper
-    /// [`add_function`](Self::add_function) (`is_definition = true`) and the
-    /// call-edge wrapper [`ensure_function`](Self::ensure_function)
-    /// (`is_definition = false`). The seam keeps real declarations marked as
-    /// definitions while call-target stubs created via the `ensure_*` path stay
-    /// non-definitions.
+    /// Internal function-node sink.
+    ///
+    /// Callers pass `is_definition` explicitly, and the BARE
+    /// [`add_function`](Self::add_function) passes `false`, because it is
+    /// dual-use: plugins also mint call, FFI and syscall stubs through it. Real
+    /// declarations come in as `true` either through
+    /// [`add_function_with_visibility`](Self::add_function_with_visibility) and
+    /// [`add_function_with_signature`](Self::add_function_with_signature), or
+    /// through a later `mark_definition`.
+    ///
+    /// An earlier version of this comment said `add_function` sets
+    /// `is_definition = true`. It does not, and reasoning from that led to a
+    /// review round arguing that Go and Perl carry no definition signal (they
+    /// use the `_with_visibility` form, so they do).
     fn add_function_inner(
         &mut self,
         qualified_name: &str,
@@ -620,6 +628,50 @@ impl<'a> GraphBuildHelper<'a> {
     /// graph identity.
     pub fn add_verbatim_variable(&mut self, name: &str, span: Option<Span>) -> NodeId {
         self.add_node_verbatim(name, span, NodeKind::Variable, &[], None, None, false)
+    }
+
+    /// Add a variable whose graph IDENTITY and whose user-facing NAME differ.
+    ///
+    /// `semantic_name` becomes `NodeEntry::name`, which is what name lookup and
+    /// the synthetic-node filter read. `qualified_name` is the dedup key, so
+    /// two mints of the same declaration converge on one node.
+    ///
+    /// The two must be separable for a per-binding-site declaration. Naming
+    /// such a node `ident@<offset>` in BOTH roles makes it match
+    /// `is_synthetic_placeholder_name`, and `is_node_synthetic` falls back to
+    /// that shape, so MCP `semantic_search`, CLI `search --exact` and the
+    /// planner `name:` predicate all drop it. A real declaration must not be
+    /// invisible to the surfaces whose whole job is answering whether a symbol
+    /// exists. Occurrence nodes are a different case and should keep the
+    /// suffixed name in both roles: they are scaffolding, not symbols.
+    pub fn add_variable_with_semantic_name(
+        &mut self,
+        semantic_name: &str,
+        cache_key: &str,
+        span: Option<Span>,
+    ) -> NodeId {
+        let canonical = canonicalize_graph_qualified_name(self.language, cache_key);
+        self.add_node_internal_with_canonical_name_inner(
+            semantic_name,
+            &canonical,
+            span,
+            NodeKind::Variable,
+            &[],
+            None,
+            None,
+            false,
+            // Same origin as `add_variable`, whose sink files Declaration. A
+            // local binding is a declaration of its own identity; this variant
+            // exists for the NAME it publishes, not for a different span
+            // policy.
+            SpanOrigin::Declaration,
+            // The cache key is a binding-site offset. It is identity, not an
+            // address, and must not be stored: `display_entry_qualified_name`
+            // and several hand-rolled display paths prefer the qualified name
+            // over the semantic one, so storing it is what leaked `x@1487`
+            // into planner, MCP and LSP output.
+            false,
+        )
     }
 
     /// Add a constant node.
@@ -956,6 +1008,81 @@ impl<'a> GraphBuildHelper<'a> {
         self.add_node_internal(qualified_name, span, kind, &[], visibility, None, false)
     }
 
+    /// Mint a stub whose only known location is a **reference to it**.
+    ///
+    /// Use this instead of `add_function` / `add_module` / `add_class` /
+    /// `add_node` whenever the span in hand is the extent of the expression
+    /// that NAMED the symbol rather than the extent of the symbol's own
+    /// declaration. In this tree that covers, at least:
+    ///
+    /// - an FFI, syscall or bridged C target named inside a call
+    /// - a native or WebAssembly module named by `require(...)`, `dlopen(...)`,
+    ///   `new WebAssembly.Module(...)` or an `import`
+    /// - a callee named at a call site, where `ensure_callee` is not already
+    ///   doing the job
+    /// - an entry in an export list (`__all__`, `export * from "..."`)
+    /// - a type named by an assertion, an `extends` / `implements` clause, a
+    ///   `use TraitName;`, or an `impl` block
+    /// - a class or program named by an `include`, a `SUBMIT`, or a `new`
+    ///   expression
+    ///
+    /// The name of the parameter says "call site" because that is the case that
+    /// motivated it; the contract is the broader one above.
+    ///
+    /// Node creation is identical to the matching `add_*` helper for `kind`
+    /// (same canonicalization, same cache, `is_definition = false`, no
+    /// visibility or signature, which a reference site cannot know). The one
+    /// difference is that the extent is NOT filed as a body this node owns,
+    /// which keeps the stub out of `body_hash` and the shape descriptor
+    /// (issue #748). Without that, two `require("ffi")` stubs in two files
+    /// hash the caller's bytes and are reported as duplicate bodies.
+    ///
+    /// A reference site can still win the RECORDED location, under the
+    /// latest-ending rule in `apply_span_to_entry`, and that is left alone.
+    /// What it can no longer do is take away a body extent a declaration has
+    /// already filed for the same node in the same file. (The extent table
+    /// lives on one `StagingGraph`, which is per parsed file, so extents from
+    /// different files never meet.)
+    ///
+    /// Use [`add_bodyless_declaration_node`](Self::add_bodyless_declaration_node)
+    /// instead when the site is a real declaration that merely has no body,
+    /// such as a C `struct Config;`. That is a definition; this is not.
+    pub fn add_call_site_node(
+        &mut self,
+        qualified_name: &str,
+        call_site_span: Span,
+        kind: NodeKind,
+    ) -> NodeId {
+        self.add_call_site_node_internal(qualified_name, call_site_span, kind)
+    }
+
+    /// Mint or update a node for a declaration that names a symbol without
+    /// giving it a body.
+    ///
+    /// The forward-declaration case: C `struct Config;`, C++ `class Widget;`,
+    /// `enum State : int;`, `template <typename T> class Tmpl;`. The node is a
+    /// definition (`is_definition = true`) and the span is its own, so both
+    /// are recorded. What does not happen is the extent being filed as a body:
+    /// there is no body, and hashing the declaration line would group every
+    /// forward declaration of a same-length name (issue #748).
+    ///
+    /// Pass `visibility` when the site knows it, as a C++ class member
+    /// forward declaration does.
+    pub fn add_bodyless_declaration_node(
+        &mut self,
+        qualified_name: &str,
+        declaration_span: Span,
+        kind: NodeKind,
+        visibility: Option<&str>,
+    ) -> NodeId {
+        self.add_bodyless_declaration_node_internal(
+            qualified_name,
+            declaration_span,
+            kind,
+            visibility,
+        )
+    }
+
     /// Mark a just-created staged node as a real source declaration
     /// (`is_definition = true`).
     ///
@@ -977,7 +1104,7 @@ impl<'a> GraphBuildHelper<'a> {
         self.staging.update_node_entry(node_id, &update);
     }
 
-    /// Internal helper for adding nodes.
+    /// Internal **declaration-span** sink for adding nodes.
     ///
     /// Applies attributes to the node entry:
     /// - `"async"` → `NodeEntry::with_async(true/false)`
@@ -986,6 +1113,15 @@ impl<'a> GraphBuildHelper<'a> {
     ///
     /// When `signature` is `Some`, the signature field is set on the node for
     /// `returns:` queries.
+    ///
+    /// # Span contract (issue #748)
+    ///
+    /// Every `span` reaching this sink is treated as a declaration extent, so
+    /// the node is admitted to the body plane (`body_hash` + shape
+    /// descriptor). A path that hands a node the extent of a **call site**
+    /// must go through [`add_call_site_node_internal`](Self::add_call_site_node_internal)
+    /// instead, or the stub will be fingerprinted as if it owned the caller's
+    /// body.
     fn add_node_internal(
         &mut self,
         qualified_name: &str,
@@ -1008,9 +1144,82 @@ impl<'a> GraphBuildHelper<'a> {
             visibility,
             signature,
             is_definition,
+            SpanOrigin::Declaration,
         )
     }
 
+    /// Internal **bodyless-declaration** sink.
+    ///
+    /// For a declaration that names a symbol without giving it a body: a C
+    /// `struct Config;`, a C++ `class Widget;` or `enum State : int;`. The
+    /// node IS a definition and the span IS its own declaration's extent, so
+    /// both are recorded, but there is no body to fingerprint and the extent
+    /// is not filed as one (issue #748).
+    ///
+    /// This is the case a two-way `declaration or reference` split gets wrong.
+    /// Sending a forward declaration through the call-site sink would clear
+    /// `is_definition`, and `find_unused`, the items filter and centrality all
+    /// read that bit.
+    fn add_bodyless_declaration_node_internal(
+        &mut self,
+        qualified_name: &str,
+        declaration_span: Span,
+        kind: NodeKind,
+        visibility: Option<&str>,
+    ) -> NodeId {
+        let canonical_qualified_name =
+            canonicalize_graph_qualified_name(self.language, qualified_name);
+        let semantic_name = semantic_name_for_node_input(qualified_name, &canonical_qualified_name);
+        self.add_node_internal_with_canonical_name(
+            &semantic_name,
+            &canonical_qualified_name,
+            Some(declaration_span),
+            kind,
+            &[],
+            visibility,
+            None,
+            true,
+            SpanOrigin::BodylessDeclaration,
+        )
+    }
+
+    /// Internal **call-site-span** sink for minting call-target stubs.
+    ///
+    /// Same node creation as [`add_node_internal`](Self::add_node_internal),
+    /// except the extent is recorded as belonging to the caller, which keeps
+    /// the stub out of both halves of the body plane. Stubs are never
+    /// declarations, so `is_definition` is always false here, and no
+    /// visibility / signature / attribute is known at a call site.
+    ///
+    /// Reached from [`ensure_callee`](Self::ensure_callee) and from the public
+    /// [`add_call_site_node`](Self::add_call_site_node) that plugins use for
+    /// FFI, syscall, WebAssembly and native-module targets. Any future minting
+    /// path that supplies a call-site extent belongs here too.
+    fn add_call_site_node_internal(
+        &mut self,
+        qualified_name: &str,
+        call_site_span: Span,
+        kind: NodeKind,
+    ) -> NodeId {
+        let canonical_qualified_name =
+            canonicalize_graph_qualified_name(self.language, qualified_name);
+        let semantic_name = semantic_name_for_node_input(qualified_name, &canonical_qualified_name);
+        self.add_node_internal_with_canonical_name(
+            &semantic_name,
+            &canonical_qualified_name,
+            Some(call_site_span),
+            kind,
+            &[],
+            None,
+            None,
+            false,
+            SpanOrigin::CallSite,
+        )
+    }
+
+    /// Declaration-span sibling of [`add_node_internal`](Self::add_node_internal)
+    /// for nodes whose searchable name differs from their qualified name. The
+    /// same span contract applies: every caller supplies a declaration extent.
     #[allow(clippy::too_many_arguments)] // internal builder sink; is_definition (issue #394) threaded alongside span/kind/attrs
     fn add_node_internal_with_name(
         &mut self,
@@ -1034,10 +1243,18 @@ impl<'a> GraphBuildHelper<'a> {
             visibility,
             signature,
             is_definition,
+            SpanOrigin::Declaration,
         )
     }
 
-    #[allow(clippy::too_many_arguments)] // internal builder sink; is_definition (issue #394) threaded alongside span/kind/attrs
+    /// The single node-minting sink. `origin` says what `span` IS at this site
+    /// (issue #748), and there are three answers, not two:
+    /// [`SpanOrigin::Declaration`] for a declaration WITH a body, whose extent
+    /// is filed as the node's body; [`SpanOrigin::BodylessDeclaration`] for a
+    /// forward declaration, which is the node's own location but not a body;
+    /// and [`SpanOrigin::CallSite`] for a call site or type reference, which is
+    /// neither. Only the first files an extent.
+    #[allow(clippy::too_many_arguments)] // internal builder sink; is_definition (issue #394) and span origin (issue #748) threaded alongside span/kind/attrs
     fn add_node_internal_with_canonical_name(
         &mut self,
         semantic_name: &str,
@@ -1048,6 +1265,44 @@ impl<'a> GraphBuildHelper<'a> {
         visibility: Option<&str>,
         signature: Option<&str>,
         is_definition: bool,
+        origin: SpanOrigin,
+    ) -> NodeId {
+        self.add_node_internal_with_canonical_name_inner(
+            semantic_name,
+            canonical_qualified_name,
+            span,
+            kind,
+            attributes,
+            visibility,
+            signature,
+            is_definition,
+            origin,
+            true,
+        )
+    }
+
+    /// As above, but `publish_qualified_name` decides whether the canonical
+    /// string is STORED on the entry as well as used as the cache key.
+    ///
+    /// Those two roles are normally the same string and it is correct to
+    /// publish it. They must come apart for a per-binding-site declaration:
+    /// its identity has to include the binding offset (two locals named `x`
+    /// are different nodes), while nothing user-facing should ever contain
+    /// that offset. Publishing it put `x@1487` into planner, MCP and LSP
+    /// output, because every display surface prefers the qualified name.
+    #[allow(clippy::too_many_arguments)]
+    fn add_node_internal_with_canonical_name_inner(
+        &mut self,
+        semantic_name: &str,
+        canonical_qualified_name: &str,
+        span: Option<Span>,
+        kind: NodeKind,
+        attributes: &[(&str, bool)],
+        visibility: Option<&str>,
+        signature: Option<&str>,
+        is_definition: bool,
+        origin: SpanOrigin,
+        publish_qualified_name: bool,
     ) -> NodeId {
         let mut is_async = false;
         let mut is_static = false;
@@ -1076,7 +1331,8 @@ impl<'a> GraphBuildHelper<'a> {
                 .mark_if(NodeMetadataFlag::Definition, is_definition)
                 .with_optional_visibility(visibility_id)
                 .with_optional_signature(signature_id);
-            self.staging.update_node_entry(id, &update);
+            self.staging
+                .update_node_entry_tracking_span_origin(id, &update, origin);
             return id;
         }
 
@@ -1085,7 +1341,7 @@ impl<'a> GraphBuildHelper<'a> {
         // Create node entry
         let mut entry = NodeEntry::new(kind, name_id, self.file_id);
         entry.is_definition = is_definition;
-        if semantic_name != canonical_qualified_name {
+        if publish_qualified_name && semantic_name != canonical_qualified_name {
             let qualified_name_id = self.intern(canonical_qualified_name);
             entry = entry.with_qualified_name(qualified_name_id);
         }
@@ -1125,6 +1381,13 @@ impl<'a> GraphBuildHelper<'a> {
         // Stage the node
         let node_id = self.staging.add_node(entry);
 
+        // File what the span IS. Whether it also wins the recorded location is
+        // a separate question, settled by `apply_span_to_entry`; the body
+        // extent must not depend on that (issue #748).
+        if let Some(ref s) = span {
+            self.staging.record_span_origin(node_id, s, origin);
+        }
+
         // Cache for deduplication
         self.node_cache
             .insert((canonical_qualified_name.to_string(), kind), node_id);
@@ -1132,6 +1395,13 @@ impl<'a> GraphBuildHelper<'a> {
         node_id
     }
 
+    /// Verbatim-name sink (style rules, imports, CSS variables): identical to
+    /// [`add_node_internal`](Self::add_node_internal) except the cache key is
+    /// the raw name rather than the canonicalized one.
+    ///
+    /// Every caller supplies a declaration extent (the `@import` statement,
+    /// the rule, the variable), so span provenance is recorded as
+    /// [`SpanOrigin::Declaration`]. No call-edge path mints verbatim nodes.
     fn add_node_verbatim(
         &mut self,
         name: &str,
@@ -1165,7 +1435,11 @@ impl<'a> GraphBuildHelper<'a> {
                 .mark_if(NodeMetadataFlag::Definition, is_definition)
                 .with_optional_visibility(visibility_id)
                 .with_optional_signature(signature_id);
-            self.staging.update_node_entry(id, &update);
+            self.staging.update_node_entry_tracking_span_origin(
+                id,
+                &update,
+                SpanOrigin::Declaration,
+            );
             return id;
         }
 
@@ -1201,6 +1475,10 @@ impl<'a> GraphBuildHelper<'a> {
         }
 
         let node_id = self.staging.add_node(entry);
+        if let Some(ref s) = span {
+            self.staging
+                .record_span_origin(node_id, s, SpanOrigin::Declaration);
+        }
         self.node_cache.insert((name.to_string(), kind), node_id);
         node_id
     }
@@ -1811,6 +2089,15 @@ impl<'a> GraphBuildHelper<'a> {
     ///
     /// Cross-kind reuse: if a node with the same canonical qualified name
     /// already exists as any call-compatible kind, it is returned as-is.
+    ///
+    /// The minted stub records [`SpanOrigin::CallSite`], so it is kept out of
+    /// the body plane: the extent belongs to whoever wrote the call, and
+    /// fingerprinting it there grouped every stub minted from one call site as
+    /// a body duplicate of the others (issue #748). A declaration for the same
+    /// name, before or after, files its own extent as the node's body through
+    /// the normal `add_*` path, so a symbol that is called above its own
+    /// definition still ends up with a real body, and one called BELOW its
+    /// definition keeps the body it already had.
     pub fn ensure_callee(
         &mut self,
         qualified_name: &str,
@@ -1830,15 +2117,7 @@ impl<'a> GraphBuildHelper<'a> {
         }
         // Create a new node with the call-site span (never None). Callee stubs
         // are never declarations -> is_definition = false.
-        self.add_node_internal(
-            qualified_name,
-            Some(call_site_span),
-            target_kind,
-            &[],
-            None,
-            None,
-            false,
-        )
+        self.add_call_site_node_internal(qualified_name, call_site_span, target_kind)
     }
 
     /// Ensure a function node exists, creating it if needed.

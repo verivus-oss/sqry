@@ -223,5 +223,5 @@ MIT — See root LICENSE file
 
 ---
 
-**Version**: 30.0.1
-**Last Updated**: 2026-08-29
+**Version**: 31.0.0
+**Last Updated**: 2026-09-03

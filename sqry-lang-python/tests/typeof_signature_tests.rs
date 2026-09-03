@@ -640,3 +640,61 @@ class MyClass:
     // References include both type annotations and local var references
     assert!(count_edge_kind(&staging, "references") >= 7);
 }
+
+/// A declaration must be findable by its own name, not hidden as scaffolding.
+///
+/// Regression test for verivus-oss/sqry#758 and for the way the first fix
+/// for it went wrong. Naming a declaration `ident@<offset>` in BOTH the
+/// semantic and the qualified role makes it match
+/// `NodeEntry::is_synthetic_placeholder_name`, and `is_node_synthetic` falls
+/// back to that shape, so MCP `semantic_search`, CLI `search --exact` and the
+/// planner `name:` predicate all drop the node. The regex path of plain
+/// `sqry search` does NOT apply that filter, which is why an earlier check of
+/// this fix passed while the surfaces that answer "does this symbol exist"
+/// still said no.
+///
+/// The offset belongs in the qualified name, where it disambiguates two
+/// bindings of one name, and nowhere else.
+#[test]
+fn declaration_nodes_are_not_named_like_synthetic_scaffolding() {
+    let source = r#"
+UNREF_CONST = "x"
+UNREF_ANNOTATED: str = "y"
+REFERENCED = "a"
+def use():
+    return REFERENCED
+"#;
+
+    let staging = build_staging_graph(source, "test.py");
+
+    let mut declaration_names: Vec<String> = Vec::new();
+    for op in staging.operations() {
+        if let StagingOp::AddNode { entry, .. } = op
+            && matches!(entry.kind, sqry_core::schema::NodeKind::Variable)
+            // `entry.name` deliberately, NOT `resolve_node_name`, which
+            // returns the canonical QUALIFIED name. The user-facing name is
+            // what `is_node_synthetic` and every name lookup read.
+            && let Some(name) = staging.resolve_local_string(entry.name)
+        {
+            declaration_names.push(name.to_string());
+        }
+    }
+
+    for expected in ["UNREF_CONST", "UNREF_ANNOTATED", "REFERENCED"] {
+        assert!(
+            declaration_names.iter().any(|n| n == expected),
+            "no Variable node is NAMED `{expected}`, so `search --exact`, MCP \
+             and the planner cannot find it. names: {declaration_names:?}"
+        );
+    }
+
+    for name in &declaration_names {
+        if name.starts_with("UNREF_CONST") || name.starts_with("UNREF_ANNOTATED") {
+            assert!(
+                !sqry_core::graph::unified::storage::arena::NodeEntry::is_synthetic_placeholder_name(name),
+                "declaration `{name}` carries the synthetic placeholder shape, \
+                 so every name-lookup surface will suppress it"
+            );
+        }
+    }
+}

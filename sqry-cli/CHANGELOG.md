@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [31.0.0](https://github.com/verivus-oss/sqry/compare/v30.0.1...v31.0.0) - 2026-09-02
+
+### Fixed
+
+- *(indexing)* [**breaking**] report real lines for local binding declarations in 7 languages ([#746](https://github.com/verivus-oss/sqry/pull/746))
+  - **Upgrade note:** run `sqry index --force` once after upgrading past this release. It corrects reported declaration lines and columns in every language plugin it converts, changes every R declaration line and with it every R body hash and shape descriptor, and drops whole-file pseudo-bodies from python module-level FFI callers. Python indexes grow substantially: a binding and its usages were one node and are now separate, which measured +88% nodes, +47% edges and +32% snapshot size on the 33-file python3.13 asyncio tree, and took `sqry unused` there from 3320 rows to 7707. Daemon-backed setups must RESTART the daemon as part of the upgrade (`sqry daemon stop`, `sqry index --force .`, `sqry daemon start`): `sqry daemon rebuild --force` executes inside the still-running pre-upgrade daemon and republishes a pre-upgrade graph.
 ## [30.0.1](https://github.com/verivus-oss/sqry/compare/v30.0.0...v30.0.1) - 2026-08-28
 
 ### Documentation

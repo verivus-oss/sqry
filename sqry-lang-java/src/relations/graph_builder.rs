@@ -7,6 +7,7 @@ use sqry_core::graph::unified::build::helper::GraphBuildHelper;
 use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, Tree};
@@ -638,7 +639,7 @@ fn walk_tree_for_edges(
                 if let Some(context) = ast_graph.find_enclosing(byte_pos) {
                     let method_id = helper.ensure_method(
                         context.qualified_name(),
-                        Some(Span::from_bytes(context.span.0, context.span.1)),
+                        Some(context.decl_span),
                         false,
                         context.is_static,
                     );
@@ -1558,7 +1559,7 @@ fn handle_identifier_for_reference(
                 let target_id = if let Some(node_id) = binding.node_id {
                     node_id
                 } else {
-                    let span = Span::from_bytes(binding.decl_start_byte, binding.decl_end_byte);
+                    let span = binding.decl_span;
                     let qualified_var = format!("{}@{}", identifier_text, binding.decl_start_byte);
                     let var_id = helper.add_variable(&qualified_var, Some(span));
                     scope_tree.attach_node_id(&identifier_text, binding.decl_start_byte, var_id);
@@ -2200,13 +2201,7 @@ fn process_import_unified(import_node: Node, content: &[u8], helper: &mut GraphB
     }
 
     let module_id = helper.add_module("<module>", None);
-    let external_id = helper.add_import(
-        &imported_name,
-        Some(Span::from_bytes(
-            import_node.start_byte(),
-            import_node.end_byte(),
-        )),
-    );
+    let external_id = helper.add_import(&imported_name, Some(Span::from_node(&import_node)));
 
     helper.add_import_edge(module_id, external_id);
 }
@@ -2217,10 +2212,7 @@ fn ensure_caller_method(
 ) -> sqry_core::graph::unified::node::NodeId {
     helper.ensure_method(
         caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.decl_span),
         false,
         caller_context.is_static,
     )
@@ -2965,10 +2957,7 @@ fn process_class_member_exports(
                             {
                                 let field_name = extract_identifier(name_node, content);
                                 let qualified_name = format!("{class_qualified_name}.{field_name}");
-                                let span = Span::from_bytes(
-                                    field_child.start_byte(),
-                                    field_child.end_byte(),
-                                );
+                                let span = Span::from_node(&field_child);
 
                                 // Use constant for final fields, variable otherwise
                                 let is_final = has_modifier(child, "final", content);
@@ -3265,23 +3254,17 @@ fn build_jna_native_load_edge(
 ) {
     let caller_id = helper.ensure_method(
         caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.decl_span),
         false,
         caller_context.is_static,
     );
 
     let target_name = format!("native::{library_name}");
-    let target_id = helper.add_function(
+    // Call-site extent, not a declaration of the native target (issue #748).
+    let target_id = helper.add_call_site_node(
         &target_name,
-        Some(Span::from_bytes(
-            call_node.start_byte(),
-            call_node.end_byte(),
-        )),
-        false,
-        false,
+        Span::from_node(&call_node),
+        NodeKind::Function,
     );
 
     helper.add_ffi_edge(caller_id, target_id, FfiConvention::C);
@@ -3297,23 +3280,17 @@ fn build_jna_method_call_edge(
 ) {
     let caller_id = helper.ensure_method(
         caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.decl_span),
         false,
         caller_context.is_static,
     );
 
     let target_name = format!("native::{interface_name}::{method_name}");
-    let target_id = helper.add_function(
+    // Call-site extent, not a declaration of the native target (issue #748).
+    let target_id = helper.add_call_site_node(
         &target_name,
-        Some(Span::from_bytes(
-            call_node.start_byte(),
-            call_node.end_byte(),
-        )),
-        false,
-        false,
+        Span::from_node(&call_node),
+        NodeKind::Function,
     );
 
     helper.add_ffi_edge(caller_id, target_id, FfiConvention::C);
@@ -3327,24 +3304,15 @@ fn build_panama_linker_edge(
 ) {
     let caller_id = helper.ensure_method(
         caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.decl_span),
         false,
         caller_context.is_static,
     );
 
     let target_name = "native::panama::nativeLinker";
-    let target_id = helper.add_function(
-        target_name,
-        Some(Span::from_bytes(
-            call_node.start_byte(),
-            call_node.end_byte(),
-        )),
-        false,
-        false,
-    );
+    // Call-site extent, not a declaration of the native target (issue #748).
+    let target_id =
+        helper.add_call_site_node(target_name, Span::from_node(&call_node), NodeKind::Function);
 
     helper.add_ffi_edge(caller_id, target_id, FfiConvention::C);
 }
@@ -3358,23 +3326,17 @@ fn build_panama_library_lookup_edge(
 ) {
     let caller_id = helper.ensure_method(
         caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.decl_span),
         false,
         caller_context.is_static,
     );
 
     let target_name = format!("native::panama::{library_name}");
-    let target_id = helper.add_function(
+    // Call-site extent, not a declaration of the native target (issue #748).
+    let target_id = helper.add_call_site_node(
         &target_name,
-        Some(Span::from_bytes(
-            call_node.start_byte(),
-            call_node.end_byte(),
-        )),
-        false,
-        false,
+        Span::from_node(&call_node),
+        NodeKind::Function,
     );
 
     helper.add_ffi_edge(caller_id, target_id, FfiConvention::C);
@@ -3389,23 +3351,17 @@ fn build_panama_invoke_edge(
 ) {
     let caller_id = helper.ensure_method(
         caller_context.qualified_name(),
-        Some(Span::from_bytes(
-            caller_context.span.0,
-            caller_context.span.1,
-        )),
+        Some(caller_context.decl_span),
         false,
         caller_context.is_static,
     );
 
     let target_name = format!("native::panama::{method_name}");
-    let target_id = helper.add_function(
+    // Call-site extent, not a declaration of the native target (issue #748).
+    let target_id = helper.add_call_site_node(
         &target_name,
-        Some(Span::from_bytes(
-            call_node.start_byte(),
-            call_node.end_byte(),
-        )),
-        false,
-        false,
+        Span::from_node(&call_node),
+        NodeKind::Function,
     );
 
     helper.add_ffi_edge(caller_id, target_id, FfiConvention::C);
@@ -3417,10 +3373,7 @@ fn build_jni_native_method_edge(method_context: &MethodContext, helper: &mut Gra
     // The method itself is the caller (conceptually, calling into native code)
     let method_id = helper.ensure_method(
         method_context.qualified_name(),
-        Some(Span::from_bytes(
-            method_context.span.0,
-            method_context.span.1,
-        )),
+        Some(method_context.decl_span),
         false,
         method_context.is_static,
     );

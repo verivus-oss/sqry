@@ -323,7 +323,14 @@ fn build_call_edge_ids(
         // Create synthetic module-level context for top-level expressions
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            // Whole-file synthetic context: start of file is the honest position.
+            // Whole-file synthetic context. `Span::default()` reports line 1
+            // column 0, the honest position for module-level code, and it is
+            // what master carries here. Where this mint creates the node, the
+            // degenerate end also keeps a non-body out of the body-hash and
+            // shape planes via `has_valid_body_span`. Where another path mints
+            // the same name first, that span stands: `ensure_callee` returns a
+            // cache hit untouched, so the FIRST mint decides and nothing later
+            // widens it. Both orderings match master.
             decl_span: Span::default(),
             is_pub: false,
         };

@@ -13,7 +13,10 @@ use std::str::FromStr;
 /// Type of duplicate detection
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DuplicateType {
-    /// Functions with identical/similar bodies (based on signature when body unavailable)
+    /// Functions with identical bodies, evidenced by an identical body hash.
+    ///
+    /// A node with no body hash forms no group: it has no body to compare.
+    /// Use [`Signature`](Self::Signature) for the signature-keyed view.
     Body,
     /// Functions with identical signatures (return type only for now)
     Signature,
@@ -111,37 +114,25 @@ fn compute_hash(graph: &CodeGraph, node_id: NodeId, dup_type: DuplicateType) -> 
 
     match dup_type {
         DuplicateType::Body => {
-            // Primary: use the precomputed body_hash from the NodeEntry
-            // This is the 128-bit hash computed from actual body bytes during indexing
-            if let Some(body_hash) = entry.body_hash {
-                // Convert u128 to u64 by XOR-folding the two halves
-                // This preserves collision resistance for grouping purposes
-                return Some(body_hash.high ^ body_hash.low);
-            }
-
-            // Fallback for nodes without body_hash: use signature if available
-            if let Some(sig_id) = entry.signature
-                && let Some(sig) = strings.resolve(sig_id)
-            {
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                sig.hash(&mut hasher);
-                entry.kind.hash(&mut hasher);
-                return Some(hasher.finish());
-            }
-
-            // Last resort: hash qualified name + kind + line span (approximates body size)
-            let name = entry
-                .qualified_name
-                .and_then(|id| strings.resolve(id))
-                .or_else(|| strings.resolve(entry.name))?;
-
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            name.hash(&mut hasher);
-            entry.kind.hash(&mut hasher);
-            // Include line span as proxy for body size
-            let lines = entry.end_line.saturating_sub(entry.start_line);
-            lines.hash(&mut hasher);
-            Some(hasher.finish())
+            // The 128-bit hash of the node's actual body bytes, computed during
+            // indexing, is the ONLY evidence a body duplicate is allowed to
+            // rest on. Convert u128 to u64 by XOR-folding the two halves, which
+            // preserves collision resistance for grouping purposes.
+            //
+            // A node with no body hash has no body to compare, so it forms no
+            // body-duplicate group (issue #748). The former fallback ladder
+            // (signature, then qualified name + kind + line count) answered a
+            // different question and answered it wrongly at scale: every
+            // call-target stub the build mints for a name like `memcpy` or
+            // `print` shares that name and roughly that line count, so the
+            // ladder reported unrelated call sites in unrelated files as
+            // duplicate bodies. `DuplicateType::Signature` remains the
+            // signature-keyed view for callers who want it, and
+            // `sqry-lsp`'s duplicate-symbol surface already keyed on
+            // `entry.body_hash` alone.
+            entry
+                .body_hash
+                .map(|body_hash| body_hash.high ^ body_hash.low)
         }
         DuplicateType::Signature => {
             // Hash signature if available, otherwise name + kind
@@ -183,7 +174,8 @@ fn compute_hash(graph: &CodeGraph, node_id: NodeId, dup_type: DuplicateType) -> 
 /// Find all duplicate groups in the graph.
 ///
 /// Groups nodes by a hash computed from their metadata, based on the duplicate type:
-/// - `Body`: Hash includes kind, signature (or name + line span), for functions/methods
+/// - `Body`: the node's own body hash, for functions/methods. Nodes without one
+///   are skipped rather than approximated.
 /// - `Signature`: Hash includes only the signature string
 /// - `Struct`: Hash includes only the name, for structs/classes only
 ///
@@ -366,7 +358,9 @@ mod tests {
         (graph, node_ids)
     }
 
-    /// Helper to create nodes with line spans (for body-based hashing fallback).
+    /// Helper to create nodes with line spans and no body hash, which is the
+    /// negative case for `DuplicateType::Body` since issue #748 removed the
+    /// name-and-extent fallback.
     fn create_test_graph_with_spans(
         nodes: &[(&str, NodeKind, u32, u32)], // name, kind, start_line, end_line
     ) -> (CodeGraph, Vec<NodeId>) {
@@ -445,9 +439,15 @@ mod tests {
         assert!(groups[0].node_ids.contains(&node_ids[1]));
     }
 
+    /// Issue #748: a shared signature is not evidence of a shared body.
+    ///
+    /// This replaces the former `test_body_duplicates_with_signatures`, which
+    /// pinned the opposite behaviour. The signature ladder collapsed unrelated
+    /// nodes together once the build stopped fingerprinting call-site stubs,
+    /// and it duplicates what `DuplicateType::Signature` already answers
+    /// directly, which is asserted here as the surviving route.
     #[test]
-    fn test_body_duplicates_with_signatures() {
-        // Body duplicates are detected via signature + kind
+    fn body_duplicates_ignore_signature_only_matches() {
         let nodes = [
             (
                 "func_a",
@@ -465,34 +465,88 @@ mod tests {
                 Some("fn compute(x: i32) -> i32"),
             ), // Different kind
         ];
-        let (graph, node_ids) = create_test_graph_with_signatures(&nodes);
+        let (graph, _) = create_test_graph_with_signatures(&nodes);
         let config = DuplicateConfig::default();
 
         let groups = build_duplicate_groups_graph(DuplicateType::Body, &graph, &config);
-        // func_a and func_b should be duplicates (same signature, same kind)
-        // func_c is Method, not Function, so different hash
-        assert_eq!(groups.len(), 1, "Should find one duplicate group");
-        assert_eq!(groups[0].node_ids.len(), 2);
-        assert!(groups[0].node_ids.contains(&node_ids[0]));
-        assert!(groups[0].node_ids.contains(&node_ids[1]));
+        assert!(
+            groups.is_empty(),
+            "no node here carries a body hash, so none can be a body duplicate"
+        );
+
+        // The signature-keyed view still answers the signature question.
+        let groups = build_duplicate_groups_graph(DuplicateType::Signature, &graph, &config);
+        assert_eq!(
+            groups.len(),
+            1,
+            "DuplicateType::Signature is the surviving route for signature matches"
+        );
     }
 
+    /// Issue #748: the same name and the same number of lines is not evidence
+    /// of a shared body either.
+    ///
+    /// This replaces the former `test_body_duplicates_fallback_to_name_and_span`.
+    /// That ladder is what turned the build-side fix into a wash: with call-site
+    /// stubs correctly denied a body hash, every stub the build mints for a name
+    /// like `memcpy` or `print` fell through to it and grouped by name instead.
     #[test]
-    fn test_body_duplicates_fallback_to_name_and_span() {
-        // When no signature, use name + kind + line span
+    fn body_duplicates_ignore_name_and_extent_only_matches() {
         let nodes = [
             ("helper", NodeKind::Function, 10, 20), // 10 lines
             ("helper", NodeKind::Function, 30, 40), // 10 lines (same span size)
             ("other", NodeKind::Function, 50, 60),  // Different name
         ];
-        let (graph, node_ids) = create_test_graph_with_spans(&nodes);
+        let (graph, _) = create_test_graph_with_spans(&nodes);
         let config = DuplicateConfig::default();
 
         let groups = build_duplicate_groups_graph(DuplicateType::Body, &graph, &config);
-        // Nodes with same name, kind, and span should be grouped
-        assert_eq!(groups.len(), 1, "Should find one duplicate group");
-        assert!(groups[0].node_ids.contains(&node_ids[0]));
-        assert!(groups[0].node_ids.contains(&node_ids[1]));
+        assert!(
+            groups.is_empty(),
+            "matching name and extent height is not a matching body"
+        );
+    }
+
+    /// The positive half of the contract the two tests above removed: nodes
+    /// that really do share a body hash still group.
+    #[test]
+    fn body_duplicates_group_on_a_shared_body_hash() {
+        use crate::graph::body_hash::BodyHash128;
+
+        let mut graph = CodeGraph::new();
+        let file_id = graph.files_mut().register(Path::new("test.rs")).unwrap();
+        let body = BodyHash128 {
+            high: 0xDEAD_BEEF,
+            low: 0x1234_5678,
+        };
+
+        let mut ids = Vec::new();
+        for name in ["alpha", "beta", "gamma"] {
+            let name_id = graph.strings_mut().intern(name).unwrap();
+            let mut entry = NodeEntry::new(NodeKind::Function, name_id, file_id)
+                .with_qualified_name(name_id)
+                .with_location(1, 0, 5, 1);
+            // `gamma` has a different body, so it must not join the group.
+            entry.body_hash = Some(if name == "gamma" {
+                BodyHash128 { high: 1, low: 2 }
+            } else {
+                body
+            });
+            ids.push(graph.nodes_mut().alloc(entry).unwrap());
+        }
+
+        let groups =
+            build_duplicate_groups_graph(DuplicateType::Body, &graph, &DuplicateConfig::default());
+        assert_eq!(groups.len(), 1, "one group, keyed on the shared body hash");
+        assert_eq!(groups[0].node_ids.len(), 2);
+        assert!(groups[0].node_ids.contains(&ids[0]));
+        assert!(groups[0].node_ids.contains(&ids[1]));
+        assert!(!groups[0].node_ids.contains(&ids[2]));
+        assert_eq!(
+            groups[0].body_hash_128,
+            Some(body),
+            "every body group now reports a real 128-bit body hash"
+        );
     }
 
     #[test]

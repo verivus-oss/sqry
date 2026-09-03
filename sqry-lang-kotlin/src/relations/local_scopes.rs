@@ -87,7 +87,7 @@ pub(crate) type KotlinScopeTree = ScopeTree<ScopeKind>;
 // ============================================================================
 
 pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<KotlinScopeTree> {
-    let mut scope_tree = ScopeTree::new(content.len());
+    let mut scope_tree = ScopeTree::new(content);
     scope_tree.class_infos = build_class_info_index(&mut scope_tree, root, content);
     build_scopes(&mut scope_tree, root, content)?;
     scope_tree.rebuild_index();

@@ -16,6 +16,7 @@ use std::sync::OnceLock;
 
 use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
+use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphResult, Language, Span,
@@ -400,8 +401,10 @@ fn extract_include_edge_with_helper(
             let class_path = class_name.replace("::", "/");
             let qualified_name = format!("manifests/{class_path}.pp::{class_name}");
 
-            // Add class node
-            let target_id = helper.add_class(&qualified_name, Some(span_from_node(node)));
+            // The extent is the `include` statement in THIS manifest; the class
+            // itself is declared in another one (issue #748).
+            let target_id =
+                helper.add_call_site_node(&qualified_name, span_from_node(node), NodeKind::Class);
 
             // Add import edge
             helper.add_import_edge(module_id, target_id);
@@ -419,8 +422,13 @@ fn extract_include_edge_with_helper(
                 let class_path = class_name.replace("::", "/");
                 let qualified_name = format!("manifests/{class_path}.pp::{class_name}");
 
-                // Add class node
-                let target_id = helper.add_class(&qualified_name, Some(span_from_node(node)));
+                // The extent is the `include` statement in THIS manifest; the
+                // class itself is declared in another one (issue #748).
+                let target_id = helper.add_call_site_node(
+                    &qualified_name,
+                    span_from_node(node),
+                    NodeKind::Class,
+                );
 
                 // Add import edge
                 helper.add_import_edge(module_id, target_id);

@@ -303,7 +303,11 @@ impl NodeRemapTable {
 /// Merge a loser node into a winner node in the arena.
 ///
 /// The winner retains the richest metadata from both sides:
-/// - **span**: pick whichever has `start_line > 0`; if both, pick the wider range
+/// - **span**: pick whichever has `start_line > 0`; if both, pick the wider
+///   range, EXCEPT when the winner owns a body and the loser does not. The
+///   loser's extent is then a call site, and adopting it would decouple the
+///   winner's `body_hash` and shape descriptor from the range they were
+///   computed over (issue #748).
 /// - **visibility**: prefer non-`None`
 /// - **signature**: prefer non-`None`
 /// - **`is_async` / `is_static` / `is_unsafe`**: OR the flags
@@ -343,8 +347,25 @@ pub(crate) fn merge_node_into(
         winner_entry.end_column = loser_entry.end_column;
         winner_entry.start_byte = loser_entry.start_byte;
         winner_entry.end_byte = loser_entry.end_byte;
-    } else if winner_entry.start_line > 0 && loser_entry.start_line > 0 {
-        // Both have real spans — pick the wider range
+    } else if winner_entry.start_line > 0
+        && loser_entry.start_line > 0
+        // Issue #748: a winner that OWNS A BODY never adopts the loser's extent,
+        // whether or not the loser owns one too.
+        //
+        // The winner's `body_hash` and shape descriptor were computed over the
+        // winner's own range. Adopting a different range decouples them from it,
+        // and the winner keeps its own `file` either way, so the merged node
+        // would report one file's path against another file's line numbers.
+        //
+        // Winner selection ranks on span width below body ownership, so the
+        // winner is normally the widest already and this branch is inert. That
+        // is a property of the current ordering, not a guarantee: an earlier
+        // draft added an `is_definition` rank that could crown a narrower node
+        // and made this branch live. The rank is gone, and this guard stays so
+        // the tuple is safe by construction rather than by ordering.
+        && winner_entry.body_hash.is_none()
+    {
+        // Both have real spans, pick the wider range
         let winner_range = winner_entry
             .end_line
             .saturating_sub(winner_entry.start_line);
@@ -374,7 +395,14 @@ pub(crate) fn merge_node_into(
         winner_entry.doc = loser_entry.doc;
     }
 
-    // Merge body_hash: prefer non-None
+    // Merge body_hash: prefer non-None.
+    //
+    // Issue #748: `select_unification_winner` now ranks a body-owning node
+    // above one that owns no body, so in the Phase 4c-prime path this branch
+    // fires only when no member of the group owned a body, and then the loser
+    // has none either. It stays as defense in depth for any other caller, but
+    // it must not run when the winner's extent is not the range the hash was
+    // computed over, which the winner-selection ordering is what guarantees.
     if winner_entry.body_hash.is_none() && loser_entry.body_hash.is_some() {
         winner_entry.body_hash = loser_entry.body_hash;
     }

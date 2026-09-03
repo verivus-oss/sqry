@@ -470,7 +470,19 @@ impl Span {
     /// call sites that genuinely hold nothing but offsets, such as a scope or
     /// call-context tuple, and whose spans are not surfaced as symbol
     /// positions.
+    ///
+    /// Deprecated so the rule is enforced by the compiler rather than by this
+    /// comment. Every language plugin that used to build declaration spans this
+    /// way reported line 1 with a byte offset in the column (issue #725), and a
+    /// new plugin reaching for it would reintroduce that. There are now ZERO
+    /// call sites: do not add `#[allow(deprecated)]` to create one. Use
+    /// [`Span::from_node`] when a node is in hand, or `LineIndex::span` when
+    /// only byte offsets are.
     #[must_use]
+    #[deprecated(
+        since = "31.0.0",
+        note = "builds a line-1 span with the byte offset in the column; use Span::from_node, or LineIndex::span when only offsets are available"
+    )]
     pub fn from_bytes(start: usize, end: usize) -> Self {
         Self {
             start: Position {

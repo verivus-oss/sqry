@@ -9,7 +9,7 @@ use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::edge::{ExportKind, FfiConvention, HttpMethod};
 use sqry_core::graph::unified::storage::shape::SignatureShape;
-use sqry_core::graph::unified::{GraphBuildHelper, NodeId, StagingGraph};
+use sqry_core::graph::unified::{GraphBuildHelper, NodeId, NodeKind, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span};
 use sqry_core::relations::SyntheticNameBuilder;
 use tree_sitter::{Node, Tree};
@@ -336,7 +336,14 @@ fn build_call_edge_with_helper(
         // Create synthetic module-level context for top-level calls
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            // Whole-file synthetic context: start of file is the honest position.
+            // Whole-file synthetic context. `Span::default()` reports line 1
+            // column 0, the honest position for module-level code, and it is
+            // what master carries here. Where this mint creates the node, the
+            // degenerate end also keeps a non-body out of the body-hash and
+            // shape planes via `has_valid_body_span`. Where another path mints
+            // the same name first, that span stands: `ensure_callee` returns a
+            // cache hit untouched, so the FIRST mint decides and nothing later
+            // widens it. Both orderings match master.
             decl_span: Span::default(),
             is_async: false,
         };
@@ -421,7 +428,8 @@ fn build_http_request_edge(
         || format!("http::{}", info.method.as_str()),
         |url| format!("http::{url}"),
     );
-    let target_id = helper.add_module(&target_name, Some(span_from_node(call_node)));
+    let target_id =
+        helper.add_call_site_node(&target_name, span_from_node(call_node), NodeKind::Module);
 
     helper.add_http_request_edge(caller_id, target_id, info.method, info.url.as_deref());
     true
@@ -691,7 +699,14 @@ fn build_constructor_edge_with_helper(
     } else {
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            // Whole-file synthetic context: start of file is the honest position.
+            // Whole-file synthetic context. `Span::default()` reports line 1
+            // column 0, the honest position for module-level code, and it is
+            // what master carries here. Where this mint creates the node, the
+            // degenerate end also keeps a non-body out of the body-hash and
+            // shape planes via `has_valid_body_span`. Where another path mints
+            // the same name first, that span stands: `ensure_callee` returns a
+            // cache hit untouched, so the FIRST mint decides and nothing later
+            // widens it. Both orderings match master.
             decl_span: Span::default(),
             is_async: false,
         };
@@ -2400,7 +2415,11 @@ fn build_webassembly_call_edge(
         .unwrap_or_else(|| format!("wasm::{method_name}"));
 
     // Create WASM module node with qualified name
-    let wasm_node_id = helper.add_module(&wasm_module_name, Some(span_from_node(call_node)));
+    let wasm_node_id = helper.add_call_site_node(
+        &wasm_module_name,
+        span_from_node(call_node),
+        NodeKind::Module,
+    );
 
     // Add WebAssembly edge
     helper.add_webassembly_edge(caller_id, wasm_node_id);
@@ -2425,7 +2444,11 @@ fn build_webassembly_constructor_edge(
     let wasm_module_name = format!("wasm::{type_name}");
 
     // Create WASM module node
-    let wasm_node_id = helper.add_module(&wasm_module_name, Some(span_from_node(new_node)));
+    let wasm_node_id = helper.add_call_site_node(
+        &wasm_module_name,
+        span_from_node(new_node),
+        NodeKind::Module,
+    );
 
     // Add WebAssembly edge
     helper.add_webassembly_edge(caller_id, wasm_node_id);
@@ -2491,7 +2514,8 @@ fn build_require_ffi_edge(
 
         // Create FFI target node
         let ffi_name = format!("native::{}", simple_name(&path));
-        let ffi_node_id = helper.add_module(&ffi_name, Some(span_from_node(call_node)));
+        let ffi_node_id =
+            helper.add_call_site_node(&ffi_name, span_from_node(call_node), NodeKind::Module);
 
         // Add FFI edge with C convention (Node.js native addons use N-API/C ABI)
         helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -2526,7 +2550,8 @@ fn build_dlopen_edge(
         );
 
     // Create FFI target node
-    let ffi_node_id = helper.add_module(&module_name, Some(span_from_node(call_node)));
+    let ffi_node_id =
+        helper.add_call_site_node(&module_name, span_from_node(call_node), NodeKind::Module);
 
     // Add FFI edge
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -2546,7 +2571,14 @@ fn get_caller_node_id(
     } else {
         module_context = CallContext {
             qualified_name: "<module>".to_string(),
-            // Whole-file synthetic context: start of file is the honest position.
+            // Whole-file synthetic context. `Span::default()` reports line 1
+            // column 0, the honest position for module-level code, and it is
+            // what master carries here. Where this mint creates the node, the
+            // degenerate end also keeps a non-body out of the body-hash and
+            // shape planes via `has_valid_body_span`. Where another path mints
+            // the same name first, that span stands: `ensure_callee` returns a
+            // cache hit untouched, so the FIRST mint decides and nothing later
+            // widens it. Both orderings match master.
             decl_span: Span::default(),
             is_async: false,
         };

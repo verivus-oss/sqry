@@ -17,6 +17,7 @@
 
 use sqry_core::graph::unified::build::helper::CalleeKindHint;
 use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::unified::{FfiConvention, GraphBuildHelper, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
@@ -863,6 +864,118 @@ fn extract_contexts_recursive(
 ///
 /// This function combines namespace context, class hierarchy, and the final name
 /// into a C++-style qualified name (e.g., `namespace::ClassName::methodName`).
+/// What a tagged type specifier (`class` / `struct` / `union` / `enum`) at
+/// this site actually is (issue #748).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaggedSpecifierRole {
+    /// `struct Payload { int a; };`, `class Holder { ... };`. A declaration
+    /// with a body: the extent is the type's own.
+    Definition,
+    /// `class Widget;`, `enum State : int;`, `template <typename T> class T;`.
+    /// A declaration of identity with no body. Still a definition for
+    /// `find_unused`, the items filter and centrality, but nothing to
+    /// fingerprint.
+    ForwardDeclaration,
+    /// `struct Payload *slot;` as a member, `void render(enum State s)` as a
+    /// parameter, `sizeof(struct Payload)`. A REFERENCE to a type declared
+    /// elsewhere: the extent in hand belongs to the field or the parameter
+    /// list, not to the type.
+    Reference,
+}
+
+/// Classify a tagged type specifier.
+///
+/// Identical rule to the C plugin's, and probed the same way against
+/// tree-sitter-cpp 0.23. A `body` field settles `Definition`. The other two
+/// share a bodyless shape, so they are told apart by the PARENT: no
+/// `declarator` on it AND a parent that is a place where declarations are
+/// written.
+///
+/// | source | parent | `declarator` | role |
+/// |---|---|---|---|
+/// | `class Widget;` | `translation_unit` | no | forward |
+/// | `namespace n { class W; }` | `declaration_list` | no | forward |
+/// | `class InnerFwd;` in a class | `field_declaration` | no | forward |
+/// | `template <class T> class W;` | `template_declaration` | no | forward |
+/// | `struct P *slot;` as a member | `field_declaration` | yes | reference |
+/// | `void f(enum S s)` | `parameter_declaration` | yes | reference |
+/// | `void f(struct P)` | `parameter_declaration` | no | reference |
+/// | `sizeof(struct P)` | `type_descriptor` | no | reference |
+///
+/// The parent list is an ALLOW list: an unlisted parent falls through to
+/// `Reference`, which keeps the node out of the body plane. Mistaking a
+/// reference for a declaration is the direction that fabricates definitions,
+/// so that is the direction to fail away from.///
+/// # Which arms are reachable
+///
+/// Each arm was deleted in turn from both plugins and the per-language gate
+/// re-run. Eleven of the thirteen are killed by a fixture: `translation_unit`,
+/// `declaration` (an attribute-prefixed forward), `declaration_list` (a
+/// namespace body and an `extern "C"` block), `compound_statement`,
+/// `field_declaration`, `template_declaration`, and all five preprocessor
+/// conditionals.
+///
+/// `declaration` only became reachable once a MISSING declarator stopped
+/// counting as a real one; before that, every specifier under it took the
+/// declarator branch first and the arm was dead.
+///
+/// Two survive, because nothing reaches them:
+///
+/// - `field_declaration_list` never appears as a specifier's DIRECT parent; a
+///   member declaration is wrapped in a `field_declaration`.
+/// - `linkage_specification` likewise: an `extern "C"` block's body parses as
+///   a `declaration_list`.
+///
+/// They are kept anyway. They can only ever move a shape from `Reference` to
+/// `ForwardDeclaration`, which is the direction that preserves a real
+/// declaration's `is_definition`, and a grammar update could make either
+/// reachable. Unkillable-by-design, and recorded as such rather than left as
+/// two unexplained surviving mutants.
+fn classify_tagged_specifier(node: Node) -> TaggedSpecifierRole {
+    if node.child_by_field_name("body").is_some() {
+        return TaggedSpecifierRole::Definition;
+    }
+    let Some(parent) = node.parent() else {
+        return TaggedSpecifierRole::Reference;
+    };
+    // A MISSING declarator is not a declarator. tree-sitter inserts one
+    // wherever a `declaration` is expected to name something and does not,
+    // which is exactly the shape an attribute-prefixed forward declaration
+    // takes: `__attribute__((unused)) struct Config;` and
+    // `[[maybe_unused]] class Widget;` both parse as a `declaration` whose
+    // declarator is `(MISSING identifier)`. Treating that as a real declarator
+    // sent every prefixed forward to the reference sink (issue #748).
+    if let Some(declarator) = parent.child_by_field_name("declarator")
+        && !declarator.is_missing()
+    {
+        return TaggedSpecifierRole::Reference;
+    }
+    if matches!(
+        parent.kind(),
+        "translation_unit"
+            | "declaration"
+            | "declaration_list"
+            | "compound_statement"
+            | "field_declaration"
+            | "field_declaration_list"
+            | "template_declaration"
+            | "linkage_specification"
+            // Preprocessor conditionals hold declarations directly, and an
+            // include guard wraps essentially every real header, so leaving
+            // these out made the whole forward-declaration case unreachable in
+            // practice.
+            | "preproc_if"
+            | "preproc_ifdef"
+            | "preproc_else"
+            | "preproc_elif"
+            | "preproc_elifdef"
+    ) {
+        TaggedSpecifierRole::ForwardDeclaration
+    } else {
+        TaggedSpecifierRole::Reference
+    }
+}
+
 fn build_qualified_name(namespace_stack: &[String], class_stack: &[String], name: &str) -> String {
     let mut parts = Vec::new();
 
@@ -2008,6 +2121,88 @@ fn extract_declarator_name(node: Node, content: &[u8]) -> Option<String> {
     }
 }
 
+/// Resolve an elaborated type reference the way C++ name lookup does:
+/// innermost enclosing scope first, then outward.
+///
+/// `class Outer { class Inner; class Inner *slot; };` declares `Outer::Inner`
+/// and then names it. Qualifying the reference with the namespace stack alone
+/// minted a SECOND, namespace-level `Inner`, so the declaration and its use
+/// were two unrelated nodes. Qualifying it with the class stack was the
+/// original defect in the other direction: a member naming a type declared
+/// elsewhere got the fabricated name `Outer::Payload`.
+///
+/// So neither: try each enclosing scope, innermost first, and take the first
+/// one the helper has already minted a compatible node for. Falling back to
+/// the namespace-qualified name keeps the previous behaviour for a type this
+/// file has not declared, which is the common case.
+///
+/// The lookup only sees nodes minted EARLIER in this file, which is exactly
+/// C++'s own rule for an elaborated reference to a nested type: the
+/// declaration has to precede the use.
+fn resolve_elaborated_reference(
+    helper: &GraphBuildHelper,
+    namespace_stack: &[String],
+    class_stack: &[String],
+    inner_name: &str,
+    inner_kind: NodeKind,
+) -> String {
+    // `struct X` may name a type declared as `class X` and vice versa, so try
+    // the site's own kind first and then its siblings.
+    let mut kinds = vec![inner_kind];
+    for candidate in [NodeKind::Class, NodeKind::Struct, NodeKind::Enum] {
+        if candidate != inner_kind {
+            kinds.push(candidate);
+        }
+    }
+
+    for depth in (0..=class_stack.len()).rev() {
+        let qualified = build_qualified_name(namespace_stack, &class_stack[..depth], inner_name);
+        if kinds
+            .iter()
+            .any(|kind| helper.lookup_node(&qualified, *kind).is_some())
+        {
+            return qualified;
+        }
+    }
+
+    build_qualified_name(namespace_stack, &[], inner_name)
+}
+
+/// The class body's members, with preprocessor conditionals flattened.
+///
+/// `#ifdef` and friends wrap their members in a `preproc_*` node, so iterating
+/// the body's DIRECT children skips everything inside a conditional. Those
+/// members then fell through to the generic file walker with the class stack
+/// still pushed, which is how `Holder::Payload` came back for a guarded member
+/// (issue #748).
+///
+/// Every arm of a conditional is yielded, `#ifdef` and `#else` alike. That is
+/// deliberate and matches how the rest of this plugin treats preprocessor
+/// branches: the graph describes what the source says, not what one particular
+/// set of `-D` flags selects. A member declared in two arms resolves to one
+/// node through the helper's cache either way.
+fn class_body_members<'tree>(body_node: Node<'tree>) -> Vec<Node<'tree>> {
+    fn push_members<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>, depth: usize) {
+        // Conditionals nest, but not deeply in practice. The cap is a guard
+        // against a pathological file, not a real limit.
+        if depth > 16 {
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            if child.kind().starts_with("preproc_") {
+                push_members(child, out, depth + 1);
+            } else {
+                out.push(child);
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    push_members(body_node, &mut out, 0);
+    out
+}
+
 /// Walk a class/struct body, processing field declarations and methods with visibility tracking.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn walk_class_body(
@@ -2027,8 +2222,7 @@ fn walk_class_body(
     // Default visibility: struct = public, class = private
     let mut current_visibility = if is_struct { "public" } else { "private" };
 
-    let mut cursor = body_node.walk();
-    for child in body_node.children(&mut cursor) {
+    for child in class_body_members(body_node) {
         budget.checkpoint("cpp:walk_class_body")?;
         match child.kind() {
             "access_specifier" => {
@@ -2086,6 +2280,59 @@ fn walk_class_body(
                             let inner_name = inner_name.trim();
                             let nested_qualified = format!("{class_qualified_name}::{inner_name}");
                             let nested_span = span_from_node(inner);
+
+                            let inner_kind = if kind == "enum_specifier" {
+                                NodeKind::Enum
+                            } else if is_struct_or_union {
+                                NodeKind::Struct
+                            } else {
+                                NodeKind::Class
+                            };
+                            let role = classify_tagged_specifier(inner);
+
+                            // A member declared with an ELABORATED TYPE REFERENCE
+                            // (`struct Payload *slot;`) parses as a specifier with
+                            // a name and no body. It is not a nested type at all:
+                            // the type is declared elsewhere, the extent belongs to
+                            // the member declaration, and `Outer::Payload` is a name
+                            // nothing in the source has (issue #748).
+                            //
+                            // C++ lookup for the elaborated name starts at the
+                            // INNERMOST enclosing scope and works outward, so
+                            // resolve it that way rather than fabricating
+                            // `Outer::Payload` for a type declared elsewhere. No
+                            // visibility either: the access specifier governs the
+                            // member, not the type it names. And do not walk a body
+                            // it has not got.
+                            if role == TaggedSpecifierRole::Reference {
+                                let referenced_qualified = resolve_elaborated_reference(
+                                    helper,
+                                    namespace_stack,
+                                    class_stack,
+                                    inner_name,
+                                    inner_kind,
+                                );
+                                helper.add_call_site_node(
+                                    &referenced_qualified,
+                                    nested_span,
+                                    inner_kind,
+                                );
+                                continue;
+                            }
+
+                            // `class InnerFwd;` inside a class body IS a nested
+                            // type declaration: `Outer::InnerFwd` is a real name
+                            // and the node is a definition. It just has no body
+                            // to fingerprint or to walk.
+                            if role == TaggedSpecifierRole::ForwardDeclaration {
+                                helper.add_bodyless_declaration_node(
+                                    &nested_qualified,
+                                    nested_span,
+                                    inner_kind,
+                                    Some(current_visibility),
+                                );
+                                continue;
+                            }
 
                             // NodeKind: enum → Enum; struct/union → Struct; class → Class.
                             // (NodeKind has no dedicated Union variant; unions map to
@@ -2309,16 +2556,46 @@ fn walk_tree_for_graph(
                 let qualified_class =
                     build_qualified_name(namespace_stack, class_stack, class_name);
 
-                // Add class/struct node with qualified name
-                let visibility = "public";
-                let class_id = if is_struct {
-                    helper.add_struct_with_visibility(
-                        &qualified_class,
-                        Some(span),
-                        Some(visibility),
-                    )
+                // Issue #748. `struct payload *p` in a parameter list parses
+                // as a `struct_specifier` with a name and no members, exactly
+                // like the forward declaration `struct payload;`. The first is
+                // a reference to a type declared elsewhere, holding the
+                // parameter list's extent; the second is a real declaration of
+                // identity. Both are outside the body plane, and only the
+                // second is a definition.
+                let role = classify_tagged_specifier(node);
+                let node_kind = if is_struct {
+                    NodeKind::Struct
                 } else {
-                    helper.add_class_with_visibility(&qualified_class, Some(span), Some(visibility))
+                    NodeKind::Class
+                };
+                let class_id = match role {
+                    TaggedSpecifierRole::Reference => {
+                        helper.add_call_site_node(&qualified_class, span, node_kind)
+                    }
+                    TaggedSpecifierRole::ForwardDeclaration => helper
+                        .add_bodyless_declaration_node(
+                            &qualified_class,
+                            span,
+                            node_kind,
+                            Some("public"),
+                        ),
+                    TaggedSpecifierRole::Definition => {
+                        if is_struct {
+                            // Add class/struct node with qualified name
+                            helper.add_struct_with_visibility(
+                                &qualified_class,
+                                Some(span),
+                                Some("public"),
+                            )
+                        } else {
+                            helper.add_class_with_visibility(
+                                &qualified_class,
+                                Some(span),
+                                Some("public"),
+                            )
+                        }
+                    }
                 };
 
                 // Handle inheritance with qualified name
@@ -2334,8 +2611,12 @@ fn walk_tree_for_graph(
                 )?;
 
                 // Export classes/structs at file/namespace scope (not nested classes)
-                // Nested classes have internal linkage unless explicitly exported
-                if class_stack.is_empty() {
+                // Nested classes have internal linkage unless explicitly exported.
+                //
+                // Only a DEFINITION exports (issue #748). A file that merely
+                // names a type does not provide it, and neither does one that
+                // only forward-declares it.
+                if class_stack.is_empty() && role == TaggedSpecifierRole::Definition {
                     let module_id = helper.add_module(FILE_MODULE_NAME, None);
                     helper.add_export_edge(module_id, class_id);
                 }
@@ -2373,11 +2654,36 @@ fn walk_tree_for_graph(
                 let enum_name = enum_name.trim();
                 let span = span_from_node(node);
                 let qualified_enum = build_qualified_name(namespace_stack, class_stack, enum_name);
-                let enum_id = helper.add_enum(&qualified_enum, Some(span));
 
-                if class_stack.is_empty() {
-                    let module_id = helper.add_module(FILE_MODULE_NAME, None);
-                    helper.add_export_edge(module_id, enum_id);
+                // Same classification as the class/struct/union arm above
+                // (issue #748). A bodyless `enum Color` in a parameter list is
+                // a REFERENCE holding the parameter list's extent; two files
+                // whose only shared text is such a prototype line otherwise
+                // hash identically and are reported as duplicate bodies.
+                // `enum State : int;` at file scope is a real forward
+                // declaration and keeps its definition bit.
+                match classify_tagged_specifier(node) {
+                    TaggedSpecifierRole::Reference => {
+                        helper.add_call_site_node(&qualified_enum, span, NodeKind::Enum);
+                    }
+                    TaggedSpecifierRole::ForwardDeclaration => {
+                        helper.add_bodyless_declaration_node(
+                            &qualified_enum,
+                            span,
+                            NodeKind::Enum,
+                            None,
+                        );
+                    }
+                    TaggedSpecifierRole::Definition => {
+                        let enum_id = helper.add_enum(&qualified_enum, Some(span));
+
+                        // Only a definition exports. Neither a reference nor a
+                        // forward declaration makes the file provide the type.
+                        if class_stack.is_empty() {
+                            let module_id = helper.add_module(FILE_MODULE_NAME, None);
+                            helper.add_export_edge(module_id, enum_id);
+                        }
+                    }
                 }
             }
         }

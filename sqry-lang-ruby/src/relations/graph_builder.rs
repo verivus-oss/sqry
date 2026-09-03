@@ -16,6 +16,7 @@ use tree_sitter::{Node, Point, Tree};
 
 use super::type_extractor::{canonical_type_string, extract_type_names};
 use super::yard_parser::{extract_yard_comment, parse_yard_tags};
+use sqry_core::graph::unified::node::NodeKind;
 
 const DEFAULT_SCOPE_DEPTH: usize = 4;
 
@@ -726,8 +727,10 @@ fn build_ffi_edge_for_attach_function(
 
     // Create FFI function node (the native function being bound)
     let ffi_func_name = format!("ffi::{func_name}");
+    // The extent is the `attach_function` binding call, not a declaration of
+    // the native function (issue #748).
     let span = span_from_points(node.start_position(), node.end_position());
-    let ffi_func_id = helper.add_function(&ffi_func_name, Some(span), false, false);
+    let ffi_func_id = helper.add_call_site_node(&ffi_func_name, span, NodeKind::Function);
 
     // Add FfiCall edge with C convention (Ruby FFI uses C ABI)
     helper.add_ffi_edge(caller_id, ffi_func_id, FfiConvention::C);

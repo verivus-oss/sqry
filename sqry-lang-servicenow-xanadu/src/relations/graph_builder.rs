@@ -29,6 +29,7 @@ use std::sync::OnceLock;
 use std::{collections::HashMap, path::Path};
 
 use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphResult, Language, Position, Span,
@@ -622,7 +623,9 @@ fn handle_new_expression(
         if let Some(table_name) = extract_new_expression_string_arg(node, content) {
             let span = node_to_span(node);
             let synthetic_name = format!("GlideRecord:{table_name}");
-            helper.add_function(&synthetic_name, Some(span), false, false);
+            // The extent is the `new` expression, not a declaration of the
+            // table's record type (issue #748).
+            helper.add_call_site_node(&synthetic_name, span, NodeKind::Function);
         }
         return;
     }
@@ -631,7 +634,9 @@ fn handle_new_expression(
     {
         let span = node_to_span(node);
         let synthetic_name = format!("ScriptInclude:{script_include}");
-        helper.add_class(&synthetic_name, Some(span));
+        // The extent is the `new GlideAjax(...)` expression; the script include
+        // is declared in another record entirely (issue #748).
+        helper.add_call_site_node(&synthetic_name, span, NodeKind::Class);
     }
 }
 
@@ -839,12 +844,14 @@ fn handle_member_api_call(
     if object == "gs" {
         let span = node_to_span(node);
         let api_name = format!("gs.{property}");
-        helper.add_function(&api_name, Some(span), false, false);
+        // Call-site extent, not a declaration of the platform API (issue #748).
+        helper.add_call_site_node(&api_name, span, NodeKind::Function);
         return;
     }
     if object == "Class" && property == "create" {
         let span = node_to_span(node);
-        helper.add_function("Class.create", Some(span), false, false);
+        // Call-site extent, not a declaration (issue #748).
+        helper.add_call_site_node("Class.create", span, NodeKind::Function);
     }
 }
 

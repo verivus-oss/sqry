@@ -478,10 +478,7 @@ fn process_field_declaration(
     }
 
     let qualified_name = format!("{class_name}::{field_name}");
-    let span = Some(Span::from_bytes(
-        field_node.start_byte(),
-        field_node.end_byte(),
-    ));
+    let span = Some(Span::from_node(&field_node));
 
     // Determine if this is a property or a field
     let is_static_final = is_static_final(field_node, content);
@@ -1577,10 +1574,7 @@ fn process_import_node(import_node: Node, content: &[u8], helper: &mut GraphBuil
 
     // Create the file module node and import node
     let module_id = helper.add_module(FILE_MODULE_NAME, None);
-    let import_span = Some(Span::from_bytes(
-        import_node.start_byte(),
-        import_node.end_byte(),
-    ));
+    let import_span = Some(Span::from_node(&import_node));
     let import_id = helper.add_import(&imported_name, import_span);
 
     // Create the import edge with appropriate metadata

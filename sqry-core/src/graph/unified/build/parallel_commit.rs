@@ -1426,12 +1426,54 @@ where
             let eb = GraphMutationTarget::nodes(graph).get(b);
             match (ea, eb) {
                 (Some(ea), Some(eb)) => {
+                    // Issue #748: a node that owns a body outranks one that does
+                    // not, ahead of every other signal. Since the build stopped
+                    // fingerprinting call-site extents, `body_hash.is_some()` is
+                    // exactly "this node owns the extent it sits at", and the
+                    // canonical node for a qualified name should be the
+                    // declaration, not a stub. Without this, a multi-line call
+                    // expression could out-rank a narrower real declaration on
+                    // span width, win, keep its call-site extent, and then have
+                    // the declaration's body hash grafted onto it by
+                    // `merge_node_into`.
+                    let a_owns_body = ea.body_hash.is_some();
+                    let b_owns_body = eb.body_hash.is_some();
+                    if a_owns_body != b_owns_body {
+                        return if a_owns_body {
+                            std::cmp::Ordering::Greater
+                        } else {
+                            std::cmp::Ordering::Less
+                        };
+                    }
                     let a_real = ea.start_line > 0;
                     let b_real = eb.start_line > 0;
                     match (a_real, b_real) {
                         (true, false) => std::cmp::Ordering::Greater,
                         (false, true) => std::cmp::Ordering::Less,
                         _ => {
+                            // No `is_definition` rank here, deliberately.
+                            //
+                            // One was added and then removed. It is tempting: a
+                            // declared symbol looks like it should outrank one
+                            // that is only referenced. Two hazards killed it,
+                            // and neither had a reproduction for the case it
+                            // was meant to help.
+                            //
+                            // First, it can make a NARROWER node win, which
+                            // activates the span-widening branch in
+                            // `merge_node_into` and pairs the winner's body hash
+                            // and shape descriptor with the loser's extent. With
+                            // ranking by width, the winner is already the widest,
+                            // so that branch is inert.
+                            //
+                            // Second, `is_definition` is not trustworthy on every
+                            // graph: a pre-V16 snapshot decodes it all-false and
+                            // flags the signal absent, which is why
+                            // `definition_signal_present()` exists. An
+                            // incremental rebuild mixes legacy nodes with freshly
+                            // parsed ones, so a rank on this bit could pick a
+                            // different canonical node than a full rebuild of the
+                            // same workspace.
                             let a_range = ea.end_line.saturating_sub(ea.start_line);
                             let b_range = eb.end_line.saturating_sub(eb.start_line);
                             a_range
@@ -1461,7 +1503,18 @@ where
 /// `PendingEdge` targets, not committed `DeltaEdge`s.
 ///
 /// **Winner selection**: Among nodes sharing a qualified name and call-compatible
-/// kinds, the node with `start_line > 0` wins. Tie-break in order:
+/// kinds, ranked in order:
+///   0. A node that OWNS A BODY (`body_hash.is_some()`) outranks one that does
+///      not, ahead of every other signal including the `start_line > 0` test
+///      (issue #748). Since the build stopped fingerprinting call-site extents,
+///      that predicate reads as "this node owns the extent it sits at", so the
+///      canonical node for a qualified name is the declaration rather than a
+///      call-site stub. Without this rank, a multi-line call expression could
+///      win on span width and then have the declaration's body hash grafted
+///      onto its call-site extent by `merge_node_into`.
+///
+/// Then, among nodes that tie on rank 0, the node with `start_line > 0` wins,
+/// tie-broken in order:
 ///   1. Wider `end_line - start_line` span.
 ///   2. **Lexicographically smallest file path** (resolved via the rebuild
 ///      plane's [`FileRegistry`]). Phase 3e correctness requires the
@@ -1919,6 +1972,142 @@ pub(crate) fn phase4d_bulk_insert_edges<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #748: cross-file unification must not crown a call-site stub over
+    /// a real declaration.
+    ///
+    /// Winner selection used to rank on span width, so a multi-line call
+    /// expression beat a narrower declaration in another file. The stub then
+    /// won, kept its call-site extent, and `merge_node_into` grafted the
+    /// declaration's body hash onto it, putting a body hash back on a node
+    /// whose recorded extent is a call site, which is the whole defect.
+    #[test]
+    fn unification_winner_prefers_the_node_that_owns_a_body() {
+        use crate::graph::body_hash::BodyHash128;
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::node::NodeKind;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let decl_file = graph.files_mut().register(Path::new("decl.rs")).unwrap();
+        let call_file = graph.files_mut().register(Path::new("call.rs")).unwrap();
+        let name = graph.strings_mut().intern("shared_fn").unwrap();
+
+        // The declaration is narrow: two lines.
+        let mut decl = NodeEntry::new(NodeKind::Function, name, decl_file)
+            .with_qualified_name(name)
+            .with_location(10, 0, 11, 1);
+        decl.body_hash = Some(BodyHash128 { high: 7, low: 9 });
+        let decl_id = graph.nodes_mut().alloc(decl).unwrap();
+
+        // The stub is a five-line call expression, so it wins on span width.
+        let stub = NodeEntry::new(NodeKind::Function, name, call_file)
+            .with_qualified_name(name)
+            .with_location(3, 4, 8, 20);
+        let stub_id = graph.nodes_mut().alloc(stub).unwrap();
+
+        let mut path_keys: HashMap<NodeId, String> = HashMap::new();
+        path_keys.insert(decl_id, "decl.rs".to_string());
+        path_keys.insert(stub_id, "call.rs".to_string());
+        let empty = String::new();
+
+        let winner = select_unification_winner(&graph, &[decl_id, stub_id], &path_keys, &empty);
+        assert_eq!(
+            winner, decl_id,
+            "the body-owning declaration must win even though the call-site stub \
+             spans more lines"
+        );
+
+        // And the ordering is stable whichever way the group is presented.
+        let winner = select_unification_winner(&graph, &[stub_id, decl_id], &path_keys, &empty);
+        assert_eq!(winner, decl_id);
+    }
+
+    /// The merge guard, restated as a test: a winner that owns a body keeps its
+    /// OWN extent even when the loser is wider and also owns one.
+    ///
+    /// Winner selection ranks on span width, so the widest normally wins and
+    /// this branch is inert. It is here so the body hash and the extent it was
+    /// computed over cannot come apart if the ordering ever changes again.
+    #[test]
+    fn merge_never_widens_a_body_owning_winner_even_from_a_body_owning_loser() {
+        use crate::graph::body_hash::BodyHash128;
+        use crate::graph::unified::build::unification::merge_node_into;
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::node::NodeKind;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let win_file = graph.files_mut().register(Path::new("win.rs")).unwrap();
+        let lose_file = graph.files_mut().register(Path::new("lose.rs")).unwrap();
+        let name = graph.strings_mut().intern("shared_fn").unwrap();
+
+        let mut narrow = NodeEntry::new(NodeKind::Function, name, win_file)
+            .with_qualified_name(name)
+            .with_location(10, 0, 11, 1);
+        narrow.body_hash = Some(BodyHash128 { high: 7, low: 9 });
+        let winner = graph.nodes_mut().alloc(narrow).unwrap();
+
+        let mut wide = NodeEntry::new(NodeKind::Function, name, lose_file)
+            .with_qualified_name(name)
+            .with_location(3, 4, 30, 20);
+        wide.body_hash = Some(BodyHash128 { high: 1, low: 2 });
+        let loser = graph.nodes_mut().alloc(wide).unwrap();
+
+        merge_node_into(graph.nodes_mut(), loser, winner).expect("merge succeeds");
+
+        let entry = graph.nodes().get(winner).expect("winner is live");
+        assert_eq!(
+            (entry.start_line, entry.end_line),
+            (10, 11),
+            "the winner's own extent survives, so its hash still describes the \
+             range it was computed over"
+        );
+        assert_eq!(entry.body_hash, Some(BodyHash128 { high: 7, low: 9 }));
+        assert_eq!(
+            entry.file, win_file,
+            "and the file still matches the extent"
+        );
+    }
+
+    /// The sibling guard in `merge_node_into`: a body-owning winner never
+    /// adopts a bodiless loser's wider extent, which would decouple its
+    /// `body_hash` from the range that hash was computed over.
+    #[test]
+    fn merge_does_not_widen_a_body_owning_winner_with_a_bodiless_loser() {
+        use crate::graph::body_hash::BodyHash128;
+        use crate::graph::unified::build::unification::merge_node_into;
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::node::NodeKind;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let decl_file = graph.files_mut().register(Path::new("decl.rs")).unwrap();
+        let call_file = graph.files_mut().register(Path::new("call.rs")).unwrap();
+        let name = graph.strings_mut().intern("shared_fn").unwrap();
+
+        let mut decl = NodeEntry::new(NodeKind::Function, name, decl_file)
+            .with_qualified_name(name)
+            .with_location(10, 0, 11, 1);
+        decl.body_hash = Some(BodyHash128 { high: 7, low: 9 });
+        let winner = graph.nodes_mut().alloc(decl).unwrap();
+
+        let stub = NodeEntry::new(NodeKind::Function, name, call_file)
+            .with_qualified_name(name)
+            .with_location(3, 4, 8, 20);
+        let loser = graph.nodes_mut().alloc(stub).unwrap();
+
+        // Note the argument order: `merge_node_into(arena, loser, winner)`.
+        merge_node_into(graph.nodes_mut(), loser, winner).expect("merge succeeds");
+
+        let entry = graph.nodes().get(winner).expect("winner is live");
+        assert_eq!(
+            (entry.start_line, entry.end_line),
+            (10, 11),
+            "the declaration keeps its own extent; the wider call-site range is refused"
+        );
+        assert_eq!(entry.body_hash, Some(BodyHash128 { high: 7, low: 9 }));
+    }
 
     #[test]
     fn test_compute_commit_plan_basic() {

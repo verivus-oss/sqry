@@ -1338,10 +1338,7 @@ fn process_data_type(
         type_name.to_string()
     };
 
-    let span = Some(Span::from_bytes(
-        data_node.start_byte(),
-        data_node.end_byte(),
-    ));
+    let span = Some(Span::from_node(&data_node));
     let data_type_id = helper.add_type(&qualified_name, span);
     // issue #394: real declaration; opt dual-use bare helper into is_definition
     helper.mark_definition(data_type_id);
@@ -1727,10 +1724,7 @@ fn process_newtype(
         type_name.to_string()
     };
 
-    let span = Some(Span::from_bytes(
-        newtype_node.start_byte(),
-        newtype_node.end_byte(),
-    ));
+    let span = Some(Span::from_node(&newtype_node));
     let newtype_type_id = helper.add_type(&qualified_name, span);
     // issue #394: real declaration; opt dual-use bare helper into is_definition
     helper.mark_definition(newtype_type_id);

@@ -16,6 +16,7 @@ use sqry_core::graph::{
 use tree_sitter::{Node, Tree};
 
 use crate::{PulumiFormat, detect_format};
+use sqry_core::graph::unified::node::NodeKind;
 
 #[derive(Debug, Default)]
 pub struct PulumiGraphBuilder;
@@ -46,7 +47,13 @@ impl GraphBuilder for PulumiGraphBuilder {
             && let Some(package_name) = package_entry.value.as_str()
         {
             let package_node = format!("package.{package_name}");
-            let package_id = helper.add_module(&package_node, package_entry.span);
+            // `package_entry.span` is the mapping KEY's extent, literally the
+            // `package` token, which the referenced package does not own
+            // (issue #748).
+            let package_id = match package_entry.span {
+                Some(span) => helper.add_call_site_node(&package_node, span, NodeKind::Module),
+                None => helper.add_module(&package_node, None),
+            };
             helper.add_import_edge(module_id, package_id);
         }
 

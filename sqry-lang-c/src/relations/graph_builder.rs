@@ -17,6 +17,7 @@ use crate::relations::signature_builder::{TypedefChain, build_function_signature
 use crate::relations::type_extractor::{
     extract_all_type_names_from_c_type, extract_type_specifiers_from_declaration,
 };
+use sqry_core::graph::unified::node::NodeKind;
 
 /// Registry of FFI declarations discovered during graph building.
 ///
@@ -1323,19 +1324,144 @@ fn is_top_level_declaration(node: Node) -> bool {
     false
 }
 
+/// What a tagged type specifier (`struct` / `union` / `enum`) at this site
+/// actually is (issue #748).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TaggedSpecifierRole {
+    /// `struct payload { int a; };`. A declaration with a body: the extent is
+    /// the type's own and the bytes in it belong to the type.
+    Definition,
+    /// `struct payload;`. A declaration of identity with no body. Still a
+    /// definition for `find_unused`, the items filter and centrality, but
+    /// there is nothing to fingerprint.
+    ForwardDeclaration,
+    /// `struct payload *p` in a parameter list, a field, or a `sizeof`. A
+    /// REFERENCE to a type declared elsewhere. The extent in hand belongs to
+    /// the parameter list or the field, not to the type: without this case,
+    /// two unrelated functions that merely share a parameter type name hash
+    /// identically and are reported as duplicate bodies.
+    Reference,
+}
+
+/// Classify a tagged type specifier.
+///
+/// A `body` field settles the first case. The other two are told apart by the
+/// PARENT, because the grammar gives a forward declaration and a reference the
+/// same bodyless shape. Probed against tree-sitter-c 0.23:
+///
+/// | source | parent | `declarator` |
+/// |---|---|---|
+/// | `struct Config;` at file scope | `translation_unit` | no |
+/// | `struct Local;` in a block | `compound_statement` | no |
+/// | `struct Inner;` in a struct | `field_declaration` | no |
+/// | `struct Config *p;` | `declaration` | yes |
+/// | `void f(struct Config c)` | `parameter_declaration` | yes |
+/// | `void f(struct Config)` | `parameter_declaration` | no |
+/// | `sizeof(struct Config)` | `type_descriptor` | no |
+/// | `typedef struct Opaque T;` | `type_definition` | yes |
+/// | `struct Config;` inside `#ifndef GUARD` | `preproc_ifdef` | no |
+/// | `__attribute__((unused)) struct Config;` | `declaration` | MISSING |
+///
+/// So the rule is: no `declarator` on the parent AND a parent that is a place
+/// where declarations are written. The two rows that have no declarator and
+/// are still references, an unnamed parameter and a `sizeof`, are excluded by
+/// the second half. The list is an ALLOW list on purpose: an unlisted parent
+/// falls through to `Reference`, which keeps the node out of the body plane,
+/// and mistaking a reference for a declaration is the direction that fabricates
+/// definitions.///
+/// # Which arms are reachable
+///
+/// Each arm was deleted in turn from both plugins and the per-language gate
+/// re-run. Eleven of the thirteen are killed by a fixture: `translation_unit`,
+/// `declaration` (an attribute-prefixed forward), `declaration_list` (a
+/// namespace body and an `extern "C"` block), `compound_statement`,
+/// `field_declaration`, `template_declaration`, and all five preprocessor
+/// conditionals.
+///
+/// `declaration` only became reachable once a MISSING declarator stopped
+/// counting as a real one; before that, every specifier under it took the
+/// declarator branch first and the arm was dead.
+///
+/// Two survive, because nothing reaches them:
+///
+/// - `field_declaration_list` never appears as a specifier's DIRECT parent; a
+///   member declaration is wrapped in a `field_declaration`.
+/// - `linkage_specification` likewise: an `extern "C"` block's body parses as
+///   a `declaration_list`.
+///
+/// They are kept anyway. They can only ever move a shape from `Reference` to
+/// `ForwardDeclaration`, which is the direction that preserves a real
+/// declaration's `is_definition`, and a grammar update could make either
+/// reachable. Unkillable-by-design, and recorded as such rather than left as
+/// two unexplained surviving mutants.
+fn classify_tagged_specifier(node: Node) -> TaggedSpecifierRole {
+    if node.child_by_field_name("body").is_some() {
+        return TaggedSpecifierRole::Definition;
+    }
+    let Some(parent) = node.parent() else {
+        return TaggedSpecifierRole::Reference;
+    };
+    // A MISSING declarator is not a declarator. tree-sitter inserts one
+    // wherever a `declaration` is expected to name something and does not,
+    // which is exactly the shape an attribute-prefixed forward declaration
+    // takes: `__attribute__((unused)) struct Config;` and
+    // `[[maybe_unused]] class Widget;` both parse as a `declaration` whose
+    // declarator is `(MISSING identifier)`. Treating that as a real declarator
+    // sent every prefixed forward to the reference sink (issue #748).
+    if let Some(declarator) = parent.child_by_field_name("declarator")
+        && !declarator.is_missing()
+    {
+        return TaggedSpecifierRole::Reference;
+    }
+    if matches!(
+        parent.kind(),
+        "translation_unit"
+            | "declaration"
+            | "declaration_list"
+            | "compound_statement"
+            | "field_declaration"
+            | "field_declaration_list"
+            | "linkage_specification"
+            // Preprocessor conditionals hold declarations directly, and an
+            // include guard wraps essentially every real header, so leaving
+            // these out made the whole forward-declaration case unreachable in
+            // practice.
+            | "preproc_if"
+            | "preproc_ifdef"
+            | "preproc_else"
+            | "preproc_elif"
+            | "preproc_elifdef"
+    ) {
+        TaggedSpecifierRole::ForwardDeclaration
+    } else {
+        TaggedSpecifierRole::Reference
+    }
+}
+
 fn handle_struct_specifier(node: Node, content: &[u8], helper: &mut GraphBuildHelper) {
     if let Some(name_node) = node.child_by_field_name("name")
         && let Ok(name) = name_node.utf8_text(content)
     {
         let name = name.trim();
         if !name.is_empty() {
-            // Real struct declaration (issue #394): opt the dual-use add_struct
-            // bare helper into is_definition = true.
-            let struct_id = helper.add_struct(name, Some(span_from_node(node)));
-            helper.mark_definition(struct_id);
+            let span = span_from_node(node);
+            match classify_tagged_specifier(node) {
+                TaggedSpecifierRole::Definition => {
+                    // Real struct declaration (issue #394): opt the dual-use
+                    // add_struct bare helper into is_definition = true.
+                    let struct_id = helper.add_struct(name, span.into());
+                    helper.mark_definition(struct_id);
 
-            // Process struct fields for TypeOf/Reference edges
-            process_struct_fields(node, name, content, helper);
+                    // Process struct fields for TypeOf/Reference edges
+                    process_struct_fields(node, name, content, helper);
+                }
+                TaggedSpecifierRole::ForwardDeclaration => {
+                    helper.add_bodyless_declaration_node(name, span, NodeKind::Struct, None);
+                }
+                TaggedSpecifierRole::Reference => {
+                    helper.add_call_site_node(name, span, NodeKind::Struct);
+                }
+            }
         }
     }
 }
@@ -1346,13 +1472,25 @@ fn handle_union_specifier(node: Node, content: &[u8], helper: &mut GraphBuildHel
     {
         let name = name.trim();
         if !name.is_empty() {
-            // Use add_struct for unions (they're similar in the graph). Real
-            // union declaration (issue #394): opt into is_definition = true.
-            let union_id = helper.add_struct(name, Some(span_from_node(node)));
-            helper.mark_definition(union_id);
+            let span = span_from_node(node);
+            match classify_tagged_specifier(node) {
+                TaggedSpecifierRole::Definition => {
+                    // Use add_struct for unions (they're similar in the graph).
+                    // Real union declaration (issue #394): opt into
+                    // is_definition = true.
+                    let union_id = helper.add_struct(name, span.into());
+                    helper.mark_definition(union_id);
 
-            // Process union fields for TypeOf/Reference edges
-            process_union_fields(node, name, content, helper);
+                    // Process union fields for TypeOf/Reference edges
+                    process_union_fields(node, name, content, helper);
+                }
+                TaggedSpecifierRole::ForwardDeclaration => {
+                    helper.add_bodyless_declaration_node(name, span, NodeKind::Struct, None);
+                }
+                TaggedSpecifierRole::Reference => {
+                    helper.add_call_site_node(name, span, NodeKind::Struct);
+                }
+            }
         }
     }
 }
@@ -1363,7 +1501,18 @@ fn handle_enum_specifier(node: Node, content: &[u8], helper: &mut GraphBuildHelp
     {
         let name = name.trim();
         if !name.is_empty() {
-            helper.add_enum(name, Some(span_from_node(node)));
+            let span = span_from_node(node);
+            match classify_tagged_specifier(node) {
+                TaggedSpecifierRole::Definition => {
+                    helper.add_enum(name, span.into());
+                }
+                TaggedSpecifierRole::ForwardDeclaration => {
+                    helper.add_bodyless_declaration_node(name, span, NodeKind::Enum, None);
+                }
+                TaggedSpecifierRole::Reference => {
+                    helper.add_call_site_node(name, span, NodeKind::Enum);
+                }
+            }
         }
     }
 }
@@ -2258,13 +2407,7 @@ fn process_single_variable_declarator(
     all_types.extend(extract_all_type_names_from_c_type(declarator, content));
 
     // Create variable node
-    let var_id = helper.add_variable(
-        &var_name,
-        Some(Span::from_bytes(
-            declarator.start_byte(),
-            declarator.end_byte(),
-        )),
-    );
+    let var_id = helper.add_variable(&var_name, Some(Span::from_node(&declarator)));
 
     // Create TypeOf edge with Variable context
     let type_text = base_type_names.join(" ");

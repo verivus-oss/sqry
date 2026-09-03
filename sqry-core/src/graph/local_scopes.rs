@@ -22,7 +22,7 @@ use std::sync::Arc;
 use log::debug;
 
 use crate::graph::unified::node::NodeId;
-use crate::graph::{GraphBuilderError, Span};
+use crate::graph::{GraphBuilderError, Position, Span};
 
 /// Alias for scope indices within the tree.
 pub type ScopeId = usize;
@@ -100,6 +100,122 @@ pub trait ScopeKindTrait: Copy + Eq + Debug + Send + Sync {
 // ============================================================================
 // Core Data Structures
 // ============================================================================
+
+/// Resolves a byte offset in one file's content to a real line and column.
+///
+/// tree-sitter reports positions as a 0-based row plus a column counted in
+/// BYTES from the start of that row. This reproduces that exactly, so a span
+/// resolved from an offset here is indistinguishable from one taken straight
+/// off a node.
+///
+/// It exists because bindings are recorded as byte offsets: by the time a
+/// declaration node is turned into a graph node, the tree-sitter node that
+/// produced it is long out of scope. Resolving the offset centrally is what
+/// keeps every plugin from having to thread a span through its whole binder,
+/// and from quietly reporting line 1 when it does not.
+///
+/// Deliberately NOT `Default`: an empty `line_starts` violates the invariant
+/// below and makes [`LineIndex::position`] underflow. The only way to get one
+/// is [`LineIndex::new`], which always seeds the first line.
+#[derive(Debug, Clone)]
+pub struct LineIndex {
+    /// Byte offset of the first byte of each line. Always begins with 0, so it
+    /// is never empty and indexing by row is always in bounds.
+    line_starts: Vec<usize>,
+    /// Length of the indexed content, used to clamp out-of-range offsets.
+    content_len: usize,
+}
+
+impl LineIndex {
+    /// Build the index for a file's content. O(n) once per file.
+    #[must_use]
+    pub fn new(content: &[u8]) -> Self {
+        let mut line_starts = vec![0];
+        line_starts.extend(
+            content
+                .iter()
+                .enumerate()
+                .filter(|(_, byte)| **byte == b'\n')
+                .map(|(offset, _)| offset + 1),
+        );
+        Self {
+            line_starts,
+            content_len: content.len(),
+        }
+    }
+
+    /// 0-based row and byte column of `offset`, matching tree-sitter's `Point`.
+    ///
+    /// An offset past the end of the content is clamped to the end rather than
+    /// panicking, so a malformed range degrades to a position instead of a
+    /// crash.
+    #[must_use]
+    pub fn position(&self, offset: usize) -> Position {
+        let clamped = offset.min(self.content_len);
+        // partition_point counts the line starts at or before `clamped`, which
+        // is the 1-based line number. Subtract one for the 0-based row.
+        let row = self.line_starts.partition_point(|start| *start <= clamped) - 1;
+        Position {
+            line: row,
+            column: clamped - self.line_starts[row],
+        }
+    }
+
+    /// Byte offset of a 0-based row and byte column, the inverse of
+    /// [`position`](Self::position).
+    ///
+    /// Returns `None` for a row past the end of the content. A column past the
+    /// end of its line is clamped to the content length rather than running
+    /// into the next line, so a stale position degrades instead of pointing
+    /// somewhere plausible and wrong.
+    #[must_use]
+    pub fn byte_for_position(&self, line: u32, column: u32) -> Option<usize> {
+        let row = usize::try_from(line).ok()?;
+        let start = *self.line_starts.get(row)?;
+        Some((start + usize::try_from(column).ok()?).min(self.content_len))
+    }
+
+    /// Span covering an entire file, for a node that genuinely IS the file:
+    /// the `NodeKind::Module` a script-style plugin mints for the file itself.
+    /// It replaces `Span::from_bytes(0, content.len())`, which put the file's
+    /// byte length in the end column, and resolves to the same byte range, so a
+    /// body hash computed either way is identical.
+    ///
+    /// NOT for a synthetic `<module>` caller context. Those are
+    /// `NodeKind::Function` stubs standing in for code with no enclosing
+    /// callable, and a file-sized span makes one pass `has_valid_body_span`, so
+    /// a whole file is then hashed and shape-matched as if it were one function
+    /// body. Three reviewers measured that regression on this branch. Those
+    /// contexts keep `Span::default()`, which reports the honest line 1 column 0
+    /// and stays out of the body planes.
+    ///
+    /// Walks the content once without building an index, because a caller
+    /// needs one span rather than repeated lookups.
+    #[must_use]
+    pub fn whole_file_span(content: &[u8]) -> Span {
+        let mut line = 0usize;
+        let mut line_start = 0usize;
+        for (offset, byte) in content.iter().enumerate() {
+            if *byte == b'\n' {
+                line += 1;
+                line_start = offset + 1;
+            }
+        }
+        Span::new(
+            Position { line: 0, column: 0 },
+            Position {
+                line,
+                column: content.len() - line_start,
+            },
+        )
+    }
+
+    /// Span covering `start..end`, in the same shape `Span::from_node` returns.
+    #[must_use]
+    pub fn span(&self, start: usize, end: usize) -> Span {
+        Span::new(self.position(start), self.position(end))
+    }
+}
 
 /// A local variable binding within a scope.
 #[derive(Debug, Clone)]
@@ -318,7 +434,15 @@ pub enum ResolutionOutcome {
 }
 
 /// A successful local variable resolution.
+///
+/// `#[non_exhaustive]`: adding `decl_span` to this struct was a major-version
+/// break for anyone constructing it with a struct literal, which is what
+/// `cargo-semver-checks` reports as `constructible_struct_adds_field`. Callers
+/// only ever read a resolution, so the struct is marked non-exhaustive in the
+/// same release that takes the break, and the next field costs a minor bump
+/// instead of a major one.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub struct LocalBindingMatch {
     /// The graph node ID for the variable declaration (may be None if not yet created).
     pub node_id: Option<NodeId>,
@@ -326,6 +450,10 @@ pub struct LocalBindingMatch {
     pub decl_start_byte: usize,
     /// End byte of the declaration identifier.
     pub decl_end_byte: usize,
+    /// Real line and column of the declaration, resolved from the byte offsets
+    /// above. Hand this to the node builder: building a span from the offsets
+    /// instead reports the declaration at line 1 with the offset as its column.
+    pub decl_span: Span,
 }
 
 // ============================================================================
@@ -352,15 +480,22 @@ pub struct ScopeTree<K: ScopeKindTrait> {
     pub debug: DebugLogLimiter,
     /// Total content length in bytes (for span validation).
     pub content_len: usize,
+    /// Byte offset to line/column resolver for this file.
+    line_index: LineIndex,
 }
 
 impl<K: ScopeKindTrait> ScopeTree<K> {
-    /// Create a new empty scope tree for the given content length.
+    /// Create a new empty scope tree over a file's content.
     ///
     /// Language plugins should populate the tree using `add_scope()`,
     /// `add_binding()`, and `rebuild_index()`.
+    ///
+    /// Takes the content rather than just its length so the tree can resolve a
+    /// binding's byte offsets back to a real line and column. Passing the
+    /// content is not optional for that reason: a tree built without it would
+    /// report every declaration at line 1.
     #[must_use]
-    pub fn new(content_len: usize) -> Self {
+    pub fn new(content: &[u8]) -> Self {
         ScopeTree {
             scopes: Vec::new(),
             index: ScopeIndex::default(),
@@ -368,8 +503,15 @@ impl<K: ScopeKindTrait> ScopeTree<K> {
             class_members: ClassMemberIndex::default(),
             class_infos: ClassInfoIndex::default(),
             debug: DebugLogLimiter::default(),
-            content_len,
+            content_len: content.len(),
+            line_index: LineIndex::new(content),
         }
+    }
+
+    /// Resolve a byte range in this file to a real line and column span.
+    #[must_use]
+    pub fn span_for_bytes(&self, start: usize, end: usize) -> Span {
+        self.line_index.span(start, end)
     }
 
     // ========================================================================
@@ -538,6 +680,9 @@ impl<K: ScopeKindTrait> ScopeTree<K> {
                     node_id: binding.node_id,
                     decl_start_byte: binding.decl_start_byte,
                     decl_end_byte: binding.decl_end_byte,
+                    decl_span: self
+                        .line_index
+                        .span(binding.decl_start_byte, binding.decl_end_byte),
                 });
             }
         }
@@ -843,7 +988,14 @@ pub fn recursion_error_to_graph_error(
     node: tree_sitter::Node,
 ) -> GraphBuilderError {
     GraphBuilderError::ParseError {
-        span: Span::from_bytes(node.start_byte(), node.end_byte()),
+        // `Span::from_node`, not `from_bytes`. This span reaches a user:
+        // `GraphBuilderError::ParseError` renders as
+        // "Failed to parse AST node at {span:?}", so the byte-offset encoding
+        // printed line 0 with the offset in the column. A reviewer pointed out
+        // that this function already receives the node, and that "not a symbol
+        // position" is not a licence to report the wrong line. This was issue
+        // #725 surviving on the error path.
+        span: Span::from_node(&node),
         reason: format!("Recursion limit: {e}"),
     }
 }
@@ -858,6 +1010,62 @@ pub fn recursion_error_to_graph_error(
 /// reference tracking. It uses the `StagingGraph`'s operations and
 /// string lookup to produce human-readable edge pairs.
 #[must_use]
+/// `References` edges as (source name, target name, target start position).
+///
+/// The position is what identifies WHICH declaration a reference resolved to.
+/// Callers used to parse a `name@<decl_start_byte>` suffix off the target name
+/// for that, which worked only while the builder published its binding-site
+/// cache key as the node address. It no longer does, because publishing it put
+/// that key into planner, MCP and LSP output. The recorded declaration span
+/// carries the same information and is the thing the graph actually promises.
+pub fn collect_reference_edges_with_target_position(
+    staging: &crate::graph::unified::build::StagingGraph,
+) -> Vec<(String, String, (u32, u32))> {
+    use crate::graph::unified::build::StagingOp;
+    use crate::graph::unified::edge::EdgeKind;
+
+    let strings = crate::graph::unified::build::test_helpers::build_string_lookup(staging);
+    let node_names = build_node_name_map(staging, &strings);
+
+    let mut positions: HashMap<NodeId, (u32, u32)> = HashMap::new();
+    for op in staging.operations() {
+        if let StagingOp::AddNode { entry, expected_id } = op
+            && let Some(id) = *expected_id
+        {
+            // `NodeEntry` stores 1-based lines (staging adds one), while
+            // `LineIndex` speaks tree-sitter's 0-based rows. Convert here so
+            // the caller gets one coordinate system, not two.
+            positions.insert(id, (entry.start_line.saturating_sub(1), entry.start_column));
+        }
+    }
+
+    staging
+        .operations()
+        .iter()
+        .filter_map(|op| {
+            if let StagingOp::AddEdge {
+                source,
+                target,
+                kind: EdgeKind::References,
+                ..
+            } = op
+            {
+                let from = node_names.get(source)?.clone();
+                let to = node_names.get(target)?.clone();
+                let at = *positions.get(target)?;
+                Some((from, to, at))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// `References` edges as (source name, target name).
+///
+/// Use [`collect_reference_edges_with_target_position`] when the caller needs
+/// to know WHICH declaration a reference resolved to; a name alone no longer
+/// distinguishes two same-named bindings in different scopes.
 pub fn collect_reference_edges(
     staging: &crate::graph::unified::build::StagingGraph,
 ) -> Vec<(String, String)> {
@@ -890,6 +1098,80 @@ pub fn collect_reference_edges(
 
 /// Check if any `References` edge targets a variable with the given name
 /// (pattern: `name@*`).
+#[must_use]
+/// `References` edges that target a VARIABLE declaration named `name`.
+///
+/// Kind-aware on purpose. A plugin that publishes a declaration under the bare
+/// identifier cannot be matched by name alone, because a `Type` node can carry
+/// the same string: `def f(x: int)` emits a reference to a type named `int`,
+/// and a bare-name match would read that as a local variable called `int`.
+///
+/// Accepts both live declaration spellings: the identifier alone, and the
+/// binding-site suffixed form `name@<digits>` that a plugin uses when it has
+/// not separated node identity from the published name.
+fn variable_ref_targets(staging: &crate::graph::unified::build::StagingGraph, name: &str) -> usize {
+    use crate::graph::unified::build::StagingOp;
+    use crate::graph::unified::edge::EdgeKind;
+    use crate::graph::unified::node::kind::NodeKind;
+
+    let strings = crate::graph::unified::build::test_helpers::build_string_lookup(staging);
+    let mut variables: HashMap<NodeId, String> = HashMap::new();
+    for op in staging.operations() {
+        if let StagingOp::AddNode { entry, expected_id } = op
+            && entry.kind == NodeKind::Variable
+            && let Some(id) = *expected_id
+            && let Some(n) = strings.get(&entry.qualified_name.unwrap_or(entry.name).index())
+        {
+            variables.insert(id, n.clone());
+        }
+    }
+
+    staging
+        .operations()
+        .iter()
+        .filter(|op| {
+            let StagingOp::AddEdge {
+                target,
+                kind: EdgeKind::References,
+                ..
+            } = op
+            else {
+                return false;
+            };
+            variables.get(target).is_some_and(|t| {
+                t == name
+                    || t.strip_prefix(name)
+                        .and_then(|r| r.strip_prefix('@'))
+                        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+            })
+        })
+        .count()
+}
+
+/// Whether any `References` edge targets a variable declaration named `name`.
+#[must_use]
+pub fn has_local_variable_ref(
+    staging: &crate::graph::unified::build::StagingGraph,
+    name: &str,
+) -> bool {
+    variable_ref_targets(staging, name) > 0
+}
+
+/// How many `References` edges target a variable declaration named `name`.
+#[must_use]
+pub fn count_local_variable_refs(
+    staging: &crate::graph::unified::build::StagingGraph,
+    name: &str,
+) -> usize {
+    variable_ref_targets(staging, name)
+}
+
+/// Whether any `References` edge targets a node named `name@<offset>`.
+///
+/// Name-only and therefore kind-blind. Correct for a plugin that publishes its
+/// declarations under the suffixed spelling, where no other node kind shares
+/// it. Use [`has_local_variable_ref`] when declarations carry the bare
+/// identifier, since a `Type` node can then collide with them.
 #[must_use]
 pub fn has_local_ref(edges: &[(String, String)], name: &str) -> bool {
     let prefix = format!("{name}@");
@@ -951,4 +1233,101 @@ pub fn build_string_lookup(
     staging: &crate::graph::unified::build::StagingGraph,
 ) -> HashMap<u32, String> {
     crate::graph::unified::build::test_helpers::build_string_lookup(staging)
+}
+
+#[cfg(test)]
+mod line_index_tests {
+    use super::LineIndex;
+
+    /// Every offset in the content must resolve to the same row and column
+    /// tree-sitter would report: row counted in newlines, column counted in
+    /// BYTES from the start of the row.
+    #[test]
+    fn position_matches_newline_and_byte_column_arithmetic() {
+        let content = b"alpha\nbeta\n\ngamma";
+        let index = LineIndex::new(content);
+
+        let mut row = 0;
+        let mut line_start = 0;
+        for offset in 0..=content.len() {
+            let position = index.position(offset);
+            assert_eq!(
+                (position.line, position.column),
+                (row, offset - line_start),
+                "offset {offset} resolved wrongly"
+            );
+            if content.get(offset) == Some(&b'\n') {
+                row += 1;
+                line_start = offset + 1;
+            }
+        }
+    }
+
+    /// A file with no trailing newline still resolves its last byte, and an
+    /// empty file resolves offset 0 rather than panicking on an empty index.
+    #[test]
+    fn handles_no_trailing_newline_and_empty_content() {
+        let index = LineIndex::new(b"one\ntwo");
+        assert_eq!((index.position(6).line, index.position(6).column), (1, 2));
+
+        let empty = LineIndex::new(b"");
+        assert_eq!((empty.position(0).line, empty.position(0).column), (0, 0));
+    }
+
+    /// Content ending in a newline has a final, EMPTY line, and the offset at
+    /// `content.len()` belongs to it. Dropping that last line start still
+    /// satisfies every other test here, so this is the one that pins it.
+    #[test]
+    fn offset_at_end_of_newline_terminated_content_is_on_the_final_empty_line() {
+        let content = b"one\ntwo\n";
+        let index = LineIndex::new(content);
+        let at_end = index.position(content.len());
+        assert_eq!(
+            (at_end.line, at_end.column),
+            (2, 0),
+            "offset {} follows the second newline, so it opens line index 2",
+            content.len()
+        );
+
+        // A single newline is the degenerate form of the same case.
+        let just_a_newline = LineIndex::new(b"\n");
+        let after = just_a_newline.position(1);
+        assert_eq!((after.line, after.column), (1, 0));
+    }
+
+    /// An offset past the end clamps to the end instead of panicking, matching
+    /// the behaviour of the per-plugin helper this replaced.
+    #[test]
+    fn clamps_offsets_past_the_end() {
+        let content = b"one\ntwo";
+        let index = LineIndex::new(content);
+        let clamped = index.position(usize::MAX);
+        assert_eq!((clamped.line, clamped.column), (1, 3));
+        assert_eq!(clamped, index.position(content.len()));
+    }
+
+    /// A CRLF file keeps the carriage return on the preceding line, so the
+    /// column of the first byte after a break is 0, as tree-sitter reports it.
+    #[test]
+    fn carriage_returns_stay_on_the_preceding_line() {
+        let index = LineIndex::new(b"one\r\ntwo");
+        let after_break = index.position(5);
+        assert_eq!((after_break.line, after_break.column), (1, 0));
+    }
+
+    /// The whole point: a span built from byte offsets reports the real line,
+    /// where `Span::from_bytes` would have reported line 0 with the offset
+    /// sitting in the column.
+    #[test]
+    fn span_reports_real_lines_not_byte_offsets() {
+        let content = b"fn a() {}\nfn b() {}\nlet value = 1;";
+        let index = LineIndex::new(content);
+        let start = 20; // `let` on the third line
+        let span = index.span(start, start + 3);
+
+        assert_eq!(span.start.line, 2, "third line is row 2");
+        assert_eq!(span.start.column, 0);
+        assert_eq!(span.end.line, 2);
+        assert_eq!(span.end.column, 3);
+    }
 }

@@ -147,12 +147,16 @@ fn collect_constraint_edges(staging: &StagingGraph) -> Vec<(String, String)> {
 /// Find the `AddNode` op for a given qualified name and assert its span is
 /// non-zero (anchored on the parameter identifier).
 ///
-/// The Java plugin uses `Span::from_bytes(start, end)`, which `add_node_internal`
-/// stores into `start_column` / `end_column` (with `start_line` / `end_line` = 1).
-/// Byte-range fields (`start_byte` / `end_byte`) are not populated by this path;
-/// the column fields carry the byte offsets. Anchored = (`end_column` - `start_column`)
-/// is small (≤64 bytes), matching the parameter identifier (e.g. `T`, `Foo`),
-/// rather than the full declaration span.
+/// Anchored = (`end_column` - `start_column`) is small (≤ 64 bytes),
+/// matching the parameter identifier (e.g. `T`, `Foo`) rather than the full
+/// declaration span.
+///
+/// This comment used to describe the plugin as emitting
+/// `Span::from_bytes(start, end)`, storing byte offsets in the column fields
+/// with the line pinned to 1. That is no longer true: the plugin emits
+/// `Span::from_node`. The width assertion below holds under BOTH encodings,
+/// so it is not what catches a revert; `span_column_invariant_tests` is.
+/// Described accurately here so it is not read as a spec for the old encoding.
 fn assert_type_node_has_real_span(staging: &StagingGraph, qname: &str) {
     let strings = build_string_lookup(staging);
     let mut found_any = false;

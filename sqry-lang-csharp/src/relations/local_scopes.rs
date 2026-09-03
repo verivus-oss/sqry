@@ -81,8 +81,7 @@ pub(crate) type CSharpScopeTree = ScopeTree<ScopeKind>;
 
 /// Build a scope tree for a C# source file.
 pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<CSharpScopeTree> {
-    let content_len = content.len();
-    let mut tree = CSharpScopeTree::new(content_len);
+    let mut tree = CSharpScopeTree::new(content);
 
     let mut guard = local_scopes::load_recursion_guard();
     build_scopes_recursive(&mut tree, root, content, None, &mut guard)?;
@@ -754,7 +753,7 @@ pub(crate) fn handle_identifier_for_reference(
             let target_id = if let Some(node_id) = binding.node_id {
                 node_id
             } else {
-                let span = Span::from_bytes(binding.decl_start_byte, binding.decl_end_byte);
+                let span = binding.decl_span;
                 let qualified_var = format!("{identifier}@{}", binding.decl_start_byte);
                 let var_id = helper.add_variable(&qualified_var, Some(span));
                 helper.mark_definition(var_id);

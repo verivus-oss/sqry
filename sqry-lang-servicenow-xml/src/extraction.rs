@@ -103,6 +103,13 @@ pub fn extract_scripts(
         // Must happen per-field so spans and hash input stay aligned.
         // The pipeline's later attach_body_hashes() against XML bytes will skip
         // nodes that already have hashes (body_hash.is_none() check).
+        //
+        // Nodes this call DECLINES are a separate case (issue #748): a call-site
+        // stub is left unhashed on purpose, so "already has a hash" does not
+        // protect it. `ReplayState::replay` deliberately leaves the parent with
+        // no body extent for a replayed id, so the later XML-bytes pass declines
+        // it again rather than hashing it against XML at script-local
+        // coordinates.
         del_staging.attach_body_hashes(script_bytes, None);
 
         if !del_staging.is_empty() {

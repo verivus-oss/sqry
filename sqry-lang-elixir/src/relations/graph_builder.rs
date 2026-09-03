@@ -23,7 +23,7 @@ use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
-use sqry_core::graph::unified::{ExportKind, GraphBuildHelper, StagingGraph};
+use sqry_core::graph::unified::{ExportKind, GraphBuildHelper, NodeKind, StagingGraph};
 use sqry_core::graph::{GraphBuilder, GraphBuilderError, GraphResult, Language, Span};
 use tree_sitter::{Node, StreamingIterator, Tree};
 
@@ -1068,7 +1068,7 @@ fn build_nif_ffi_edge(
     // Create FFI function node (fixed name for all NIF loads)
     let ffi_func_name = "ffi::erlang::load_nif";
     let span = span_from_node(node);
-    let ffi_func_id = helper.add_function(ffi_func_name, Some(span), false, false);
+    let ffi_func_id = helper.add_call_site_node(ffi_func_name, span, NodeKind::Function);
 
     // Add FfiCall edge with C convention (NIFs use C ABI)
     helper.add_ffi_edge(caller_id, ffi_func_id, FfiConvention::C);

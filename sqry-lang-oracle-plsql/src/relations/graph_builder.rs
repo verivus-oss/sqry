@@ -408,11 +408,14 @@ fn extract_table_edges_from_text(
     module_id: NodeId,
     table_edges_seen: &mut HashSet<TableEdgeKey>,
 ) {
+    // One index for the whole file, reused for every statement, so each table
+    // node gets a real line instead of the statement's byte offset.
+    let line_index = sqry_core::graph::local_scopes::LineIndex::new(content);
     let mut offset = 0usize;
     for statement_bytes in content.split(|b| *b == b';') {
         let statement = String::from_utf8_lossy(statement_bytes);
         let end = offset + statement_bytes.len();
-        let span = Span::from_bytes(offset, end);
+        let span = line_index.span(offset, end);
 
         let ops = parse_table_ops_from_statement(&statement);
         for (op, table_name) in ops {

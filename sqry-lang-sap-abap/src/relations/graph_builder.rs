@@ -36,6 +36,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Node, Query, QueryCursor, Tree};
 
 use super::type_extractor;
+use sqry_core::graph::unified::node::NodeKind;
 
 /// Information about an ABAP callable (method, function, etc.)
 #[derive(Debug, Clone)]
@@ -1299,8 +1300,9 @@ fn extract_program_calls(
 
         // Parse SUBMIT statement: SUBMIT <program_name> ...
         if let Some(program_name) = parse_submit_statement(&upper, trimmed) {
+            // SUBMIT statement extent, not a declaration of the program (issue #748).
             let span = span_from_line(line_idx, trimmed.len());
-            let program_node = helper.add_module(&program_name, Some(span));
+            let program_node = helper.add_call_site_node(&program_name, span, NodeKind::Module);
 
             // Find the enclosing callable and create call edge
             if let Some(caller) = find_enclosing_callable(callables, byte_offset, line_end) {
@@ -1313,7 +1315,8 @@ fn extract_program_calls(
             let span = span_from_line(line_idx, trimmed.len());
             // Prefix transaction code with TCODE_ to distinguish from regular programs
             let tcode_name = format!("TCODE_{tcode}");
-            let tcode_node = helper.add_module(&tcode_name, Some(span));
+            // CALL TRANSACTION extent, not a declaration (issue #748).
+            let tcode_node = helper.add_call_site_node(&tcode_name, span, NodeKind::Module);
 
             // Find the enclosing callable and create call edge
             if let Some(caller) = find_enclosing_callable(callables, byte_offset, line_end) {

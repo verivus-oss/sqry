@@ -30,6 +30,7 @@ use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
 use sqry_core::graph::unified::edge::FfiConvention;
 use sqry_core::graph::unified::edge::kind::TypeOfContext;
 use sqry_core::graph::unified::node::NodeId as UnifiedNodeId;
+use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, Language, Position, Span,
@@ -712,7 +713,9 @@ fn process_call_expression(
             && SwiftBridgingIndex::is_c_function(&callee_info.name).is_some()
         {
             let ffi_name = format!("C::{}", callee_info.name);
-            let ffi_id = helper.add_function(&ffi_name, Some(node_to_span(node)), false, false);
+            // Call-site extent, not a declaration of the C function (issue #748).
+            let ffi_id =
+                helper.add_call_site_node(&ffi_name, node_to_span(node), NodeKind::Function);
             helper.add_ffi_edge(source_id, ffi_id, FfiConvention::C);
             return;
         }

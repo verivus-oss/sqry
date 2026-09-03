@@ -20,6 +20,7 @@
 //! See `docs/development/codegraph-body-hash/` for full specification.
 
 use crate::graph::body_hash::BodyHash128;
+use crate::graph::unified::build::staging::BodySpan;
 use crate::graph::unified::node::kind::NodeKind;
 use crate::graph::unified::storage::arena::NodeEntry;
 
@@ -151,6 +152,15 @@ pub fn extract_node_body(
 
 /// Compute the body hash for a node if it has extractable body content.
 ///
+/// # The build seam no longer calls this
+///
+/// [`StagingGraph::attach_body_hashes`] fingerprints the extent a DECLARATION
+/// offered a node, which is not always the extent recorded on the entry, so it
+/// uses [`compute_body_hash_at`] (issue #748). This entry point remains for
+/// callers that really do mean "hash whatever range this entry sits at", and
+/// the two are pinned to agree for the same extent by
+/// `entry_addressed_and_extent_addressed_hashes_agree`.
+///
 /// # Arguments
 ///
 /// * `content` - Full source file content as bytes
@@ -165,6 +175,8 @@ pub fn extract_node_body(
 ///
 /// Bodies smaller than 4 bytes are not hashed to avoid trivial duplicate matches
 /// (e.g., empty bodies `{}`, single statements).
+///
+/// [`StagingGraph::attach_body_hashes`]: crate::graph::unified::build::staging::StagingGraph::attach_body_hashes
 #[must_use]
 pub fn compute_node_body_hash(
     content: &[u8],
@@ -183,6 +195,75 @@ pub fn compute_node_body_hash(
     }
 
     Some(BodyHash128::compute(&body))
+}
+
+/// Compute the body hash over an explicit extent rather than the one recorded
+/// on the entry.
+///
+/// The build seam fingerprints the extent a DECLARATION offered a node, which
+/// is not always the extent the node is recorded at: a type reference below a
+/// `struct X { ... }` wins the recorded location under the latest-ending rule
+/// but does not own the body (issue #748). `entry.kind` still decides
+/// eligibility, and the minimum body length is unchanged.
+#[must_use]
+pub fn compute_body_hash_at(
+    content: &[u8],
+    kind: NodeKind,
+    body_span: BodySpan,
+    line_offsets: &[usize],
+) -> Option<BodyHash128> {
+    if !node_kind_supports_body_hash(kind) {
+        return None;
+    }
+
+    if !is_valid_body_extent(body_span) {
+        return None;
+    }
+
+    let (start_byte, end_byte) = resolve_body_span(
+        line_offsets,
+        body_span.start_line,
+        body_span.start_column,
+        body_span.end_line,
+        body_span.end_column,
+        content.len(),
+    )?;
+
+    let body = &content[start_byte..end_byte];
+
+    // Skip bodies smaller than 4 bytes
+    if body.len() < 4 {
+        return None;
+    }
+
+    Some(BodyHash128::compute(body))
+}
+
+/// [`has_valid_body_span`] for a bare extent: non-zero lines, start before end.
+///
+/// Deliberately a mirror of that function rather than a subset of it, so the
+/// two hash entry points cannot drift. The zero-line checks are load-bearing:
+/// `resolve_body_span` maps line 0 onto line 1 through `saturating_sub`, so
+/// without them a `{0, 0}` data-quality sentinel would hash the first line of
+/// the file.
+///
+/// The same-line `start_column >= end_column` check is NOT load-bearing;
+/// `resolve_body_span` rejects `start_byte >= end_byte` downstream and catches
+/// the same cases. `has_valid_body_span` carries the same redundant check, and
+/// it is kept here for exactly that reason: the two must read alike.
+#[must_use]
+fn is_valid_body_extent(body_span: BodySpan) -> bool {
+    if body_span.start_line == 0 || body_span.end_line == 0 {
+        return false;
+    }
+    if body_span.start_line > body_span.end_line {
+        return false;
+    }
+    if body_span.start_line == body_span.end_line && body_span.start_column >= body_span.end_column
+    {
+        return false;
+    }
+    true
 }
 
 /// Check if a node kind supports body hashing.
@@ -374,6 +455,129 @@ mod tests {
         assert!(!node_kind_supports_body_hash(NodeKind::CallSite));
         assert!(!node_kind_supports_body_hash(NodeKind::EnumVariant));
         assert!(!node_kind_supports_body_hash(NodeKind::Macro));
+    }
+
+    /// The extent-addressed entry point the build seam uses and the
+    /// entry-addressed one it used to use must give the same answer for the
+    /// same range, on every axis that can make them differ: node-kind
+    /// eligibility, the minimum body length, span validity, and byte
+    /// resolution (issue #748).
+    ///
+    /// Two functions computing "the body hash" that disagree is exactly the
+    /// class of bug this whole change is about.
+    #[test]
+    fn entry_addressed_and_extent_addressed_hashes_agree() {
+        use crate::graph::unified::build::staging::BodySpan;
+
+        let content = b"fn foo() { return 42; }\nfn bar() { let x = 1; x }\nlet v = 0;\n";
+        let line_offsets = build_line_offsets(content);
+
+        struct Case {
+            name: &'static str,
+            kind: NodeKind,
+            span: (u32, u32, u32, u32),
+        }
+
+        let cases = [
+            Case {
+                name: "an ordinary hashable body",
+                kind: NodeKind::Function,
+                span: (1, 0, 1, 23),
+            },
+            Case {
+                name: "a second one, to catch a constant-return implementation",
+                kind: NodeKind::Function,
+                span: (2, 0, 2, 25),
+            },
+            Case {
+                name: "an ineligible kind",
+                kind: NodeKind::Variable,
+                span: (3, 0, 3, 10),
+            },
+            Case {
+                name: "another ineligible kind",
+                kind: NodeKind::Parameter,
+                span: (1, 0, 1, 23),
+            },
+            Case {
+                name: "a body under the four-byte minimum",
+                kind: NodeKind::Function,
+                span: (1, 0, 1, 2),
+            },
+            Case {
+                name: "a zero start line, the data-quality sentinel",
+                kind: NodeKind::Function,
+                span: (0, 0, 1, 23),
+            },
+            Case {
+                name: "a zero end line",
+                kind: NodeKind::Function,
+                span: (1, 0, 0, 23),
+            },
+            Case {
+                name: "an inverted range",
+                kind: NodeKind::Function,
+                span: (2, 0, 1, 5),
+            },
+            Case {
+                name: "a same-line range with start at or past end",
+                kind: NodeKind::Function,
+                span: (1, 10, 1, 10),
+            },
+            Case {
+                name: "an end column past the end of the file",
+                kind: NodeKind::Function,
+                span: (3, 0, 3, 9_999),
+            },
+            Case {
+                name: "a start line past the end of the file",
+                kind: NodeKind::Function,
+                span: (99, 0, 99, 5),
+            },
+        ];
+
+        let mut hashed = 0usize;
+        let mut declined = 0usize;
+        for case in &cases {
+            let (sl, sc, el, ec) = case.span;
+            let mut entry = NodeEntry::new(case.kind, StringId::new(1), FileId::new(0));
+            entry.start_line = sl;
+            entry.start_column = sc;
+            entry.end_line = el;
+            entry.end_column = ec;
+
+            let by_entry = compute_node_body_hash(content, &entry, &line_offsets);
+            let by_extent = compute_body_hash_at(
+                content,
+                case.kind,
+                BodySpan {
+                    start_line: sl,
+                    start_column: sc,
+                    end_line: el,
+                    end_column: ec,
+                },
+                &line_offsets,
+            );
+            assert_eq!(
+                by_entry, by_extent,
+                "{}: the two entry points disagree for the same extent",
+                case.name
+            );
+
+            if by_entry.is_some() {
+                hashed += 1;
+            } else {
+                declined += 1;
+            }
+        }
+
+        // Non-vacuity: the table must exercise BOTH outcomes, or an
+        // implementation that always returned `None` would pass it.
+        assert!(
+            hashed >= 2 && declined >= 8,
+            "the case table must cover both outcomes, got {hashed} hashed and \
+             {declined} declined"
+        );
     }
 
     #[test]

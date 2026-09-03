@@ -112,7 +112,7 @@ static CLASSPATH_INDEX_CACHE: OnceLock<Mutex<HashMap<PathBuf, Option<Arc<Classpa
 
 /// Build a Java scope tree from the given AST root node.
 pub(crate) fn build(root: Node, content: &[u8], file: Option<&Path>) -> GraphResult<JavaScopeTree> {
-    let mut scope_tree = ScopeTree::new(content.len());
+    let mut scope_tree = ScopeTree::new(content);
     #[cfg(not(feature = "jvm-classpath"))]
     let _ = file;
     let mut class_infos = build_class_info_index(&mut scope_tree, root, content);
@@ -3459,7 +3459,7 @@ class A {
 ";
         let tree = parse_java(content);
         let root = tree.root_node();
-        let mut scope_tree = ScopeTree::new(content.len());
+        let mut scope_tree = ScopeTree::new(content.as_bytes());
 
         // Guard with very low depth limit to trigger error
         let mut guard = sqry_core::query::security::RecursionGuard::new(3).expect("guard creation");

@@ -76,7 +76,7 @@ pub(crate) type PythonScopeTree = ScopeTree<ScopeKind>;
 /// Build a scope tree for a Python source file.
 pub(crate) fn build(root: Node, content: &[u8]) -> GraphResult<PythonScopeTree> {
     let content_len = content.len();
-    let mut tree = PythonScopeTree::new(content_len);
+    let mut tree = PythonScopeTree::new(content);
 
     let mut guard = local_scopes::load_recursion_guard();
 
@@ -776,6 +776,59 @@ fn find_function_scope(tree: &PythonScopeTree, byte: usize) -> Option<ScopeId> {
 /// Called from the graph builder's walker for each `"identifier"` node.
 /// Creates a `Variable` node and `References` edge if the identifier resolves
 /// to a local variable or parameter.
+/// Mint a node for every binding that no reference ever reached.
+///
+/// Fixes verivus-oss/sqry#758. Before this, a declaration node was created
+/// only inside [`handle_identifier_for_reference`], so a name that nothing
+/// referenced never entered the graph at all and `sqry search NAME` answered
+/// "No matches found" for a symbol that is plainly in the source. Go, Rust and
+/// TypeScript all index the equivalent unreferenced constant, so python was
+/// the outlier, and false absence is the worst answer this tool can give:
+/// presence can be confirmed with grep, absence is the claim only the index
+/// can support.
+///
+/// Naming matches the reference path exactly (`name@decl_start_byte`), so a
+/// binding that IS referenced converges on the node that path already made
+/// rather than gaining a second one. `add_node_internal` deduplicates on
+/// (qualified name, kind) and merges spans, so the order of the two mints does
+/// not matter.
+///
+/// Runs after the walk, not during it, because only then is `node_id` known to
+/// be final for every binding.
+pub(crate) fn mint_unreferenced_bindings(
+    scope_tree: &mut PythonScopeTree,
+    helper: &mut GraphBuildHelper,
+) {
+    // Collected first because minting borrows `helper` while the scopes are
+    // still borrowed from `scope_tree`.
+    let mut pending: Vec<(String, usize, Span)> = Vec::new();
+    for scope in &scope_tree.scopes {
+        for (name, bindings) in &scope.variables {
+            for binding in bindings {
+                if binding.node_id.is_some() {
+                    continue;
+                }
+                pending.push((
+                    name.to_string(),
+                    binding.decl_start_byte,
+                    scope_tree.span_for_bytes(binding.decl_start_byte, binding.decl_end_byte),
+                ));
+            }
+        }
+    }
+
+    for (name, decl_start_byte, decl_span) in pending {
+        let qualified_name = format!("{name}@{decl_start_byte}");
+        // Bare identifier as the user-facing name: `ident@<offset>` in both
+        // roles matches `is_synthetic_placeholder_name`, and a declaration
+        // that `search --exact` and MCP cannot see is not indexed in any
+        // sense a user would accept.
+        let decl_id =
+            helper.add_variable_with_semantic_name(&name, &qualified_name, Some(decl_span));
+        scope_tree.attach_node_id(&name, decl_start_byte, decl_id);
+    }
+}
+
 pub(crate) fn handle_identifier_for_reference(
     node: Node,
     content: &[u8],
@@ -817,15 +870,35 @@ pub(crate) fn handle_identifier_for_reference(
     match scope_tree.resolve_identifier(usage_byte, name) {
         ResolutionOutcome::Local(binding) => {
             let span = Span::from_node(&node);
+            // Name the USAGE node by its own offset. Naming it after the
+            // declaration's offset (as this did) gave the usage and the
+            // declaration one shared name, so they collapsed into a single node
+            // that reported the usage's position and referenced itself.
+            let usage_name = format!("{}@{}", name, node.start_byte());
             let qualified_name = format!("{}@{}", name, binding.decl_start_byte);
-            let var_id = helper.add_variable(&qualified_name, Some(span));
+            let var_id = helper.add_variable(&usage_name, Some(span));
 
             if let Some(decl_id) = binding.node_id {
                 helper.add_reference_edge(var_id, decl_id);
             } else {
-                // Create declaration node if not yet attached
-                let decl_span = Span::from_bytes(binding.decl_start_byte, binding.decl_end_byte);
-                let decl_id = helper.add_variable(&qualified_name, Some(decl_span));
+                // Create declaration node if not yet attached.
+                //
+                // This node is NOT marked as a definition, so it carries the
+                // same `is_definition = false` as the usage nodes above it and
+                // nothing in the metadata tells them apart. That is a real gap
+                // and it is deliberate here: `add_variable` left python locals
+                // non-definitions before this change too, so marking it now
+                // would be a new behaviour rather than a restored one, and
+                // `is_definition` gates centrality
+                // (`analysis::centrality`, via `definition_signal_present`),
+                // so flipping it silently moves hub and overview output for
+                // every python local. The distinction belongs with the
+                // `sqry unused` semantics it exists to serve, tracked as
+                // verivus-oss/sqry#752, which has to settle it once for all
+                // 37 plugins rather than one plugin at a time.
+                let decl_span = binding.decl_span;
+                let decl_id =
+                    helper.add_variable_with_semantic_name(name, &qualified_name, Some(decl_span));
                 scope_tree.attach_node_id(name, binding.decl_start_byte, decl_id);
                 helper.add_reference_edge(var_id, decl_id);
             }

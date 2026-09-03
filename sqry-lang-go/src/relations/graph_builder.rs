@@ -1850,46 +1850,6 @@ pub(crate) fn span_from_node(node: Node<'_>) -> Span {
     )
 }
 
-/// Build a line-index-aware [`Span`] from a byte range.
-///
-/// Used by emission paths that only have `(start_byte, end_byte)` available
-/// (typically because the originating tree-sitter [`Node`] has already been
-/// dropped — e.g. when emitting a node from a `local_scopes::Binding`).
-///
-/// Falls back to `(line=0, column=byte)` shape **only** if the byte range
-/// is malformed; well-formed inputs always produce a true `(line, column)`
-/// span. This avoids the verivus-oss/sqry#74 regression where every Go
-/// symbol surfaced `start_line: 1` and `start_column` was a byte offset.
-pub(crate) fn span_from_byte_range(content: &[u8], start_byte: usize, end_byte: usize) -> Span {
-    let (start_line, start_column) = byte_to_line_column(content, start_byte);
-    let (end_line, end_column) = byte_to_line_column(content, end_byte);
-    Span::new(
-        sqry_core::graph::node::Position::new(start_line, start_column),
-        sqry_core::graph::node::Position::new(end_line, end_column),
-    )
-}
-
-/// Convert a byte offset into a `(line, column)` pair, both **0-indexed** to
-/// match tree-sitter's `Point` representation (so it composes cleanly with
-/// `GraphBuildHelper::add_node_internal`'s 1-based line normalization).
-///
-/// Walks the content byte-by-byte counting newlines. Acceptable for the
-/// occasional binding emission site where this is called once per local
-/// reference; not on the hot Phase 1 path (which uses
-/// [`span_from_node`] directly).
-fn byte_to_line_column(content: &[u8], byte_offset: usize) -> (usize, usize) {
-    let clamped = byte_offset.min(content.len());
-    let mut line = 0usize;
-    let mut last_newline_after = 0usize;
-    for (i, &byte) in content.iter().take(clamped).enumerate() {
-        if byte == b'\n' {
-            line += 1;
-            last_newline_after = i + 1;
-        }
-    }
-    (line, clamped - last_newline_after)
-}
-
 #[allow(dead_code)]
 /// # Errors
 ///
@@ -6031,9 +5991,12 @@ fn process_type_assertion_unified(
     // angle-bracket pseudo-identifier shape the structural fallback in
     // NodeEntry::is_synthetic_placeholder_name catches, and we also
     // flip the metadata-store bit so the canonical channel agrees.
-    let type_ref_id = helper.add_interface(
+    // The extent is the type-assertion expression, which the asserted type
+    // does not own (issue #748).
+    let type_ref_id = helper.add_call_site_node(
         &format!("<type:{qualified_type}>"),
-        Some(span_from_node(node)),
+        span_from_node(node),
+        NodeKind::Interface,
     );
     let mut store = NodeMetadataStore::new();
     store.mark_synthetic(type_ref_id);
@@ -6352,7 +6315,10 @@ fn build_cgo_edge(
 
     // Create FFI target node for the C function
     let ffi_name = format!("C::{c_function_name}");
-    let ffi_node_id = helper.add_function(&ffi_name, Some(span_from_node(call_node)), false, false);
+    // The extent here is the cgo CALL, not a declaration of the C function
+    // (issue #748), so the stub stays out of the body plane.
+    let ffi_node_id =
+        helper.add_call_site_node(&ffi_name, span_from_node(call_node), NodeKind::Function);
 
     // Add FFI edge with C convention
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -6379,8 +6345,9 @@ fn build_syscall_edge(
         extract_syscall_name(call_node, content).unwrap_or_else(|| "syscall::unknown".to_string());
 
     // Create FFI target node
+    // Call-site extent, not a declaration of the syscall (issue #748).
     let ffi_node_id =
-        helper.add_function(&syscall_name, Some(span_from_node(call_node)), false, false);
+        helper.add_call_site_node(&syscall_name, span_from_node(call_node), NodeKind::Function);
 
     // Add FFI edge with C convention (syscalls use C ABI)
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);
@@ -6409,7 +6376,9 @@ fn build_plugin_edge(
     );
 
     // Create FFI target node
-    let ffi_node_id = helper.add_module(&plugin_name, Some(span_from_node(call_node)));
+    // Call-site extent, not a declaration of the plugin module (issue #748).
+    let ffi_node_id =
+        helper.add_call_site_node(&plugin_name, span_from_node(call_node), NodeKind::Module);
 
     // Add FFI edge with C convention (plugins use C ABI for symbol lookup)
     helper.add_ffi_edge(caller_id, ffi_node_id, FfiConvention::C);

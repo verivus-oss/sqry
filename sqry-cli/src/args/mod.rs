@@ -1042,12 +1042,95 @@ pub enum Command {
     /// for cycle detection, reachability, and path queries.
     /// Uses parallel processing by default for faster indexing.
     ///
-    /// Upgrade-rebuild requirement: when sqry's in-format graph semantics
-    /// change between releases (e.g. the v10.0.x Cluster C field-edge source
-    /// migration), an existing `.sqry/graph/snapshot.sqry` keeps loading but
-    /// returns the legacy shape until rebuilt. Run `sqry index --force` once
-    /// after upgrading across such releases. Release notes call out which
-    /// versions need the rebuild.
+    /// Upgrade-rebuild requirement: some releases change in-format graph
+    /// semantics, and an existing `.sqry/graph/snapshot.sqry` keeps loading
+    /// but returns the legacy shape until rebuilt. Run `sqry index --force`
+    /// once after upgrading across one. Release notes call out which versions
+    /// need it. Two examples: the v10.0.x Cluster C field-edge source
+    /// migration; and the declaration-span fix, which corrected the reported
+    /// line and column of declarations in every language plugin it converts,
+    /// moved every R function context and with it every R function body hash
+    /// and shape descriptor, and dropped whole-file pseudo-bodies from Python
+    /// module-level FFI callers.
+    ///
+    /// Under `sqryd`, STOP FIRST AND REBUILD SECOND:
+    /// `sqry daemon stop`, then `sqry index --force .`, then
+    /// `sqry daemon start`. (Written inline rather than as an indented block:
+    /// an indented line in rustdoc is an implicit Rust code block, and the
+    /// doctest run tries to compile it.)
+    ///
+    /// A running daemon keeps serving the graph it already published, so this
+    /// command alone is not enough, and the order is not free. The reason is
+    /// not that a daemon reads the snapshot at startup: it does not. It builds
+    /// a workspace by PARSING THE SOURCE TREE, and reads
+    /// `.sqry/graph/snapshot.sqry` only to rehydrate a workspace it had
+    /// already evicted. So an auto-started replacement runs the new binary and
+    /// parses correctly whatever happens to be on disk.
+    ///
+    /// The hazard runs the other way. A pre-upgrade daemon is a WRITER: every
+    /// rebuild it completes persists its result over
+    /// `.sqry/graph/snapshot.sqry`. Leave it running while you rebuild and it
+    /// can overwrite the corrected snapshot with one parsed by the old code,
+    /// and nothing arbitrates, because the CLI and the daemon share one
+    /// durable-write path with no cross-process lock. Stopping first removes
+    /// the only writer that can undo the rebuild. Note that stopping does not
+    /// cancel a rebuild already in flight, so give a busy daemon a moment to
+    /// settle before rebuilding.
+    ///
+    /// `sqry index --force` is what fixes the on-disk snapshot that the CLI
+    /// and the standalone (non-daemon) MCP and LSP servers read.
+    ///
+    /// Setting `SQRY_DAEMON_NO_AUTO_START=1` in the environment of an
+    /// `sqry-mcp --daemon` or `sqry-lsp --daemon` client stops that client
+    /// racing you with a replacement daemon while the socket is down. It must
+    /// be set for the CLIENT process, not for your shell. Without it the
+    /// operator's later `sqry daemon start` prints `daemon is already running`
+    /// and exits 0, which reads as success.
+    ///
+    /// `sqry daemon rebuild . --force` is NOT the answer immediately after an
+    /// upgrade: the rebuild executes inside the still-running daemon, which is
+    /// the pre-upgrade binary, so it re-parses with the old code, republishes
+    /// a pre-upgrade graph, and persists it over the snapshot. Versions are reported but never gated,
+    /// so a new CLI talking to an old daemon is not detected: the daemon
+    /// admits a client on `protocol_version == 1` alone, and the client checks
+    /// only the envelope version before storing `daemon_version` as
+    /// information. Once the daemon runs the new binary, `daemon rebuild .
+    /// --force` is the cheaper in-place refresh, since it rebuilds AND
+    /// persists.
+    ///
+    /// Pinned workspaces reload from `daemon.toml` on start, so they need
+    /// nothing further. A workspace attached with `sqry daemon load` is not
+    /// persisted across a restart, so load it again afterwards.
+    ///
+    /// Do NOT reach for `sqry daemon load` as a refresh. For a workspace the
+    /// daemon already holds, the load short-circuits to the resident graph
+    /// (`get_or_load`) and returns a success envelope that reads like a
+    /// reload while changing nothing. Neither does `sqry index --force`: it
+    /// rewrites the snapshot on disk, which the daemon is not reading. Those
+    /// two commands reporting success without refreshing anything is
+    /// verivus-oss/sqry#757, and it is why the restart above is not
+    /// optional.
+    ///
+    /// Python indexes get materially larger across that rebuild, for two
+    /// reasons. A binding and its usages used to collapse into one node and
+    /// are now separate, and an assignment that nothing references is now
+    /// indexed at all rather than being absent from the graph
+    /// (part of verivus-oss/sqry#758, which made `sqry search --exact` and
+    /// the MCP tools report a symbol missing that is plainly in the source).
+    /// Measured on the 33-file python3.13 asyncio tree: 4977 nodes to 9932, and
+    /// 5319 edges to 7820. `sqry unused` therefore lists MORE Variable rows, and
+    /// its result for local variables remains unreliable in the other
+    /// direction: see verivus-oss/sqry#752 and `sqry unused --help`.
+    /// Budget for the size on large Python workspaces, including daemon
+    /// `memory_limit_mb`.
+    ///
+    /// #758 is NOT fully fixed and stays open. An ANNOTATED PARAMETER is still
+    /// wrong: `def f(x: int)` mints two nodes, `f:x` from the typed-parameter
+    /// path and `x@<offset>` from the binding sweep, and neither carries the
+    /// bare name, so `sqry search --exact x` still reports nothing. Plain
+    /// parameters, plain assignments and annotated assignments are all fixed and
+    /// are found by name. The remaining case needs one shared mint across the
+    /// four declaration paths, which is tracked on #758.
     #[command(display_order = 10)]
     Index {
         /// Directory to index (defaults to current directory).
@@ -1058,8 +1141,29 @@ pub enum Command {
         ///
         /// Required once after upgrading across a release that changes
         /// in-format graph semantics (e.g. v10.0.x Cluster C field-edge
-        /// source migration). Without `--force`, the existing snapshot
-        /// loads but returns the pre-upgrade graph shape.
+        /// source migration, or the declaration-span fix that corrected
+        /// the reported line and column of declarations in every language
+        /// plugin it converts). Without `--force`, the existing snapshot loads but
+        /// returns the pre-upgrade graph shape, so declarations that the
+        /// fix corrects keep reporting line 1.
+        ///
+        /// The rebuild is not free on every language: it moves every R
+        /// function body hash and shape descriptor, and Python indexes grow
+        /// substantially, because a binding and its usages were one node and
+        /// are now separate and because an assignment nothing references is
+        /// now indexed at all (part of verivus-oss/sqry#758, which stays
+        /// open: annotated parameters are still unfixed, see the `index`
+        /// command itself). Measured on the
+        /// 33-file python3.13 asyncio tree: 4977 nodes to 9932, and 5319
+        /// edges to 7820. `sqry unused` lists MORE Variable rows as a result,
+        /// and stays unreliable for locals: see verivus-oss/sqry#752 and
+        /// `sqry unused --help`. Both are detailed on the `index` command
+        /// itself.
+        ///
+        /// Daemon-backed workspaces need a restart as well, and the order
+        /// matters: stop first, then rebuild, then start. A pre-upgrade daemon
+        /// persists what it rebuilds, so leaving it up can overwrite this.
+        /// Same note.
         #[arg(long, short = 'f', alias = "rebuild", help_heading = headings::INDEX_CONFIGURATION, display_order = 10)]
         force: bool,
 
@@ -1692,6 +1796,22 @@ pub enum Command {
     ///
     /// Detects symbols that are never referenced using reachability analysis.
     /// Entry points (main, public lib exports, tests) are considered reachable.
+    ///
+    /// KNOWN DEFECT for local variables (verivus-oss/sqry#752). A local is
+    /// unreachable from an entry point by construction, so the reachability
+    /// rule this command uses reports variables it can see and misses the ones
+    /// it cannot: a binding that IS read is listed once per occurrence node.
+    /// Treat Variable rows as noisy, not as an answer.
+    ///
+    /// One half improved in this release. A binding that nothing references
+    /// now enters the graph at all (part of verivus-oss/sqry#758, which
+    /// stays open for annotated parameters), so a genuinely unread local is no
+    /// longer silently absent. The over-reporting half is
+    /// unfixed: correcting it means changing this query for all 37 plugins,
+    /// and a first attempt was reverted after review found it wrong for SAP
+    /// ABAP, Go and Java. Functions, types and other top-level symbols are
+    /// unaffected. Filter with --scope function or --scope struct to avoid the
+    /// affected class entirely.
     ///
     /// Examples:
     ///   sqry unused                            # Find all unused symbols
@@ -2356,8 +2476,12 @@ pub enum DaemonAction {
     /// Trigger an in-place graph rebuild for a loaded workspace.
     ///
     /// Sends a `daemon/rebuild` request to the running daemon for the specified
-    /// workspace root. Once wired (`CLI_REBUILD_3`), the daemon will re-index the
-    /// workspace and replace the in-memory graph atomically on completion.
+    /// workspace root. The daemon re-indexes the workspace and replaces the
+    /// in-memory graph atomically on completion.
+    ///
+    /// Note: the rebuild runs inside the RUNNING daemon, so immediately after a
+    /// binary upgrade it re-parses with the pre-upgrade code. Restart the daemon
+    /// first; see the upgrade-rebuild note on `sqry index`.
     ///
     /// Use `--force` to discard any incremental state and perform a full rebuild
     /// from scratch (equivalent to dropping and re-loading the workspace).

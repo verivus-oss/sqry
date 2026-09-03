@@ -1231,8 +1231,9 @@ fn extract_method_invocations(
             continue;
         }
 
+        // Call-site extent, not a declaration of the callee (issue #748).
         let call_span = span_from_node(&node);
-        let callee_id = helper.add_method(&callee_name, Some(call_span), false, false);
+        let callee_id = helper.add_call_site_node(&callee_name, call_span, NodeKind::Method);
         let arg_count = count_arguments(node);
         let arg_count = u8::try_from(arg_count).unwrap_or(u8::MAX);
         helper.add_call_edge_full_with_span(
@@ -1285,8 +1286,9 @@ fn extract_method_invocations(
             continue;
         }
 
+        // Call-site extent, not a declaration of the callee (issue #748).
         let call_span = span_from_node(&node);
-        let callee_id = helper.add_method(&callee_name, Some(call_span), false, false);
+        let callee_id = helper.add_call_site_node(&callee_name, call_span, NodeKind::Method);
         let arg_count = count_arguments(node);
         let arg_count = u8::try_from(arg_count).unwrap_or(u8::MAX);
         helper.add_call_edge_full_with_span(

@@ -1,7 +1,10 @@
 //! Integration tests for Python local variable reference tracking.
 
 use sqry_core::graph::GraphBuilder;
-use sqry_core::graph::local_scopes::{collect_reference_edges, count_local_refs, has_local_ref};
+use sqry_core::graph::local_scopes::{
+    LineIndex, collect_reference_edges, collect_reference_edges_with_target_position,
+    count_local_variable_refs, has_local_variable_ref,
+};
 use sqry_core::graph::unified::build::staging::StagingGraph;
 use sqry_lang_python::relations::PythonGraphBuilder;
 use std::path::Path;
@@ -46,16 +49,27 @@ fn build_staging_graph(content: &str, filename: &str) -> StagingGraph {
 
 /// Declaration start bytes that `References` edges to `name` point at.
 ///
-/// A qualified variable target is `name@<decl_start_byte>`; parsing the byte
-/// pins which declaration a reference resolves to. A phantom function-local
-/// binding and the true outer/module binding have different `decl_start_byte`,
-/// so asserting the target byte pins the global/nonlocal semantics exactly.
-fn ref_target_bytes(edges: &[(String, String)], name: &str) -> Vec<usize> {
-    let prefix = format!("{name}@");
+/// Which declaration a reference resolves to is the whole point of these
+/// tests: a phantom function-local binding and the true outer or module
+/// binding sit at different offsets, so pinning the target offset pins the
+/// global / nonlocal semantics exactly.
+///
+/// This used to parse a `name@<decl_start_byte>` suffix off the target name.
+/// That worked only while the builder published its binding-site cache key as
+/// the node address, which is what leaked `x@1487` into planner, MCP and LSP
+/// output. The declaration's recorded POSITION carries the same information
+/// and is what the graph actually promises, so the byte is recovered by
+/// converting that position back through the same line index the plugin used.
+fn ref_target_bytes(
+    edges: &[(String, String, (u32, u32))],
+    name: &str,
+    content: &str,
+) -> Vec<usize> {
+    let index = LineIndex::new(content.as_bytes());
     edges
         .iter()
-        .filter_map(|(_, to)| to.strip_prefix(&prefix))
-        .filter_map(|b| b.parse::<usize>().ok())
+        .filter(|(_, to, _)| to == name)
+        .filter_map(|(_, _, (line, column))| index.byte_for_position(*line, *column))
         .collect()
 }
 
@@ -71,7 +85,7 @@ fn test_basic_let_variable() {
 
     // x = 10; y = x + 1; → x should have a References edge
     assert!(
-        has_local_ref(&edges, "x"),
+        has_local_variable_ref(&staging, "x"),
         "Expected local reference to x: {edges:?}"
     );
 }
@@ -84,7 +98,7 @@ fn test_const_binding() {
 
     // count = 42; result = count + 1;
     assert!(
-        has_local_ref(&edges, "count"),
+        has_local_variable_ref(&staging, "count"),
         "Expected local reference to count: {edges:?}"
     );
 }
@@ -97,7 +111,7 @@ fn test_reassignment() {
 
     // x = 10; x = x + 1; → x should have references
     assert!(
-        has_local_ref(&edges, "x"),
+        has_local_variable_ref(&staging, "x"),
         "Expected local reference to reassigned x: {edges:?}"
     );
 }
@@ -114,11 +128,11 @@ fn test_parameter_reference() {
 
     // def param_ref(name, age): result = name; total = age + 1;
     assert!(
-        has_local_ref(&edges, "name"),
+        has_local_variable_ref(&staging, "name"),
         "Expected local reference to parameter name: {edges:?}"
     );
     assert!(
-        has_local_ref(&edges, "age"),
+        has_local_variable_ref(&staging, "age"),
         "Expected local reference to parameter age: {edges:?}"
     );
 }
@@ -135,7 +149,7 @@ fn test_for_loop_variable() {
 
     // for item in items: result = item + 1
     assert!(
-        has_local_ref(&edges, "item"),
+        has_local_variable_ref(&staging, "item"),
         "Expected local reference to for-loop variable item: {edges:?}"
     );
 }
@@ -147,7 +161,7 @@ fn test_multiple_references() {
     let edges = collect_reference_edges(&staging);
 
     // x = 1; y = x + x; z = x + y;
-    let x_count = count_local_refs(&edges, "x");
+    let x_count = count_local_variable_refs(&staging, "x");
     assert!(
         x_count >= 3,
         "Expected at least 3 references to x, got {x_count}: {edges:?}"
@@ -162,7 +176,7 @@ fn test_no_block_scope() {
 
     // if True: inner = 42; return inner → inner accessible outside if block
     assert!(
-        has_local_ref(&edges, "inner"),
+        has_local_variable_ref(&staging, "inner"),
         "Expected local reference to inner (no block scope): {edges:?}"
     );
 }
@@ -179,7 +193,7 @@ fn test_closure_captures_variable() {
 
     // x = 10; f = lambda y: x + y;
     assert!(
-        has_local_ref(&edges, "x"),
+        has_local_variable_ref(&staging, "x"),
         "Expected closure to capture variable x: {edges:?}"
     );
 }
@@ -192,11 +206,11 @@ fn test_destructuring_tuple() {
 
     // a, b = pair
     assert!(
-        has_local_ref(&edges, "a"),
+        has_local_variable_ref(&staging, "a"),
         "Expected local reference to destructured a: {edges:?}"
     );
     assert!(
-        has_local_ref(&edges, "b"),
+        has_local_variable_ref(&staging, "b"),
         "Expected local reference to destructured b: {edges:?}"
     );
 }
@@ -209,7 +223,7 @@ fn test_try_except_binding() {
 
     // except ZeroDivisionError as err: msg = str(err)
     assert!(
-        has_local_ref(&edges, "err"),
+        has_local_variable_ref(&staging, "err"),
         "Expected local reference to except binding err: {edges:?}"
     );
 }
@@ -222,7 +236,7 @@ fn test_nested_function_capture() {
 
     // outer = 10; def inner(): return outer + 1
     assert!(
-        has_local_ref(&edges, "outer"),
+        has_local_variable_ref(&staging, "outer"),
         "Expected local reference to captured variable outer: {edges:?}"
     );
 }
@@ -239,7 +253,7 @@ fn test_no_false_positive_for_attribute_access() {
 
     // obj.get("key") — "get" should NOT be a local variable reference
     assert!(
-        !has_local_ref(&edges, "get"),
+        !has_local_variable_ref(&staging, "get"),
         "Attribute access 'get' should NOT be a local reference: {edges:?}"
     );
 }
@@ -253,15 +267,15 @@ fn test_no_false_positive_for_type_annotations() {
     // def type_names(x: int, y: str) -> bool:
     // "int", "str", "bool" should NOT be local variable references
     assert!(
-        !has_local_ref(&edges, "int"),
+        !has_local_variable_ref(&staging, "int"),
         "Type annotation 'int' should NOT be a local reference: {edges:?}"
     );
     assert!(
-        !has_local_ref(&edges, "str"),
+        !has_local_variable_ref(&staging, "str"),
         "Type annotation 'str' should NOT be a local reference: {edges:?}"
     );
     assert!(
-        !has_local_ref(&edges, "bool"),
+        !has_local_variable_ref(&staging, "bool"),
         "Type annotation 'bool' should NOT be a local reference: {edges:?}"
     );
 }
@@ -278,7 +292,7 @@ fn test_global_no_module_binding_has_no_local_ref() {
     let staging = build_staging_graph(&content, "global_no_binding.py");
     let edges = collect_reference_edges(&staging);
     assert!(
-        !has_local_ref(&edges, "config"),
+        !has_local_variable_ref(&staging, "config"),
         "global-declared config with no module binding must not resolve to a \
          local declaration: {edges:?}"
     );
@@ -290,10 +304,10 @@ fn test_global_with_module_binding_resolves_to_module() {
     // declaration, not the in-function assignment.
     let content = load_fixture("global_with_binding.py");
     let staging = build_staging_graph(&content, "global_with_binding.py");
-    let edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges_with_target_position(&staging);
 
     let module_byte = content.find("config = 0").expect("module decl present");
-    let targets = ref_target_bytes(&edges, "config");
+    let targets = ref_target_bytes(&edges, "config", &content);
     assert!(
         !targets.is_empty(),
         "expected references to config: {edges:?}"
@@ -310,14 +324,14 @@ fn test_nonlocal_resolves_to_enclosing() {
     // never to an inner phantom-local.
     let content = load_fixture("nonlocal_nested.py");
     let staging = build_staging_graph(&content, "nonlocal_nested.py");
-    let edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges_with_target_position(&staging);
 
     let outer_byte = content.find("total = 0").expect("outer decl present");
     let inner_decl = content
         .find("total = total + 1")
         .expect("inner assignment present");
 
-    let targets = ref_target_bytes(&edges, "total");
+    let targets = ref_target_bytes(&edges, "total", &content);
     assert!(
         !targets.is_empty(),
         "expected references to total: {edges:?}"
@@ -338,10 +352,10 @@ fn test_nested_global_does_not_suppress_outer() {
     // local of the same name.
     let content = load_fixture("nested_scope_independence.py");
     let staging = build_staging_graph(&content, "nested_scope_independence.py");
-    let edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges_with_target_position(&staging);
 
     let outer_byte = content.find("value = 1").expect("outer decl present");
-    let targets = ref_target_bytes(&edges, "value");
+    let targets = ref_target_bytes(&edges, "value", &content);
     assert!(
         targets.iter().all(|&b| b == outer_byte),
         "outer's local value must survive inner's global declaration; \
@@ -359,10 +373,10 @@ fn test_module_level_global_is_noop() {
     // stays intact. Regression-only guard (green pre- and post-fix).
     let content = load_fixture("module_global_noop.py");
     let staging = build_staging_graph(&content, "module_global_noop.py");
-    let edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges_with_target_position(&staging);
 
     let module_byte = content.find("x = 5").expect("module decl present");
-    let targets = ref_target_bytes(&edges, "x");
+    let targets = ref_target_bytes(&edges, "x", &content);
     assert!(
         targets.iter().all(|&b| b == module_byte) && !targets.is_empty(),
         "module-level global is a no-op; read_it must resolve x to {module_byte}, got {targets:?}"
@@ -375,11 +389,11 @@ fn test_outer_global_does_not_suppress_inner_local() {
     // inner function's own local of the same name.
     let content = load_fixture("nested_scope_independence_outer.py");
     let staging = build_staging_graph(&content, "nested_scope_independence_outer.py");
-    let edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges_with_target_position(&staging);
 
     let inner_byte = content.find("value = 10").expect("inner decl present");
     let outer_decl_byte = content.find("value = 1").expect("outer decl present");
-    let targets = ref_target_bytes(&edges, "value");
+    let targets = ref_target_bytes(&edges, "value", &content);
 
     // AC5b (no outer -> inner leak): inner's own local value must survive
     // outer's global declaration, so inner's `return value` resolves to
@@ -408,7 +422,7 @@ fn test_with_as_global_has_no_local_ref() {
     let staging = build_staging_graph(&content, "with_as_global.py");
     let edges = collect_reference_edges(&staging);
     assert!(
-        !has_local_ref(&edges, "handle"),
+        !has_local_variable_ref(&staging, "handle"),
         "global-declared with-as target handle must not resolve to a local \
          declaration: {edges:?}"
     );
@@ -422,7 +436,7 @@ fn test_except_as_global_has_no_local_ref() {
     let staging = build_staging_graph(&content, "except_as_global.py");
     let edges = collect_reference_edges(&staging);
     assert!(
-        !has_local_ref(&edges, "err"),
+        !has_local_variable_ref(&staging, "err"),
         "global-declared except-as target err must not resolve to a local \
          declaration: {edges:?}"
     );
@@ -434,7 +448,7 @@ fn test_with_as_nonlocal_resolves_to_enclosing() {
     // resolves to the enclosing function's declaration.
     let content = load_fixture("with_as_nonlocal.py");
     let staging = build_staging_graph(&content, "with_as_nonlocal.py");
-    let edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges_with_target_position(&staging);
 
     let outer_byte = content.find("handle = None").expect("outer decl present");
     // `bind_with_item` records the declaration at the `handle` identifier start,
@@ -445,7 +459,7 @@ fn test_with_as_nonlocal_resolves_to_enclosing() {
         .map(|b| b + "as ".len())
         .expect("inner with-as target present");
 
-    let targets = ref_target_bytes(&edges, "handle");
+    let targets = ref_target_bytes(&edges, "handle", &content);
     assert!(
         !targets.is_empty(),
         "expected references to handle: {edges:?}"
@@ -466,10 +480,10 @@ fn test_except_as_nonlocal_resolves_to_enclosing() {
     // resolves to the enclosing function's declaration.
     let content = load_fixture("except_as_nonlocal.py");
     let staging = build_staging_graph(&content, "except_as_nonlocal.py");
-    let edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges_with_target_position(&staging);
 
     let outer_byte = content.find("err = None").expect("outer decl present");
-    let targets = ref_target_bytes(&edges, "err");
+    let targets = ref_target_bytes(&edges, "err", &content);
     assert!(!targets.is_empty(), "expected references to err: {edges:?}");
     assert!(
         targets.iter().all(|&b| b == outer_byte),
@@ -485,7 +499,7 @@ fn test_walrus_global_has_no_local_ref() {
     let staging = build_staging_graph(&content, "walrus_global.py");
     let edges = collect_reference_edges(&staging);
     assert!(
-        !has_local_ref(&edges, "cached"),
+        !has_local_variable_ref(&staging, "cached"),
         "global-declared walrus target cached must not resolve to a local \
          declaration: {edges:?}"
     );
@@ -498,7 +512,7 @@ fn test_nested_global_read_resolves_to_intermediate_binding() {
     // not the module binding. Pins the documented limitation.
     let content = load_fixture("nested_global_intermediate.py");
     let staging = build_staging_graph(&content, "nested_global_intermediate.py");
-    let edges = collect_reference_edges(&staging);
+    let edges = collect_reference_edges_with_target_position(&staging);
 
     let module_byte = content.find("value = 100").expect("module decl present");
     // `rfind` avoids the prefix collision with `value = 100` on line 1: plain
@@ -507,7 +521,7 @@ fn test_nested_global_read_resolves_to_intermediate_binding() {
     let inter_byte = content
         .rfind("value = 1")
         .expect("intermediate decl present");
-    let targets = ref_target_bytes(&edges, "value");
+    let targets = ref_target_bytes(&edges, "value", &content);
     assert!(
         !targets.is_empty(),
         "expected references to value: {edges:?}"
@@ -536,7 +550,7 @@ fn test_for_target_global_has_no_local_ref() {
     let staging = build_staging_graph(&content, "for_target_global.py");
     let edges = collect_reference_edges(&staging);
     assert!(
-        !has_local_ref(&edges, "item"),
+        !has_local_variable_ref(&staging, "item"),
         "global-declared for-target item must not resolve to a local \
          declaration: {edges:?}"
     );

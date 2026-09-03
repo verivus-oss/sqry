@@ -86,7 +86,7 @@ impl GraphBuilder for CSharpGraphBuilder {
         // Phase 1: Create function/method/class/interface nodes
         for context in ast_graph.contexts() {
             let qualified_name = &context.qualified_name;
-            let span = Span::from_bytes(context.span.0, context.span.1);
+            let span = context.decl_span;
 
             let node_id = match context.kind {
                 ContextKind::Function { is_async } => {
@@ -296,7 +296,11 @@ enum ContextKind {
 #[derive(Debug, Clone)]
 struct CallContext {
     qualified_name: String,
-    span: (usize, usize),
+    /// Real line/column span of the declaration. Kept separately because the
+    /// byte tuple above cannot be turned into one without the file content,
+    /// and feeding those offsets to `Span::from_bytes` is what made every C#
+    /// declaration report line 1.
+    decl_span: Span,
     kind: ContextKind,
     class_name: Option<String>,
     /// Return type of the method/function (e.g., `Task<User>`, `void`)
@@ -402,7 +406,7 @@ fn walk_ast(node: Node, context: &mut WalkContext<'_>) -> Result<(), String> {
             let _context_idx = context.contexts.len();
             context.contexts.push(CallContext {
                 qualified_name: qualified_class.clone(),
-                span: (node.start_byte(), node.end_byte()),
+                decl_span: Span::from_node(&node),
                 kind: ContextKind::Class,
                 class_name: Some(qualified_class),
                 return_type: None,
@@ -441,7 +445,7 @@ fn walk_ast(node: Node, context: &mut WalkContext<'_>) -> Result<(), String> {
             let _context_idx = context.contexts.len();
             context.contexts.push(CallContext {
                 qualified_name: qualified_interface.clone(),
-                span: (node.start_byte(), node.end_byte()),
+                decl_span: Span::from_node(&node),
                 kind: ContextKind::Interface,
                 class_name: Some(qualified_interface),
                 return_type: None,
@@ -503,7 +507,7 @@ fn walk_ast(node: Node, context: &mut WalkContext<'_>) -> Result<(), String> {
             let context_idx = context.contexts.len();
             context.contexts.push(CallContext {
                 qualified_name: qualified_func.clone(),
-                span: (node.start_byte(), node.end_byte()),
+                decl_span: Span::from_node(&node),
                 kind,
                 class_name,
                 return_type,

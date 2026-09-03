@@ -7,6 +7,7 @@
 //! - Table write operations (INSERT, UPDATE, DELETE, CREATE/DROP/ALTER TABLE)
 
 use sqry_core::graph::unified::build::shape::{CfBucket, ShapeMapping};
+use sqry_core::graph::unified::node::NodeKind;
 use sqry_core::graph::unified::storage::shape::SignatureShape;
 use sqry_core::graph::{
     GraphBuilder, GraphBuilderError, GraphResult, Language, Span,
@@ -143,8 +144,9 @@ impl GraphBuilder for SqlGraphBuilder {
             // Find enclosing callable (procedure/function/trigger)
             if let Some(caller) = find_enclosing_callable(&callables, call.span_bytes) {
                 // Create callee function node and add call edge
+                // Call-site extent, not a declaration of the callee (issue #748).
                 let callee_id =
-                    helper.add_function(&call.callee_name, Some(call.span), false, false);
+                    helper.add_call_site_node(&call.callee_name, call.span, NodeKind::Function);
                 helper.add_call_edge_full_with_span(
                     caller.node_id,
                     callee_id,
@@ -625,7 +627,8 @@ fn extract_trigger_execute_function_calls(
                 c.start_byte <= node.start_byte() && node.end_byte() <= c.end_byte
             }) {
                 // Create callee function node (or reuse existing) and add call edge
-                let callee_id = helper.add_function(&func, Some(span), false, false);
+                // EXECUTE FUNCTION extent, not a declaration (issue #748).
+                let callee_id = helper.add_call_site_node(&func, span, NodeKind::Function);
                 helper.add_call_edge_full_with_span(
                     trigger_callable.node_id,
                     callee_id,
