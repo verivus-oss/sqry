@@ -431,7 +431,6 @@ impl ShardedCache {
         &self,
         shard_idx: usize,
         query_key: QueryKey,
-        key: &Q::Key,
         value: Q::Value,
         file_deps: SmallVec<[FileDep; 8]>,
         edge_revision: Option<u64>,
@@ -450,8 +449,10 @@ impl ShardedCache {
             return Ok(());
         }
 
-        // Serialise key and value.
-        let raw_key = postcard::to_allocvec(key)?;
+        // The key is already encoded: `QueryKey::new::<Q>` produced these exact
+        // bytes and retains them for byte-exact equality, so re-serialising
+        // `key` here would duplicate that work and allocate a second copy.
+        let raw_key_bytes: Arc<[u8]> = Arc::clone(query_key.raw_key());
         let raw_value = postcard::to_allocvec(&value)?;
 
         // Enforce the per-entry size cap on the value bytes.
@@ -468,7 +469,6 @@ impl ShardedCache {
             return Ok(());
         }
 
-        let raw_key_bytes: Arc<[u8]> = Arc::from(raw_key.into_boxed_slice());
         let raw_result_bytes: Arc<[u8]> = Arc::from(raw_value.into_boxed_slice());
 
         let result = CachedResult::new_persistent(
@@ -544,18 +544,8 @@ impl ShardedCache {
         // so that a later typed `QueryDb::get::<Q>(&key)` probes the same
         // shard this cold-load insert is writing to. Both paths route by
         // `u64::from(Q::QUERY_TYPE_ID) & (shard_count - 1)`.
-        use std::hash::{Hash, Hasher};
         let shard_idx =
             crate::query::QueryRegistry::shard_for_query_type_id(query_type_id, self.shards.len());
-
-        // Key hash MUST also match warm-path `QueryKey::new::<Q>(&key)` so
-        // that `get::<Q>` finds the rehydrated entry on the FIRST call. Warm
-        // path hashes `postcard::to_allocvec(&key)`; cold-load hashes
-        // `raw_key_bytes`, which IS that same postcard encoding (set by
-        // `insert_query`).
-        let mut hasher = std::hash::DefaultHasher::new();
-        raw_key_bytes.hash(&mut hasher);
-        let hash = hasher.finish();
 
         let file_deps: SmallVec<[crate::dependency::FileDep; 8]> =
             deps.file_deps.iter().copied().collect();
@@ -567,7 +557,7 @@ impl ShardedCache {
             file_deps,
             edge_revision: deps.edge_revision,
             metadata_revision: deps.metadata_revision,
-            raw_key_bytes,
+            raw_key_bytes: Arc::clone(&raw_key_bytes),
             raw_result_bytes,
             query_type_id,
             persistent: true,
@@ -591,7 +581,12 @@ impl ShardedCache {
         // `postcard::from_bytes::<Q::Value>` and replaces the placeholder
         // in-place with the properly typed value. That promotion path is
         // implemented in the `get::<Q>` body.
-        let shard_key = QueryKey::from_raw(u64::from(query_type_id), hash);
+        //
+        // `from_key_bytes` derives the hash from `raw_key_bytes` — the same
+        // postcard encoding `insert_query` wrote — and retains the bytes, so
+        // the rehydrated key is byte-equal to the warm-path key and not
+        // merely hash-equal to it.
+        let shard_key = QueryKey::from_key_bytes(u64::from(query_type_id), raw_key_bytes);
 
         let mut shard = self.shards[shard_idx].write();
         shard.insert(shard_key, result);
@@ -633,9 +628,20 @@ impl ShardedCache {
     }
 }
 
-// SAFETY: All mutation is behind `parking_lot::RwLock`.
-unsafe impl Send for ShardedCache {}
-unsafe impl Sync for ShardedCache {}
+// `ShardedCache` is `Send + Sync` by auto-derive: every field bottoms out in
+// `Send + Sync` components (`QueryKey` is two `u64`s; `CachedResult` holds a
+// `Box<dyn Any + Send + Sync>` plus `Copy`/`Arc` fields), and
+// `Vec<RwLock<HashMap<..>>>` over such contents inherits both.
+//
+// This assertion is deliberately NOT an `unsafe impl`. Hand-writing the impls
+// would silence the compiler's auto-trait check, so a later `!Send`/`!Sync`
+// field — or a relaxed bound on `CachedResult::value` — would compile clean and
+// be unsound under the concurrent access the daemon performs. Asserting the
+// property instead keeps the check on: if it is ever lost, this fails to build.
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ShardedCache>();
+};
 
 #[cfg(test)]
 mod tests {
@@ -850,7 +856,6 @@ mod tests {
             .insert_query::<PersistentTestQuery>(
                 shard_idx,
                 query_key.clone(),
-                &key,
                 value.clone(),
                 SmallVec::new(),
                 None,
@@ -895,7 +900,6 @@ mod tests {
             .insert_query::<PersistentTestQuery>(
                 shard_idx,
                 query_key.clone(),
-                &key,
                 value,
                 SmallVec::new(),
                 None,
@@ -940,7 +944,6 @@ mod tests {
             .insert_query::<NonPersistentTestQuery>(
                 shard_idx,
                 query_key.clone(),
-                &key,
                 value.clone(),
                 SmallVec::new(),
                 None,
@@ -1004,7 +1007,6 @@ mod tests {
             .insert_query::<PersistentTestQuery>(
                 shard_idx,
                 query_key,
-                &key,
                 value,
                 file_deps,
                 Some(42),
@@ -1044,7 +1046,6 @@ mod tests {
             .insert_query::<PersistentTestQuery>(
                 si1,
                 qk1,
-                &k1,
                 vec![1u8],
                 SmallVec::new(),
                 None,
@@ -1060,7 +1061,6 @@ mod tests {
             .insert_query::<PersistentTestQuery>(
                 si1,
                 qk2,
-                &k2,
                 vec![2u8],
                 SmallVec::new(),
                 None,
@@ -1083,7 +1083,6 @@ mod tests {
             .insert_query::<NonPersistentTestQuery>(
                 nsi,
                 nqk,
-                &nk,
                 "skip".to_owned(),
                 SmallVec::new(),
                 None,
@@ -1100,5 +1099,83 @@ mod tests {
     #[test]
     fn empty_snapshot_compiles() {
         let _ = empty_snapshot();
+    }
+
+    // ---------------------------------------------------------------------------
+    // Key-collision safety
+    //
+    // `QueryKey`'s `key_hash` is a 64-bit digest and cannot be injective. The
+    // cache is type-erased, so two colliding keys of the same query type hold
+    // the same `Q::Value` and a hash-only comparison would downcast cleanly and
+    // return the wrong input's result with nothing reporting an anomaly. These
+    // tests pin the byte-exact comparison that prevents that.
+    // ---------------------------------------------------------------------------
+
+    /// Two keys forced to share `(type_hash, key_hash)` but differing in their
+    /// encoded bytes must not be equal, so the second lookup misses instead of
+    /// returning the first key's cached value.
+    #[test]
+    fn forced_hash_collision_does_not_return_the_other_keys_value() {
+        let cache = ShardedCache::new(4);
+
+        let a = QueryKey::from_raw_with_bytes(0xF100, 0x0BAD_C0DE, Arc::from(&b"key-a"[..]));
+        let b = QueryKey::from_raw_with_bytes(0xF100, 0x0BAD_C0DE, Arc::from(&b"key-b"[..]));
+
+        // Both keys hash to the same bucket by construction (identical
+        // `type_hash` and `key_hash` are all `Hash` reads), so the `HashMap`
+        // probe reaches `PartialEq`. Equality is what must separate them.
+        assert_ne!(a, b, "same hash, different encoded key: must not be equal");
+
+        cache.insert(
+            0,
+            a.clone(),
+            CachedResult::new(vec![1u8, 2, 3], SmallVec::new(), None, None),
+        );
+
+        let hit = cache.get_if_valid::<Vec<u8>>(0, &a, |_| true);
+        assert_eq!(
+            hit,
+            Some(vec![1u8, 2, 3]),
+            "the key that was inserted must still hit"
+        );
+
+        let collided = cache.get_if_valid::<Vec<u8>>(0, &b, |_| true);
+        assert_eq!(
+            collided, None,
+            "a colliding key must miss, not return the other key's value"
+        );
+    }
+
+    /// The cold-load constructor must land byte-equal to the warm-path key, not
+    /// merely hash-equal — this is what makes the first typed `get` after
+    /// `load_derived` a hit rather than a recompute.
+    #[test]
+    fn cold_load_key_is_byte_equal_to_warm_path_key() {
+        let key = PersistentTestKey(7);
+        let warm = QueryKey::new::<PersistentTestQuery>(&key);
+
+        let encoded: Arc<[u8]> = Arc::from(postcard::to_allocvec(&key).unwrap().into_boxed_slice());
+        let cold = QueryKey::from_key_bytes(u64::from(PersistentTestQuery::QUERY_TYPE_ID), encoded);
+
+        assert_eq!(
+            warm, cold,
+            "cold-load key must be byte-equal to the warm-path key"
+        );
+        assert_eq!(
+            warm.raw_key(),
+            cold.raw_key(),
+            "both paths must retain the same postcard encoding"
+        );
+    }
+
+    /// Distinct inputs to the same query stay distinct end to end.
+    #[test]
+    fn distinct_keys_of_one_query_type_do_not_alias() {
+        let k1 = QueryKey::new::<PersistentTestQuery>(&PersistentTestKey(1));
+        let k2 = QueryKey::new::<PersistentTestQuery>(&PersistentTestKey(2));
+        assert_ne!(k1, k2);
+
+        let same = QueryKey::new::<PersistentTestQuery>(&PersistentTestKey(1));
+        assert_eq!(k1, same, "equal inputs must produce equal keys");
     }
 }

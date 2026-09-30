@@ -112,7 +112,7 @@ pub struct RubyShapeMapping {
 
 impl RubyShapeMapping {
     fn build() -> Self {
-        let lang: tree_sitter::Language = tree_sitter_ruby::LANGUAGE.into();
+        let lang: tree_sitter::Language = tree_sitter_ruby_sqry::language();
         let count = lang.node_kind_count();
         let mut cf_by_kind_id = vec![None; count];
         for (id, slot) in cf_by_kind_id.iter_mut().enumerate() {
@@ -3058,7 +3058,7 @@ mod field_emission_tests {
     fn parse(source: &str) -> tree_sitter::Tree {
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_ruby::LANGUAGE.into())
+            .set_language(&tree_sitter_ruby_sqry::language())
             .expect("load Ruby grammar");
         parser.parse(source, None).expect("parse Ruby source")
     }
@@ -3423,7 +3423,7 @@ mod shape_tests {
     fn parse(src: &str) -> Tree {
         let mut parser = Parser::new();
         parser
-            .set_language(&tree_sitter_ruby::LANGUAGE.into())
+            .set_language(&tree_sitter_ruby_sqry::language())
             .expect("load ruby grammar");
         parser.parse(src, None).expect("parse ruby")
     }
@@ -3460,7 +3460,7 @@ mod shape_tests {
         assert_eq!(cf_bucket_for_ruby_kind("not_a_real_kind"), None);
 
         // The resolved kind-id table must have at least one populated bucket.
-        let lang: tree_sitter::Language = tree_sitter_ruby::LANGUAGE.into();
+        let lang: tree_sitter::Language = tree_sitter_ruby_sqry::language();
         let if_id = (0..lang.node_kind_count())
             .map(|i| i as u16)
             .find(|&i| lang.node_kind_is_named(i) && lang.node_kind_for_id(i) == Some("if"))

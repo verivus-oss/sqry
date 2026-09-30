@@ -14,12 +14,55 @@ param(
 $ErrorActionPreference = "Stop"
 
 function Get-LatestReleaseTag {
+    # api.github.com allows 60 unauthenticated requests per hour, counted per
+    # source IP. Anyone installing from CI, a NAT'd office, or a machine that
+    # also runs CI shares that budget with everything else on the address, and
+    # when it is spent the API returns 403. Resolving only through the API means
+    # the installer fails for reasons unrelated to this project.
+    #
+    # The releases/latest redirect is a plain HTTPS request to github.com rather
+    # than the API, so it carries no rate limit and needs no credentials. It is
+    # tried first when the caller has no token. The API is used when a token is
+    # supplied, and again as a last resort.
     param([string]$Repository)
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest"
-    if (-not $release.tag_name) {
-        throw "Failed to resolve latest release tag from GitHub API."
+
+    $token = if ($env:GH_TOKEN) { $env:GH_TOKEN } elseif ($env:GITHUB_TOKEN) { $env:GITHUB_TOKEN } else { $null }
+
+    if ($token) {
+        try {
+            $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest" `
+                -Headers @{ Authorization = "Bearer $token" }
+            if ($release.tag_name) { return $release.tag_name }
+        } catch { }
     }
-    return $release.tag_name
+
+    # HEAD the redirect and read Location. [System.Net.WebRequest] is used rather
+    # than Invoke-WebRequest because the way Invoke-WebRequest surfaces a
+    # suppressed redirect differs between Windows PowerShell 5.1 and PowerShell 7.
+    try {
+        $req = [System.Net.WebRequest]::Create("https://github.com/$Repository/releases/latest")
+        $req.Method = "HEAD"
+        $req.AllowAutoRedirect = $false
+        $resp = $req.GetResponse()
+        try {
+            $location = $resp.Headers["Location"]
+        } finally {
+            $resp.Close()
+        }
+        if ($location -match '/tag/(?<tag>v\d+\.\d+\.\d+)$') {
+            return $Matches['tag']
+        }
+    } catch { }
+
+    try {
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$Repository/releases/latest"
+        if ($release.tag_name) { return $release.tag_name }
+    } catch { }
+
+    throw ("Failed to resolve the latest release tag for $Repository. " +
+           "Tried the releases/latest redirect and the GitHub API. " +
+           "If you are behind a proxy, or the unauthenticated API budget for your " +
+           "address is spent, pass an explicit tag instead: -Version v1.2.3")
 }
 
 function Get-ExpectedChecksum {

@@ -51,6 +51,7 @@ members = [
     "crates/tree-sitter-kotlin-sqry",
     "crates/tree-sitter-elixir-sqry",
     "crates/tree-sitter-perl-sqry",
+    "crates/tree-sitter-ruby-sqry",
     "sqry-lang-oracle-plsql",
     "sqry-mcp-redaction",
     "sqry-plugin-registry",
@@ -110,6 +111,7 @@ default-members = [
     "crates/tree-sitter-kotlin-sqry",
     "crates/tree-sitter-elixir-sqry",
     "crates/tree-sitter-perl-sqry",
+    "crates/tree-sitter-ruby-sqry",
     "sqry-lang-oracle-plsql",
     "sqry-mcp-redaction",
     "sqry-plugin-registry",
@@ -129,7 +131,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "31.0.0"
+version = "32.0.1"
 edition = "2024"
 authors = ["Verivus Pty Ltd"]
 license = "MIT"
@@ -234,7 +236,7 @@ tree-sitter-php = "0.24.2"        # PHP language support (Phase 2 priority)
 tree-sitter-sequel = "0.3.11"     # SQL language support (PL/pgSQL)
 # tree-sitter-kotlin: vendored as crates/tree-sitter-kotlin-sqry
 tree-sitter-lua = "0.2.0"                # Lua language support (Phase 1 Tier 2)
-tree-sitter-ruby = "0.23.1"       # Ruby language support (Phase 1 Tier 2)
+# tree-sitter-ruby: vendored as crates/tree-sitter-ruby-sqry
 tree-sitter-swift = "0.7.2"       # Swift language support (Phase 1 Tier 2)
 tree-sitter-scala = "0.25.1"      # Scala language support (Phase 1 Tier 2)
 tree-sitter-r = "1.2.0"           # R language support (Phase 1 Tier 2)

@@ -190,24 +190,48 @@ fn handle_run_error(err: &anyhow::Error, json_output: bool) -> i32 {
         .chain()
         .find_map(|cause| cause.downcast_ref::<RichQueryError>())
     {
-        return handle_rich_query_error(rich_error, json_output);
+        let code = handle_rich_query_error(rich_error, json_output);
+        emit_error_context_note(err, &rich_error.to_string(), json_output);
+        return code;
     }
 
     if let Some(query_error) = err
         .chain()
         .find_map(|cause| cause.downcast_ref::<QueryError>())
     {
-        return handle_query_error(query_error, json_output);
+        let code = handle_query_error(query_error, json_output);
+        emit_error_context_note(err, &query_error.to_string(), json_output);
+        return code;
     }
 
     if let Some(validation_error) = err
         .chain()
         .find_map(|cause| cause.downcast_ref::<ValidationError>())
     {
-        return handle_validation_error(validation_error, json_output);
+        let code = handle_validation_error(validation_error, json_output);
+        emit_error_context_note(err, &validation_error.to_string(), json_output);
+        return code;
     }
 
     handle_other_error(err, json_output)
+}
+
+/// Print any context a command attached to a typed query error.
+///
+/// The typed handlers format the error themselves and never saw the enclosing
+/// `anyhow` context, so guidance attached at the call site was silently
+/// dropped. Printed after the diagnostic so the problem is read before the
+/// suggested next step. JSON output stays a single machine-readable object.
+fn emit_error_context_note(err: &anyhow::Error, typed_message: &str, json_output: bool) {
+    if json_output {
+        return;
+    }
+    let outer = err.to_string();
+    if outer == typed_message {
+        return;
+    }
+    let mut streams = OutputStreams::new();
+    let _ = streams.write_diagnostic(&format!("\n{outer}"));
 }
 
 fn handle_cli_error(cli_error: &error::CliError, json_output: bool) -> i32 {

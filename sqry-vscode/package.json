@@ -1,9 +1,9 @@
 {
   "name": "sqry-vscode",
   "displayName": "sqry Semantic Search",
-  "description": "Semantic code search for 35 languages. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports - powered by unified graph architecture.",
-  "version": "31.0.0",
-  "binaryVersion": "31.0.0",
+  "description": "Semantic code search across 37 language plugins. Navigate call graphs, inheritance hierarchies, FFI boundaries, imports/exports - powered by unified graph architecture.",
+  "version": "32.0.1",
+  "binaryVersion": "32.0.1",
   "publisher": "verivus",
   "license": "MIT",
   "icon": "media/sqry-icon-512.png",

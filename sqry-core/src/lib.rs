@@ -5,28 +5,30 @@
 //!
 //! # Architecture
 //!
-//! The library is organized into several key modules:
+//! The unified code graph is the centre of the crate. Language plugins parse into it,
+//! queries are planned and evaluated against it, and it is what gets persisted.
 //!
-//! - **search**: Core search engine and pattern matching
-//! - **ast**: AST parsing and querying
-//! - **indexing**: Incremental hashing and index compression utilities
-//! - **cache**: Caching layer for performance
-//! - **session**: Session-level caching for warm multi-query execution
+//! - **graph**: The unified arena + CSR code graph, its builders and persistence
+//! - **query**: Query parsing, planning, and evaluation over the graph
+//! - **relations**: Cross-file and cross-language edge derivation
 //! - **plugin**: Plugin system for language extensibility
+//! - **ast**: Tree-sitter parsing and AST querying
+//! - **search**: Text and hybrid search, used when a query is not structural
+//! - **indexing**: Incremental hashing and index compression utilities
+//! - **persistence**: Snapshot read and write, including format upconversion
+//! - **workspace**: Workspace root discovery and multi-root resolution
+//! - **cache** and **session**: Caching for warm multi-query execution
+//! - **schema**: On-disk types whose discriminants are pinned across versions
 //! - **output**: Output formatters (text, JSON)
 //!
 //! # Example
 //!
-//! ```rust,ignore
-//! use sqry_core::search::SearchEngine;
-//!
-//! let engine = SearchEngine::new();
-//! let results = engine.search("pattern", "path/to/code")?;
 //! ```
+//! use sqry_core::search::fallback::FallbackSearchEngine;
 //!
-//! # Status
-//!
-//! This library is under active development (Phase 0). APIs are subject to change.
+//! let engine = FallbackSearchEngine::new().expect("default text searcher");
+//! # let _ = engine;
+//! ```
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -124,11 +126,6 @@ pub mod confidence;
 /// Users can disable via config, environment, or by building without the feature.
 #[cfg(feature = "uses")]
 pub mod uses;
-
-// NOTE: The original hybrid embeddings path (embeddings/vector/security
-// modules and related features) has been removed from the codebase. Natural language
-// support is provided exclusively via the NL→SQRY translation interface described in
-// docs/development/-nl-translation/01_SPEC.md.
 
 /// Common types and utilities
 pub mod common {

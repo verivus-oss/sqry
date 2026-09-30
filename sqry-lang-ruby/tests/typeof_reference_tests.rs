@@ -13,7 +13,7 @@ use tree_sitter::Parser;
 fn parse_ruby(source: &str) -> tree_sitter::Tree {
     let mut parser = Parser::new();
     parser
-        .set_language(&tree_sitter_ruby::LANGUAGE.into())
+        .set_language(&tree_sitter_ruby_sqry::language())
         .expect("error loading Ruby grammar");
     parser.parse(source, None).expect("ruby parse failed")
 }

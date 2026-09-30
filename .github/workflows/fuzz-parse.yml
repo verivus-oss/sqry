@@ -118,13 +118,58 @@ jobs:
           RUN_ID: ${{ github.run_id }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          gh issue create \
-            --title "fuzz-parse crash detected (run ${RUN_ID})" \
-            --body "The nightly \`fuzz-parse\` workflow detected a crash in \`sqry_db::planner::parse::parse_query\`.
+          set -euo pipefail
 
-          **Run**: ${RUN_URL}
+          # These temporary files are never read after the filer returns, and a
+          # self-hosted fuzz runner is long lived, so they accumulate. Round 2 of
+          # review measured 24 left behind per harness run (codex).
+          fuzz_issue_scratch=()
+          cleanup_scratch() {
+            if ((${#fuzz_issue_scratch[@]} > 0)); then
+              rm -f "${fuzz_issue_scratch[@]}"
+            fi
+          }
+          trap cleanup_scratch EXIT
 
-          Crash artifacts are attached to the workflow run as \`fuzz-parse-crashes-${RUN_ID}\` (retained 90 days).
+          # The title is the deduplication key, so the run id stays out of it
+          # and lives in the body and the per-run comment instead.
+          title="fuzz-parse crash detected"
 
-          Triage: download the artifact, reproduce locally with \`cargo +nightly fuzz run parse <crash-input>\` from \`sqry-db/fuzz/\`." \
+          run_detail_file="$(mktemp)"
+          fuzz_issue_scratch+=("$run_detail_file")
+          cat >"$run_detail_file" <<EOF
+          Run: ${RUN_URL}
+
+          Crash artifacts are attached to the workflow run as \`fuzz-parse-crashes-${RUN_ID}\` and retained for 90 days.
+
+          Triage: download the artifact, then from \`sqry-db/fuzz/\` run
+          \`cargo +nightly fuzz run parse <crash-input>\`.
+          EOF
+
+          body_file="$(mktemp)"
+          fuzz_issue_scratch+=("$body_file")
+          {
+            cat <<'EOF'
+          The nightly `fuzz-parse` workflow detected a crash in
+          `sqry_db::planner::parse::parse_query`.
+
+          EOF
+            cat "$run_detail_file"
+            echo
+            echo "Later runs that reproduce this finding are added as comments"
+            echo "rather than as new issues."
+          } >"$body_file"
+
+          comment_file="$(mktemp)"
+          fuzz_issue_scratch+=("$comment_file")
+          {
+            echo "Reproduced by a later run of fuzz-parse (run \`${RUN_ID}\`)."
+            echo
+            cat "$run_detail_file"
+          } >"$comment_file"
+
+          scripts/ci/file-fuzz-issue.sh \
+            --title "$title" \
+            --body-file "$body_file" \
+            --comment-file "$comment_file" \
             --label "bug,fuzz"

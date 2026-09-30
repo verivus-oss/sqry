@@ -442,13 +442,9 @@ pub struct Cli {
     #[arg(long, short = 't', conflicts_with = "semantic", help_heading = headings::SEARCH_MODES, display_order = 10)]
     pub text: bool,
 
-    /// Force semantic search mode (skip text fallback)
+    /// Structural search over the graph (the default; opposite of --text)
     #[arg(long, short = 's', conflicts_with = "text", help_heading = headings::SEARCH_MODES, display_order = 11)]
     pub semantic: bool,
-
-    /// Disable automatic fallback to text search
-    #[arg(long, conflicts_with_all = ["text", "semantic"], help_heading = headings::SEARCH_MODES, display_order = 20)]
-    pub no_fallback: bool,
 
     /// Number of context lines for text search results
     #[arg(long, default_value = "2", help_heading = headings::SEARCH_MODES, display_order = 30)]

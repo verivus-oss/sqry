@@ -66,6 +66,7 @@ public = [
     "crates/tree-sitter-kotlin-sqry/",
     "crates/tree-sitter-perl-sqry/",
     "crates/tree-sitter-plsql-sqry/",
+    "crates/tree-sitter-ruby-sqry/",
     "crates/tree-sitter-svelte-sqry/",
     "crates/tree-sitter-vue-sqry/",
 ]
@@ -118,8 +119,12 @@ public = [".cargo/config.toml", ".cargo/audit.toml", ".cargo/mutants.toml"]
 # Workflows in `public` ship to the OSS mirror; release/distribution
 # workflows are managed separately via scripts/release/managed-paths/.
 public = [
-    # STEP_11 (workspace-aware-cross-repo) — six-gate CI workflow.
-    # Referenced by branch-protection on master.
+    # STEP_11 (workspace-aware-cross-repo) CI workflow.
+    # NOT referenced by branch-protection: master requires only
+    # "cargo-vet (supply-chain gate)" and
+    # "release-control-gate (sanitization contract, pre-merge)". The older
+    # claim here was false, measured against the live protection settings on
+    # 2026-09-04 (grok).
     ".github/workflows/ci.yml",
     # Homebrew formula publisher. Runs in verivus-oss/sqry and pushes the
     # rendered formula to verivus-oss/homebrew-sqry on every release.
@@ -146,11 +151,23 @@ dirs_public = ["docs/user-guide/"]
 
 [selection.scripts]
 # Private release-control validators are intentionally absent from this public
-# allowlist under the manifest's default-deny model:
-# - scripts/release/check-sanitization-review-contract.sh
-# - scripts/release/test-sanitization-review-contract-modes.sh
-# - scripts/release/check-workflow-run-interpolation.sh
-# - scripts/release/test-check-workflow-run-interpolation.sh
+# allowlist under the manifest's default-deny model. For tracked shell and
+# Python release scripts, the private set is DERIVED: scripts/release/*.sh
+# and scripts/release/*.py paths absent from the `public` array below. It is
+# enumerated by
+#
+#   comm -23 <(git ls-files 'scripts/release/*.sh' 'scripts/release/*.py' | sort) \
+#            <(python3 -c 'import tomllib; print("\n".join(tomllib.load(
+#              open("release-manifest.toml","rb"))["selection"]["scripts"]["public"]))' | sort)
+#
+# At abe638e1c5786d7714d7837bebedeef3506b9440, this comment named seven of
+# the 47 private shell/Python release scripts, leaving 40 undocumented. The
+# population was measured from that commit's tracked paths and public array.
+# The rule and its derivation replace that incomplete member list. Adding a
+# private release script needs no edit to this comment; adding a PUBLIC one
+# needs an entry below, which is the decision this table exists to record.
+# The native-CI oracle also enforces this specific private policy declaration
+# and checks that its path remains absent from the public array:
 # - scripts/release/test-daemon-env-native-ci.sh
 public = [
     "scripts/install.sh",
@@ -161,7 +178,8 @@ public = [
     # on release: published) to register io.github.verivus-oss/sqry via OIDC.
     "scripts/release/register-mcp-registry.sh",
     # STEP_11 (workspace-aware-cross-repo) CI gate scripts. These run in
-    # .github/workflows/ci.yml and are referenced by branch-protection.
+    # .github/workflows/ci.yml. They are NOT branch-protection required
+    # checks; see the note on ci.yml in [selection.workflows].
     "scripts/ci/check_claim_traceability.sh",
     "scripts/ci/check_routing_gates.sh",
     "scripts/ci/check_vscode_settings_parity.sh",
@@ -171,6 +189,14 @@ public = [
     # mutation-gate.yml summary renderer. Reads cargo-mutants outcomes.json
     # and emits Markdown into GITHUB_STEP_SUMMARY.
     "scripts/ci/mutants_summary.py",
+    # Fuzz issue filer and its behavioural test. fuzz-parse.yml files issues
+    # through the filer and ci.yml runs the test, and both of those workflows
+    # are in [selection.workflows].public, so both scripts must exist in the
+    # target tree. The filer keeps one open issue per finding and comments
+    # recurrences onto it; before it, the run id sat in the issue title and
+    # every failing run minted a new issue.
+    "scripts/ci/file-fuzz-issue.sh",
+    "scripts/ci/test-file-fuzz-issue.sh",
     # Phase A C indirect-call precision: build-time perf gate enforcing
     # SPEC §5.2's +15% SAME-COMMIT MARGINAL budget on the linux-driver-subset
     # fixture (2026-07-06 remethodology, verivus-oss/sqry#280; drives the
@@ -374,6 +400,7 @@ publish_order = [
     "tree-sitter-kotlin-sqry",
     "tree-sitter-elixir-sqry",
     "tree-sitter-perl-sqry",
+    "tree-sitter-ruby-sqry",
     # Phase 4: Language plugins
     "sqry-lang-c",
     "sqry-lang-cpp",

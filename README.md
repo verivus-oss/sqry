@@ -118,6 +118,44 @@ Requirements:
 - The repository pins toolchain `1.94.1` in `rust-toolchain.toml`.
 - A full workspace build compiles the bundled tree-sitter grammars and language plugins and can require substantial disk space.
 
+## Agent Setup
+
+Two steps connect the installed binaries to a coding agent. Run them in this order: MCP gives the agent the tools, the skills tell it when to reach for them.
+
+### 1. Wire The MCP Server
+
+```bash
+sqry mcp setup --tool claude --scope global
+sqry mcp setup --tool codex --scope global
+sqry mcp setup --tool gemini --scope global
+sqry mcp status
+```
+
+Pass `--scope global` unless you specifically want a per-project entry. See [MCP And Editors](#mcp-and-editors) for what the scopes do and how to preview a change before it is written.
+
+Once an agent is connected, `sqry-mcp` serves its own reference material as MCP resources (`sqry://docs/tool-guide`, `sqry://docs/query-syntax`, `sqry://docs/patterns`, `sqry://docs/architecture`, `sqry://docs/capability-map`, `sqry://meta/manifest`). Those ship inside the binary and version with it, so the tool reference an agent reads cannot drift from the tools it can actually call.
+
+### 2. Add The Agent Skills
+
+The skills are what teach an agent to reach for sqry mid-task instead of falling back to text search. That routing judgement is the part no amount of tool documentation supplies, which is why it is a separate artifact from the MCP resources above.
+
+They live in [verivus-oss/sqry-skills](https://github.com/verivus-oss/sqry-skills), which publishes eight: `sqry-semantic-search`, the core routing skill, plus one each for Claude Code, Codex, Gemini CLI, Grok, OpenCode, Antigravity, and Mistral Vibe.
+
+That repository root is also a Claude-compatible plugin, registering the skills, `sqry-mcp`, and `sqry-lsp` together. Clone it into the plugin directory your agent reads, or point the agent at a checkout:
+
+```bash
+git clone --depth 1 https://github.com/verivus-oss/sqry-skills ~/.grok/plugins/sqry
+# or, without installing:  claude --plugin-dir /path/to/sqry-skills
+```
+
+For the skills on their own, without the plugin wiring:
+
+```bash
+npx skills add https://github.com/verivus-oss/sqry-skills
+```
+
+Per-agent paths and a `doctor.sh` health check are documented in that repository's README. Neither the shell installer nor the Homebrew formula stages the skills today, so this step is manual.
+
 ## First Index
 
 ```bash
@@ -243,10 +281,12 @@ See [Daemon Mode](docs/user-guide/daemon.md).
 Configure MCP clients with:
 
 ```bash
-sqry mcp setup --tool claude
-sqry mcp setup --tool codex
-sqry mcp setup --tool gemini
+sqry mcp setup --tool claude --scope global
+sqry mcp setup --tool codex --scope global
+sqry mcp setup --tool gemini --scope global
 ```
+
+`--scope` defaults to `auto`, which resolves to a per-project Claude Code entry when the working directory sits inside a repository, and errors when it does not. Pass `--scope global` for a machine-wide entry, or `--scope project` from inside the repository you want pinned. Codex and Gemini CLI only support global configuration, so the two scopes behave identically for them and workspace resolution follows the directory the tool is started from. `sqry mcp setup --dry-run` prints the changes without writing them, and `sqry mcp status` reports what is currently configured.
 
 Standalone `sqry-mcp` is the full local tool surface. `sqry-mcp --daemon` attaches to `sqryd` and exposes the daemon-hosted subset. `workspace_status.source_root_id` is an opaque display/correlation token, not a path. See [MCP Guide](docs/user-guide/mcp.md) and the component docs in [sqry-mcp/README.md](sqry-mcp/README.md).
 

@@ -1972,8 +1972,12 @@ fn test_hybrid_text_search_mode() {
 
     log::debug!("Created test project with TODO comment");
 
-    // Query with TODO pattern (should trigger text search)
+    // `TODO` used to trigger text mode because the classifier matched the
+    // literal "TODO" in the query string. Text search is requested now, not
+    // inferred: `TODO` is a comment, not a symbol, so `sqry query TODO` is a
+    // name search that honestly matches nothing.
     let output = sqry_cmd()
+        .arg("--text")
         .arg("query")
         .arg("TODO")
         .arg("--limit")
@@ -1986,11 +1990,7 @@ fn test_hybrid_text_search_mode() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    // Should use text search mode
-    assert!(
-        stderr.contains("[Text search mode]"),
-        "Expected text search mode, got stderr: {stderr}"
-    );
+    let _ = &stderr;
 
     // Should find the TODO comment
     assert!(
@@ -2042,8 +2042,28 @@ fn test_hybrid_semantic_fallback() {
 
     log::debug!("Created test project with FIXME comment");
 
-    // Query with ambiguous pattern (should try semantic first, then fallback)
+    // There is no fallback to test any more. The contract that replaced it has
+    // two halves, and this checks both: a structural query for FIXME honestly
+    // matches no symbol, and an explicit text search finds the comment.
+    let structural = sqry_cmd()
+        .arg("query")
+        .arg("FIXME")
+        .arg("--limit")
+        .arg("10")
+        .current_dir(project.path())
+        .output()
+        .unwrap();
+    assert!(
+        structural.status.success(),
+        "a bare word is a valid name query"
+    );
+    assert!(
+        String::from_utf8_lossy(&structural.stderr).contains("No matches found"),
+        "expected an honest zero from the structural search"
+    );
+
     let output = sqry_cmd()
+        .arg("--text")
         .arg("query")
         .arg("FIXME")
         .arg("--limit")
@@ -2056,11 +2076,7 @@ fn test_hybrid_semantic_fallback() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    // Should show text search mode (classified as text pattern)
-    assert!(
-        stderr.contains("[Text search mode]"),
-        "Expected text search mode, got stderr: {stderr}"
-    );
+    let _ = &stderr;
 
     // Should find FIXME
     assert!(
@@ -2072,34 +2088,32 @@ fn test_hybrid_semantic_fallback() {
 }
 
 #[test]
-fn test_hybrid_no_fallback_flag() {
+fn test_query_with_no_matches_reports_zero() {
     init_logging();
-    log::info!("Testing --no-fallback flag disables text fallback");
+    log::info!("Testing that a valid query with no matches reports zero, not text hits");
 
     let project = create_test_project(&[("test.rs", "fn main() {}")]);
 
-    log::debug!("Created test project");
-
-    // Query with --no-fallback (should not fallback to text on semantic failure)
+    // Replaces `test_hybrid_no_fallback_flag`, which asserted the ABSENCE of a
+    // log string and so passed whether or not the flag did anything. The flag
+    // it exercised named a fallback that no longer exists. What matters is the
+    // behaviour it was meant to protect: a valid query that matches nothing
+    // says so, and does not quietly return text hits instead.
     let output = sqry_cmd()
-        .arg("--no-fallback")
         .arg("query")
-        .arg("nonexistent")
+        .arg("name:definitely_not_present_anywhere")
         .current_dir(project.path())
         .output()
         .unwrap();
 
-    // May succeed with empty results or fail - both acceptable with --no-fallback
-    // The important part is no fallback occurred
+    assert!(output.status.success(), "a valid query should exit 0");
     let stderr = String::from_utf8(output.stderr).unwrap();
-
-    // Should not contain fallback message
     assert!(
-        !stderr.contains("Falling back to text search"),
-        "Should not fallback with --no-fallback flag, got stderr: {stderr}"
+        stderr.contains("No matches found") || stderr.contains("0 symbols found"),
+        "expected an explicit zero result, got stderr: {stderr}"
     );
 
-    log::info!("✓ --no-fallback flag correctly disabled fallback");
+    log::info!("✓ empty structural result reported as empty");
 }
 
 #[test]
@@ -2116,6 +2130,7 @@ fn test_hybrid_context_lines_flag() {
 
     // Query with custom context lines
     let output = sqry_cmd()
+        .arg("--text")
         .arg("--context")
         .arg("1")
         .arg("query")

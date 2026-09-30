@@ -4,8 +4,10 @@
 #
 # Usage:
 #   scripts/sync-versions.sh                                  # Check mode
-#   scripts/sync-versions.sh --fix                            # Fix without rebinding reviews
-#   scripts/sync-versions.sh --fix --refresh-review-binding   # Explicitly rebind a reviewed candidate
+#   scripts/sync-versions.sh --fix                            # Fix; regenerates the review contract's covered tables
+#                                                             # from the derived control set, never the binding
+#   scripts/sync-versions.sh --fix --refresh-review-binding   # Also rebind the whole-set review binding (v3); only
+#                                                             # when a fresh three-model review round is authorized
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -822,13 +824,21 @@ if $FIX_MODE && [ $ERRORS -gt 0 ]; then
         fi
     done
 
-    # Recompute content hashes and the v2 candidate binding after legitimate
-    # covered-file edits. Intentional Git modes are validated and preserved;
-    # this command never infers or repairs a mode.
+    # Recompute content hashes and regenerate the covered tables, then rebind
+    # the v3 whole-set binding when --refresh-review-binding is given, after
+    # legitimate covered-file edits. Intentional Git modes are validated and
+    # preserved; this command never infers or repairs a mode.
     REVIEW_CONTRACT="docs/reviews/release-workflows/sanitization-review-contract.toml"
     if [ -f "$REVIEW_CONTRACT" ]; then
+        # Whether the refresh rewrote the contract is a fact about the file, not
+        # about which lines the validator chose to print. Inferring it from
+        # FIXED lines missed an order-only repair, which regenerates the tables
+        # in sorted order and prints no FIXED line: sync-versions then re-checked
+        # the still-unsorted index and exited 1 with no way for --fix to finish
+        # the repair it had already made (codex, implementation round 7).
+        contract_digest_before="$(sha256sum -- "$REVIEW_CONTRACT" | cut -d' ' -f1)"
         if contract_fix_output=$(maintain_review_contract fix "$REVIEW_CONTRACT"); then
-            if grep -q $'^FIXED\t' <<< "$contract_fix_output"; then
+            if [ "$(sha256sum -- "$REVIEW_CONTRACT" | cut -d' ' -f1)" != "$contract_digest_before" ]; then
                 CONTRACT_WORKTREE_UPDATED=true
             fi
             while IFS=$'\t' read -r status detail; do
@@ -842,7 +852,7 @@ if $FIX_MODE && [ $ERRORS -gt 0 ]; then
             done <<< "$contract_fix_output"
         else
             CONTRACT_FIX_FAILED=true
-            if grep -q $'^FIXED\t' <<< "$contract_fix_output"; then
+            if [ "$(sha256sum -- "$REVIEW_CONTRACT" | cut -d' ' -f1)" != "$contract_digest_before" ]; then
                 CONTRACT_WORKTREE_UPDATED=true
             fi
             while IFS=$'\t' read -r status detail; do

@@ -1535,6 +1535,14 @@ where
 ///      single build so this keeps the fallback stable for any individual
 ///      build even if it isn't invariant across representations.
 ///
+/// **Anonymous qualified names** (issue #850): a qualified name carrying a
+/// synthetic anonymous segment, per
+/// [`crate::relations::has_synthetic_anonymous_segment`], names a construct by
+/// its position in its own file, so the same string reaches this pass from
+/// unrelated constructs in different files. Such a group is split by `FileId`
+/// and unified only within a file; nothing outside a file can name the
+/// construct, so no cross-file reference is lost by refusing the merge.
+///
 /// **Safety**: Caller must hold an exclusive write lock on the graph.
 pub(crate) fn phase4c_prime_unify_cross_file_nodes<
     G: crate::graph::unified::mutation_target::GraphMutationTarget,
@@ -1565,18 +1573,43 @@ pub(crate) fn phase4c_prime_unify_cross_file_nodes<
         }
     }
 
-    // Filter to groups with 2+ members
-    let groups_to_unify: Vec<Vec<NodeId>> = qn_groups
-        .into_values()
-        .filter(|group| {
-            if group.len() >= 2 {
-                stats.candidate_pairs_examined += 1;
-                true
-            } else {
-                false
+    // Filter to groups with 2+ members, and split the ones whose qualified
+    // name is not a cross-file identity (issue #850).
+    //
+    // A qualified name that carries a synthetic anonymous segment, such as a
+    // Rust closure's `tests::<anon:closure@925>`, was synthesised from the
+    // construct's position in its own file. Two files that happen to hold an
+    // unnamed construct at the same position inside a same-named module mint
+    // the same string for unrelated constructs, and merging those retargets
+    // one file's call edges onto the other file's node. Those groups unify
+    // only within a single file; every other qualified name is a workspace
+    // identity and unifies as before.
+    let mut groups_to_unify: Vec<Vec<NodeId>> = Vec::new();
+    for (qn_id, group) in qn_groups {
+        if group.len() < 2 {
+            continue;
+        }
+        let anonymous = GraphMutationTarget::strings(graph)
+            .resolve(qn_id)
+            .is_some_and(|qn| crate::relations::has_synthetic_anonymous_segment(&qn));
+        if anonymous {
+            let mut by_file: HashMap<FileId, Vec<NodeId>> = HashMap::new();
+            for node_id in group {
+                if let Some(entry) = GraphMutationTarget::nodes(graph).get(node_id) {
+                    by_file.entry(entry.file).or_default().push(node_id);
+                }
             }
-        })
-        .collect();
+            for same_file_group in by_file.into_values() {
+                if same_file_group.len() >= 2 {
+                    stats.candidate_pairs_examined += 1;
+                    groups_to_unify.push(same_file_group);
+                }
+            }
+        } else {
+            stats.candidate_pairs_examined += 1;
+            groups_to_unify.push(group);
+        }
+    }
 
     // Now perform merges
     let mut remap = NodeRemapTable::with_capacity(groups_to_unify.len());
@@ -2982,6 +3015,178 @@ mod tests {
         assert_eq!(
             loser_after.qualified_name, None,
             "larger-index node loses the same-path / same-span tie-break"
+        );
+    }
+
+    /// Issue #850: two closures in two different files can carry the same
+    /// qualified name, because the Rust plugin synthesises a closure's name
+    /// from its line and the enclosing module is often just `tests`. That
+    /// string is not a cross-file identity, so Phase 4c-prime must leave both
+    /// nodes standing and must not retarget one file's call edge onto the
+    /// other file's node.
+    #[test]
+    fn phase4c_prime_keeps_same_named_anonymous_nodes_in_separate_files() {
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::node::NodeKind;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let qname = graph
+            .strings_mut()
+            .intern("tests::<anon:closure@925>")
+            .unwrap();
+        let callee_name = graph.strings_mut().intern("write_hello_response").unwrap();
+
+        let file_a = graph
+            .files_mut()
+            .register(Path::new("crate_a/src/management.rs"))
+            .unwrap();
+        let file_b = graph
+            .files_mut()
+            .register(Path::new("crate_b/src/acquirer.rs"))
+            .unwrap();
+
+        // Spans of different width, so the pre-fix winner selection would
+        // have had a strict winner to merge into.
+        let mut closure_a = NodeEntry::new(NodeKind::Function, qname, file_a);
+        closure_a.qualified_name = Some(qname);
+        closure_a.start_line = 926;
+        closure_a.end_line = 940;
+        let closure_a_id = graph.nodes_mut().alloc(closure_a).unwrap();
+
+        let mut closure_b = NodeEntry::new(NodeKind::Function, qname, file_b);
+        closure_b.qualified_name = Some(qname);
+        closure_b.start_line = 926;
+        closure_b.end_line = 929;
+        let closure_b_id = graph.nodes_mut().alloc(closure_b).unwrap();
+
+        let mut callee = NodeEntry::new(NodeKind::Function, callee_name, file_a);
+        callee.qualified_name = Some(callee_name);
+        callee.start_line = 662;
+        callee.end_line = 670;
+        let callee_id = graph.nodes_mut().alloc(callee).unwrap();
+
+        graph.rebuild_indices();
+
+        // One call edge out of each closure, into the same callee.
+        let calls = EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+            resolved_via: ResolvedVia::Direct,
+        };
+        let mut all_edges = vec![
+            vec![PendingEdge {
+                source: closure_a_id,
+                target: callee_id,
+                kind: calls.clone(),
+                file: file_a,
+                spans: vec![],
+            }],
+            vec![PendingEdge {
+                source: closure_b_id,
+                target: callee_id,
+                kind: calls,
+                file: file_b,
+                spans: vec![],
+            }],
+        ];
+
+        let (stats, remap) = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
+
+        assert_eq!(
+            stats.nodes_merged, 0,
+            "anonymous qualified names must not unify across files"
+        );
+        assert_eq!(
+            stats.candidate_pairs_examined, 0,
+            "a cross-file-only anonymous group is not a unification candidate"
+        );
+        assert!(
+            remap.is_empty(),
+            "no node was merged, so nothing may be remapped"
+        );
+
+        for (node_id, label) in [(closure_a_id, "file A"), (closure_b_id, "file B")] {
+            let entry = graph
+                .nodes()
+                .get(node_id)
+                .unwrap_or_else(|| panic!("{label} closure must remain live"));
+            assert_eq!(
+                entry.qualified_name,
+                Some(qname),
+                "{label} closure keeps its qualified_name (not tombstoned)"
+            );
+        }
+
+        assert_eq!(
+            all_edges[0][0].source, closure_a_id,
+            "file A's call edge still leaves file A's closure"
+        );
+        assert_eq!(
+            all_edges[1][0].source, closure_b_id,
+            "file B's call edge still leaves file B's closure"
+        );
+    }
+
+    /// The #850 carve-out is scoped to the cross-file case. Two anonymous
+    /// nodes that share a qualified name **inside one file** are genuine
+    /// duplicates of the same construct and still unify, so the rule does not
+    /// quietly stop the pass from doing its job.
+    #[test]
+    fn phase4c_prime_still_unifies_same_named_anonymous_nodes_within_one_file() {
+        use crate::graph::unified::concurrent::CodeGraph;
+        use crate::graph::unified::node::NodeKind;
+        use std::path::Path;
+
+        let mut graph = CodeGraph::new();
+        let qname = graph
+            .strings_mut()
+            .intern("tests::<anon:closure@925>")
+            .unwrap();
+        let file = graph
+            .files_mut()
+            .register(Path::new("crate_a/src/management.rs"))
+            .unwrap();
+
+        let mut wide = NodeEntry::new(NodeKind::Function, qname, file);
+        wide.qualified_name = Some(qname);
+        wide.start_line = 926;
+        wide.end_line = 940;
+        let wide_id = graph.nodes_mut().alloc(wide).unwrap();
+
+        let mut narrow = NodeEntry::new(NodeKind::Function, qname, file);
+        narrow.qualified_name = Some(qname);
+        narrow.start_line = 926;
+        narrow.end_line = 929;
+        let narrow_id = graph.nodes_mut().alloc(narrow).unwrap();
+
+        graph.rebuild_indices();
+
+        let mut all_edges: Vec<Vec<PendingEdge>> = Vec::new();
+        let (stats, _remap) = phase4c_prime_unify_cross_file_nodes(&mut graph, &mut all_edges);
+
+        assert_eq!(
+            stats.nodes_merged, 1,
+            "same-file duplicates of an anonymous name still unify"
+        );
+        assert_eq!(stats.candidate_pairs_examined, 1);
+        assert_eq!(
+            graph
+                .nodes()
+                .get(wide_id)
+                .expect("winner live")
+                .qualified_name,
+            Some(qname),
+            "the wider span wins inside the file"
+        );
+        assert_eq!(
+            graph
+                .nodes()
+                .get(narrow_id)
+                .expect("loser slot stays live but inert")
+                .qualified_name,
+            None,
+            "the narrower same-file duplicate is tombstoned"
         );
     }
 

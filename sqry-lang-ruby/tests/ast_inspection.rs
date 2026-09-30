@@ -9,7 +9,7 @@ use tree_sitter::{Node, Parser, Tree};
 
 fn parse_ruby(source: &str) -> Tree {
     let mut parser = Parser::new();
-    let language = tree_sitter_ruby::LANGUAGE.into();
+    let language = tree_sitter_ruby_sqry::language();
     parser
         .set_language(&language)
         .expect("Failed to set language");

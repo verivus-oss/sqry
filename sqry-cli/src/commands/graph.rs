@@ -2818,7 +2818,10 @@ pub(crate) fn calculate_complexity_metrics_unified(
 ) -> Vec<UnifiedComplexityResult> {
     use sqry_core::graph::unified::node::NodeKind as UnifiedNodeKind;
 
-    let mut complexities = Vec::new();
+    // Filter first. The node scan is cheap, so collecting the matching set up
+    // front means a selective --target or language filter that matches nothing
+    // never pays for the whole-graph depth table below.
+    let mut matched = Vec::new();
 
     for (node_id, entry) in snapshot.iter_nodes() {
         // Gate 0d iter-2 fix: skip unified losers from CLI
@@ -2841,12 +2844,23 @@ pub(crate) fn calculate_complexity_metrics_unified(
             continue;
         }
 
-        // Calculate complexity score
-        let score = calculate_complexity_score_unified(snapshot, node_id);
-        complexities.push((node_id, score));
+        matched.push(node_id);
     }
 
-    complexities
+    if matched.is_empty() {
+        return Vec::new();
+    }
+
+    // Built once for the whole snapshot, then shared by every scored node.
+    let depths = CallDepthTable::build(snapshot);
+
+    matched
+        .into_iter()
+        .map(|node_id| {
+            let score = calculate_complexity_score_unified(snapshot, node_id, &depths);
+            (node_id, score)
+        })
+        .collect()
 }
 
 fn node_matches_language_filter(
@@ -2882,57 +2896,153 @@ fn node_matches_target(
     name.contains(target_name)
 }
 
+/// Depth cap for the call-chain half of the complexity score.
+///
+/// Bounds the measure on cyclic call graphs, where the longest walk is
+/// unbounded. Part of the metric's definition, not an implementation detail:
+/// changing it changes reported scores.
+const COMPLEXITY_MAX_DEPTH: usize = 20;
+
+/// Longest capped call-chain depth reachable from each node.
+///
+/// `depth_from[i] == min(longest Calls-walk starting at slot i, COMPLEXITY_MAX_DEPTH)`,
+/// indexed by `NodeId::index()`.
+///
+/// # Why this is precomputed
+///
+/// The previous implementation recursed per call site with a depth cap but no
+/// visited set and no memoisation, so every distinct path to the cap was
+/// re-walked — `O(b^20)` per root for branching factor `b`, repeated for every
+/// Function/Method node. On sqry's own graph (812k nodes / 932k edges) that
+/// did not finish: 15 CPU-minutes, killed by timeout, on a tree that indexes
+/// in 35 seconds (#885).
+///
+/// The value it computes is a property of the node alone, so it is computed
+/// once per node instead of once per path.
+struct CallDepthTable {
+    depth_from: Vec<u8>,
+}
+
+impl CallDepthTable {
+    /// Builds the table in `O(COMPLEXITY_MAX_DEPTH * |Calls edges|)`.
+    ///
+    /// # Method
+    ///
+    /// Value iteration on `M_k[n] = min(1 + max over Calls-children c of M_{k-1}[c], CAP)`,
+    /// with `M_k[n] = 0` when `n` has no Calls-children and `M_0[n] = 0`
+    /// everywhere. `M_k[n]` equals `min(longest walk from n, k, CAP)`, so
+    /// after `CAP` rounds the table holds exactly
+    /// `min(longest walk, CAP)` — identical to what the recursive walk
+    /// returned, including on cycles, where both saturate at the cap.
+    ///
+    /// Cycles need no special handling: a node on a cycle simply keeps
+    /// increasing until it saturates. Iteration stops early once a round
+    /// changes nothing.
+    fn build(snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot) -> Self {
+        use sqry_core::graph::unified::edge::EdgeKind as UnifiedEdgeKindEnum;
+
+        let slot_count = snapshot.nodes().capacity();
+
+        // Collect Calls edges as a CSR-style adjacency keyed on slot index.
+        // `all_live_forward_edges` is the single-pass accessor; calling
+        // `edges_from` per node here would reintroduce an O(N * |delta|) scan.
+        let mut out_degree = vec![0u32; slot_count + 1];
+        let calls: Vec<(u32, u32)> = snapshot
+            .edges()
+            .all_live_forward_edges()
+            .into_iter()
+            .filter(|e| matches!(e.kind, UnifiedEdgeKindEnum::Calls { .. }))
+            .map(|e| (e.source.index(), e.target.index()))
+            .filter(|(s, t)| (*s as usize) < slot_count && (*t as usize) < slot_count)
+            .collect();
+
+        for (source, _) in &calls {
+            out_degree[*source as usize] += 1;
+        }
+        let mut row_start = vec![0u32; slot_count + 1];
+        let mut running = 0u32;
+        for slot in 0..=slot_count {
+            row_start[slot] = running;
+            running += out_degree[slot];
+        }
+        let mut fill = row_start.clone();
+        let mut targets = vec![0u32; calls.len()];
+        for (source, target) in calls {
+            let at = fill[source as usize] as usize;
+            targets[at] = target;
+            fill[source as usize] += 1;
+        }
+
+        let cap = u8::try_from(COMPLEXITY_MAX_DEPTH).unwrap_or(u8::MAX);
+        let mut depth_from = vec![0u8; slot_count];
+        let mut next = vec![0u8; slot_count];
+
+        for _round in 0..COMPLEXITY_MAX_DEPTH {
+            let mut changed = false;
+            for slot in 0..slot_count {
+                let (from, to) = (row_start[slot] as usize, row_start[slot + 1] as usize);
+                if from == to {
+                    next[slot] = 0;
+                    continue;
+                }
+                let best_child = targets[from..to]
+                    .iter()
+                    .map(|t| depth_from[*t as usize])
+                    .max()
+                    .unwrap_or(0);
+                let value = best_child.saturating_add(1).min(cap);
+                if value != depth_from[slot] {
+                    changed = true;
+                }
+                next[slot] = value;
+            }
+            std::mem::swap(&mut depth_from, &mut next);
+            if !changed {
+                break;
+            }
+        }
+
+        Self { depth_from }
+    }
+
+    /// `min(longest Calls-walk from `node_id`, COMPLEXITY_MAX_DEPTH)`.
+    fn depth_from(&self, node_id: UnifiedNodeId) -> usize {
+        self.depth_from
+            .get(node_id.index() as usize)
+            .copied()
+            .map_or(0, usize::from)
+    }
+}
+
 /// Calculate complexity score for a single function in the unified graph.
+///
+/// `score = direct Calls edges + deepest capped call chain below them`.
+///
+/// Behaviourally identical to the pre-#885 recursive implementation; only the
+/// cost changed. Note this is a fan-out measure, not cyclomatic complexity,
+/// and it is **not** the formula MCP's `complexity_metrics` reports — see
+/// #885 for that divergence, which is a product decision left open here.
 fn calculate_complexity_score_unified(
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
     node_id: UnifiedNodeId,
+    depths: &CallDepthTable,
 ) -> usize {
     use sqry_core::graph::unified::edge::EdgeKind as UnifiedEdgeKindEnum;
 
-    // Simple complexity metric: count of outgoing call edges + call chain depth
     let mut call_count = 0;
     let mut max_depth = 0;
 
-    // Count direct calls by iterating over all outgoing edges
     for edge_ref in snapshot.edges().edges_from(node_id) {
         if matches!(edge_ref.kind, UnifiedEdgeKindEnum::Calls { .. }) {
             call_count += 1;
-
-            // Calculate depth to this callee
-            let depth = calculate_call_depth_unified(snapshot, edge_ref.target, 1);
+            // The recursive form evaluated `depth(target, 1)`, i.e.
+            // `min(1 + longest_walk(target), CAP)`.
+            let depth = (depths.depth_from(edge_ref.target) + 1).min(COMPLEXITY_MAX_DEPTH);
             max_depth = max_depth.max(depth);
         }
     }
 
-    // Complexity = direct calls + max chain depth
     call_count + max_depth
-}
-
-/// Calculate call depth from a node in the unified graph.
-fn calculate_call_depth_unified(
-    snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    node_id: UnifiedNodeId,
-    current_depth: usize,
-) -> usize {
-    use sqry_core::graph::unified::edge::EdgeKind as UnifiedEdgeKindEnum;
-
-    const MAX_DEPTH: usize = 20; // Prevent infinite recursion
-
-    if current_depth >= MAX_DEPTH {
-        return current_depth;
-    }
-
-    let mut max_child_depth = current_depth;
-
-    for edge_ref in snapshot.edges().edges_from(node_id) {
-        if matches!(edge_ref.kind, UnifiedEdgeKindEnum::Calls { .. }) {
-            let child_depth =
-                calculate_call_depth_unified(snapshot, edge_ref.target, current_depth + 1);
-            max_child_depth = max_child_depth.max(child_depth);
-        }
-    }
-
-    max_child_depth
 }
 
 /// Print complexity metrics in text format (unified graph).
@@ -5208,6 +5318,265 @@ mod tests {
         assert!(
             strategy.should_enqueue(node, from, &edge, 1),
             "Empty language filter must vacuously match any node"
+        );
+    }
+}
+
+#[cfg(test)]
+mod complexity_depth_tests {
+    //! Equivalence + cost tests for the #885 fix.
+    //!
+    //! The pre-#885 implementation recursed per call site with a depth cap and
+    //! no visited set, which is exponential but *correct*. These tests keep a
+    //! literal transcription of that recursion as the reference oracle and
+    //! assert the value-iteration table agrees with it on every node, so the
+    //! fix is pinned as a pure cost change rather than a behaviour change.
+
+    use std::collections::HashMap;
+
+    use sqry_core::graph::node::Language;
+    use sqry_core::graph::unified::concurrent::{CodeGraph, GraphSnapshot};
+    use sqry_core::graph::unified::edge::EdgeKind;
+    use sqry_core::graph::unified::node::{NodeId, NodeKind};
+    use sqry_core::graph::unified::storage::arena::NodeEntry;
+
+    use super::{
+        COMPLEXITY_MAX_DEPTH, CallDepthTable, calculate_complexity_metrics_unified,
+        calculate_complexity_score_unified,
+    };
+
+    /// Literal transcription of the pre-fix `calculate_call_depth_unified`.
+    /// Exponential; only ever called on the tiny fixtures below.
+    fn reference_call_depth(
+        snapshot: &GraphSnapshot,
+        node_id: NodeId,
+        current_depth: usize,
+    ) -> usize {
+        if current_depth >= COMPLEXITY_MAX_DEPTH {
+            return current_depth;
+        }
+        let mut max_child_depth = current_depth;
+        for edge_ref in snapshot.edges().edges_from(node_id) {
+            if matches!(edge_ref.kind, EdgeKind::Calls { .. }) {
+                let child = reference_call_depth(snapshot, edge_ref.target, current_depth + 1);
+                max_child_depth = max_child_depth.max(child);
+            }
+        }
+        max_child_depth
+    }
+
+    /// Literal transcription of the pre-fix `calculate_complexity_score_unified`.
+    fn reference_score(snapshot: &GraphSnapshot, node_id: NodeId) -> usize {
+        let mut call_count = 0;
+        let mut max_depth = 0;
+        for edge_ref in snapshot.edges().edges_from(node_id) {
+            if matches!(edge_ref.kind, EdgeKind::Calls { .. }) {
+                call_count += 1;
+                max_depth = max_depth.max(reference_call_depth(snapshot, edge_ref.target, 1));
+            }
+        }
+        call_count + max_depth
+    }
+
+    fn calls() -> EdgeKind {
+        EdgeKind::Calls {
+            argument_count: 0,
+            is_async: false,
+            resolved_via: sqry_core::graph::unified::edge::ResolvedVia::Direct,
+        }
+    }
+
+    /// Builds a graph from `(caller, callee)` name pairs.
+    fn build(edges: &[(&str, &str)]) -> (CodeGraph, HashMap<String, NodeId>) {
+        let mut graph = CodeGraph::new();
+        let file_id = graph
+            .files_mut()
+            .register_with_language(std::path::Path::new("/synth/t.rs"), Some(Language::Rust))
+            .expect("register file");
+
+        let mut ids: HashMap<String, NodeId> = HashMap::new();
+        let intern = |graph: &mut CodeGraph, ids: &mut HashMap<String, NodeId>, name: &str| {
+            if let Some(id) = ids.get(name) {
+                return *id;
+            }
+            let name_id = graph.strings_mut().intern(name).expect("intern");
+            let entry = NodeEntry::new(NodeKind::Function, name_id, file_id);
+            let id = graph.nodes_mut().alloc(entry).expect("alloc");
+            graph
+                .indices_mut()
+                .add(id, NodeKind::Function, name_id, None, file_id);
+            ids.insert(name.to_owned(), id);
+            id
+        };
+
+        for (from, to) in edges {
+            let a = intern(&mut graph, &mut ids, from);
+            let b = intern(&mut graph, &mut ids, to);
+            let _ = graph.edges().add_edge(a, b, calls(), file_id);
+        }
+        (graph, ids)
+    }
+
+    /// Every node's score must match the exponential reference exactly.
+    fn assert_matches_reference(edges: &[(&str, &str)], case: &str) {
+        let (graph, ids) = build(edges);
+        let snapshot = graph.snapshot();
+        let depths = CallDepthTable::build(&snapshot);
+
+        for (name, id) in &ids {
+            let fast = calculate_complexity_score_unified(&snapshot, *id, &depths);
+            let slow = reference_score(&snapshot, *id);
+            assert_eq!(
+                fast, slow,
+                "{case}: score mismatch for {name} (table={fast}, reference={slow})"
+            );
+        }
+    }
+
+    #[test]
+    fn matches_reference_on_a_simple_chain() {
+        assert_matches_reference(&[("a", "b"), ("b", "c"), ("c", "d")], "chain");
+    }
+
+    #[test]
+    fn matches_reference_on_a_diamond() {
+        assert_matches_reference(
+            &[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d"), ("d", "e")],
+            "diamond",
+        );
+    }
+
+    #[test]
+    fn matches_reference_on_a_self_loop() {
+        assert_matches_reference(&[("a", "a"), ("b", "a")], "self-loop");
+    }
+
+    /// The case the depth cap exists for: a cycle makes the longest walk
+    /// unbounded, and both implementations must saturate identically.
+    #[test]
+    fn matches_reference_on_a_cycle() {
+        assert_matches_reference(
+            &[("a", "b"), ("b", "c"), ("c", "a"), ("entry", "a")],
+            "3-cycle",
+        );
+    }
+
+    #[test]
+    fn matches_reference_on_a_cycle_with_a_tail() {
+        assert_matches_reference(
+            &[("a", "b"), ("b", "c"), ("c", "b"), ("c", "d"), ("d", "e")],
+            "cycle-with-tail",
+        );
+    }
+
+    #[test]
+    fn matches_reference_on_a_leaf_only_graph() {
+        // Two callers of a leaf; the leaf itself scores 0.
+        assert_matches_reference(&[("a", "leaf"), ("b", "leaf")], "leaf");
+    }
+
+    /// A chain longer than the cap must saturate at the cap, not exceed it.
+    #[test]
+    fn saturates_at_the_depth_cap() {
+        let names: Vec<String> = (0..=(COMPLEXITY_MAX_DEPTH + 5))
+            .map(|i| format!("n{i}"))
+            .collect();
+        let edges: Vec<(&str, &str)> = names
+            .windows(2)
+            .map(|w| (w[0].as_str(), w[1].as_str()))
+            .collect();
+
+        let (graph, ids) = build(&edges);
+        let snapshot = graph.snapshot();
+        let depths = CallDepthTable::build(&snapshot);
+
+        let head = ids["n0"];
+        let fast = calculate_complexity_score_unified(&snapshot, head, &depths);
+        let slow = reference_score(&snapshot, head);
+        assert_eq!(fast, slow, "long chain: table must match reference");
+        assert_eq!(
+            fast,
+            1 + COMPLEXITY_MAX_DEPTH,
+            "one call edge plus the capped chain depth"
+        );
+    }
+
+    /// Cost regression guard. A branching graph with a cycle is precisely the
+    /// shape that made the old implementation exponential; 24 nodes with
+    /// fan-out 2 and a back edge was unrunnable before the fix. The table must
+    /// build and score every node well inside a second.
+    #[test]
+    fn branching_cyclic_graph_scores_in_bounded_time() {
+        let mut edges: Vec<(String, String)> = Vec::new();
+        for i in 0..24usize {
+            edges.push((format!("n{i}"), format!("n{}", (i * 2 + 1) % 24)));
+            edges.push((format!("n{i}"), format!("n{}", (i * 2 + 2) % 24)));
+        }
+        let borrowed: Vec<(&str, &str)> = edges
+            .iter()
+            .map(|(a, b)| (a.as_str(), b.as_str()))
+            .collect();
+
+        let (graph, ids) = build(&borrowed);
+        let snapshot = graph.snapshot();
+
+        let started = std::time::Instant::now();
+        let depths = CallDepthTable::build(&snapshot);
+        let total: usize = ids
+            .values()
+            .map(|id| calculate_complexity_score_unified(&snapshot, *id, &depths))
+            .sum();
+        let elapsed = started.elapsed();
+
+        assert!(total > 0, "expected non-zero scores");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "scoring a 24-node cyclic graph took {elapsed:?}; the table should make this \
+             near-instant (pre-#885 this shape did not terminate in practice)"
+        );
+    }
+
+    /// Selective filters must not pay for the whole-graph depth table.
+    ///
+    /// Pre-#885 the depth walk ran per node *after* the filters, so a target
+    /// matching nothing did no traversal at all. Building the table up front
+    /// reintroduced that cost for empty result sets; the filter pass now runs
+    /// first and returns early. This pins the observable half of that contract
+    /// (empty in, empty out) alongside the non-empty case.
+    #[test]
+    fn non_matching_filters_return_empty_without_scoring() {
+        let (graph, _ids) = build(&[("a", "b"), ("b", "c")]);
+        let snapshot = graph.snapshot();
+        let no_languages = std::collections::HashSet::new();
+
+        let missing = calculate_complexity_metrics_unified(
+            &snapshot,
+            Some("no_such_symbol_anywhere"),
+            &no_languages,
+        );
+        assert!(
+            missing.is_empty(),
+            "a target matching no function must yield no results, got {}",
+            missing.len()
+        );
+
+        let excluded = {
+            let mut only_python = std::collections::HashSet::new();
+            only_python.insert(Language::Python);
+            calculate_complexity_metrics_unified(&snapshot, None, &only_python)
+        };
+        assert!(
+            excluded.is_empty(),
+            "a language filter excluding every function must yield no results, got {}",
+            excluded.len()
+        );
+
+        // The early return must not have swallowed the matching case.
+        let matched = calculate_complexity_metrics_unified(&snapshot, Some("a"), &no_languages);
+        assert_eq!(
+            matched.len(),
+            1,
+            "expected the one matching function to still be scored"
         );
     }
 }

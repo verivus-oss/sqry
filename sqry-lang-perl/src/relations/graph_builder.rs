@@ -896,8 +896,9 @@ sub f2 {
         fn print_tree(node: tree_sitter::Node, content: &[u8], indent: usize) {
             let kind = node.kind();
             let text = node.utf8_text(content).unwrap_or("<error>");
-            let display_text = if text.len() > 50 {
-                format!("{}...", &text[..50].replace('\n', "\\n"))
+            let display_text = if text.chars().count() > 50 {
+                let head: String = text.chars().take(50).collect();
+                format!("{}...", head.replace('\n', "\\n"))
             } else {
                 text.replace('\n', "\\n")
             };

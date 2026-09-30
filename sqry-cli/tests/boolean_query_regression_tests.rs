@@ -456,10 +456,15 @@ fn test_hybrid_mode_preserves_boolean_syntax() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     let stderr = String::from_utf8(output.stderr).unwrap();
 
-    // Should attempt semantic search (not immediately fallback to text)
+    // `sqry query` has one engine, so there is no mode to announce. This used
+    // to assert a banner naming the engine that had been chosen, which only
+    // meant anything while the choice was made by sniffing the query text.
+    // The property it protected is that a boolean query is evaluated against
+    // the graph rather than grepped, and the index summary states that
+    // directly.
     assert!(
-        stderr.contains("[Semantic") || stderr.contains("[Hybrid") || stderr.is_empty(),
-        "Expected semantic attempt, got: {stderr}"
+        stderr.contains("Used index"),
+        "Expected a structural result over the index, got: {stderr}"
     );
 
     // Verify actual results - should find "helper" but not "test_helper"

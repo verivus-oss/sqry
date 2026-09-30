@@ -2332,8 +2332,8 @@ mod tests {
     fn print_tree(node: Node, source: &[u8], depth: usize) {
         let indent = "  ".repeat(depth);
         let text = node.utf8_text(source).unwrap_or("<invalid>");
-        let text_preview = if text.len() > 50 {
-            format!("{}...", &text[..50])
+        let text_preview = if text.chars().count() > 50 {
+            format!("{}...", text.chars().take(50).collect::<String>())
         } else {
             text.to_string()
         };

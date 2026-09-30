@@ -585,9 +585,17 @@ fn is_terraform_registry_format(source: &str) -> bool {
 
 /// Check if a URL is remote (http://, https://, //)
 fn is_remote_url(url: &str) -> bool {
+    // `url.len() >= 7` guards the length but not the char boundary, so a URL
+    // beginning with a multi-byte character panicked on `url[..7]`. `str::get`
+    // returns None for an out-of-range OR non-boundary index, and a URL whose
+    // seventh byte is mid-character is not an ASCII scheme prefix anyway.
     url.starts_with("//")
-        || (url.len() >= 7 && url[..7].eq_ignore_ascii_case("http://"))
-        || (url.len() >= 8 && url[..8].eq_ignore_ascii_case("https://"))
+        || url
+            .get(..7)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("http://"))
+        || url
+            .get(..8)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("https://"))
 }
 
 /// Normalize protocol-relative URLs to https://
@@ -1708,6 +1716,25 @@ output "result" {
             }
         }
         None
+    }
+
+    /// Same class as the CSS fuzz crash in issue #703: a byte-length guard does
+    /// not make a byte slice safe. `is_remote_url` tested `url.len() >= 7` and
+    /// then sliced `url[..7]`, which panics when byte 7 falls inside a
+    /// multi-byte character. A module source can be any string in the file.
+    #[test]
+    fn is_remote_url_does_not_panic_on_multibyte_prefix() {
+        for url in [
+            "\u{e9}\u{e9}\u{e9}\u{e9}xxxx",
+            "\u{e9}",
+            "\u{1f600}\u{1f600}",
+            "",
+        ] {
+            assert!(!is_remote_url(url), "{url:?} is not a remote URL");
+        }
+        assert!(is_remote_url("http://example.com"));
+        assert!(is_remote_url("HTTPS://example.com"));
+        assert!(is_remote_url("//example.com"));
     }
 }
 // Collapsible nested conditionals kept for readability with early returns

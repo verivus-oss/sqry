@@ -131,16 +131,18 @@ fn test_exit_code_1_no_graph_with_auto_index_disabled() {
 // ============================================================================
 
 #[test]
-fn test_exit_code_0_missing_colon_fallback_to_text() {
+fn test_exit_code_0_missing_colon_parses_as_implicit_and() {
     let tmp_cli_workspace = setup_indexed_repo();
 
-    // Note: sqry's hybrid mode treats "kind function" as text search, not parse error
-    // This is a feature - sqry is forgiving and falls back to text search
+    // "kind function" is a VALID query, not a tolerated invalid one: the
+    // implicit-AND parser promotes both bare words to `name~=/.../` predicates.
+    // It succeeded before this change too, but for the wrong stated reason (the
+    // text fallback). It parses, so it stays exit 0 with the fallback gone.
     Command::new(sqry_path())
         .current_dir(&tmp_cli_workspace)
-        .args(["query", "kind function"]) // Missing colon triggers text search fallback
+        .args(["query", "kind function"])
         .assert()
-        .success(); // exit code 0 (hybrid mode fallback)
+        .success();
 }
 
 #[test]
@@ -161,15 +163,40 @@ fn test_exit_code_2_unclosed_paren_validation_error() {
 }
 
 #[test]
-fn test_exit_code_0_unknown_field_fallback() {
+fn test_exit_code_2_unknown_field_is_an_error() {
     let tmp_cli_workspace = setup_indexed_repo();
 
-    // Unknown fields fall back to text search in hybrid mode
+    // Was `test_exit_code_0_unknown_field_fallback`, asserting exit 0 because an
+    // unknown field silently became a text search. That is the defect this
+    // change removes: the validator already produced a precise diagnostic and
+    // it was discarded, so a typo and an honest empty result looked identical.
+    // The reply names the command that does do a text search.
     Command::new(sqry_path())
         .current_dir(&tmp_cli_workspace)
         .args(["query", "unknown_field_12345:value"])
         .assert()
-        .success(); // exit code 0 (text search fallback)
+        .code(2)
+        .stderr(
+            predicate::str::contains("Unknown field").and(predicate::str::contains("sqry search")),
+        );
+}
+
+#[test]
+fn test_exit_code_2_predicate_never_silently_text_searches() {
+    let tmp_cli_workspace = setup_indexed_repo();
+
+    // A query is structural if and only if it parses and validates. Nothing in
+    // the query text switches engines any more, so a genuine regex that the
+    // grammar cannot express is an error that names `sqry search`, not a
+    // silent change of engine.
+    for query in ["^fn ", "\\bmain\\b", "TODO: fix this"] {
+        Command::new(sqry_path())
+            .current_dir(&tmp_cli_workspace)
+            .args(["query", query])
+            .assert()
+            .code(2)
+            .stderr(predicate::str::contains("sqry search"));
+    }
 }
 
 // Note: Invalid regex test removed - behavior varies depending on whether
@@ -201,16 +228,20 @@ fn test_exit_code_2_invalid_operator_parse_error() {
 }
 
 #[test]
-fn test_exit_code_0_empty_query_shows_all() {
+fn test_exit_code_2_empty_query_is_rejected_by_the_parser() {
     let tmp_cli_workspace = setup_indexed_repo();
 
-    // Empty query is valid - shows all content
+    // Was `test_exit_code_0_empty_query_shows_all`. The parser has always
+    // rejected an empty query, with a message naming what to write instead;
+    // the old exit 0 came from the text fallback overriding that verdict and
+    // dumping the corpus. The CLI second-guessing its own parser is the defect
+    // this change removes, so the parser's answer stands.
     Command::new(sqry_path())
         .current_dir(&tmp_cli_workspace)
-        .args(["query", ""]) // Empty query
+        .args(["query", ""])
         .assert()
-        .success() // exit code 0 (valid query, shows all)
-        .stdout(predicate::str::contains("test.rs"));
+        .code(2)
+        .stderr(predicate::str::contains("Query cannot be empty"));
 }
 
 // ============================================================================

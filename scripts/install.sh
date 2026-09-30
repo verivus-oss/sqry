@@ -7,6 +7,7 @@ COMPONENT="sqry"
 INSTALL_DIR="${HOME}/.local/bin"
 VERIFY_CHECKSUMS=true
 VERIFY_SIGNATURES=false
+LIBC="auto"
 
 usage() {
   cat <<USAGE
@@ -19,9 +20,15 @@ Options:
   --component NAME      One of: sqry, sqry-mcp, sqry-lsp, sqryd, all (default: sqry)
   --install-dir DIR     Install destination (default: ~/.local/bin)
   --repo OWNER/REPO     GitHub repository (default: verivus-oss/sqry)
+  --libc NAME           Linux C library: auto, gnu, or musl (default: auto)
   --no-checksum         Skip checksum verification (not recommended)
   --verify-signatures   Verify GitHub artifact attestations or legacy Cosign bundles (requires gh or cosign)
   -h, --help            Show this help message
+
+Environment:
+  SQRY_INSTALL_LOADER_DIR   Directory searched for the musl loader
+                            (default: /lib). Exists so the detection branch is
+                            testable; you should not need it.
 USAGE
 }
 
@@ -41,6 +48,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --repo)
       REPO="$2"
+      shift 2
+      ;;
+    --libc)
+      LIBC="$2"
       shift 2
       ;;
     --no-checksum)
@@ -98,13 +109,92 @@ case "$arch" in
     ;;
 esac
 
+case "$LIBC" in
+  auto|gnu|musl)
+    ;;
+  *)
+    echo "error: --libc must be auto, gnu, or musl, got '$LIBC'" >&2
+    exit 1
+    ;;
+esac
+
+# Pick the C library the host actually runs, not the one most hosts run.
+#
+# The release publishes both a glibc and a musl build for every Linux binary.
+# Until this existed the installer asked for the glibc one unconditionally, so
+# on Alpine and other musl-only hosts it downloaded a binary that cannot
+# execute, verified its checksum (the bytes are exactly what was published),
+# installed it, and reported success. The checksum cannot catch this and
+# neither can the attestation: both are true statements about bytes that will
+# not run here.
+#
+# The loader file is the primary signal. It is a plain file test, so it works
+# where ldd is BusyBox's stub, and it does not depend on ldd's exit status:
+# musl's ldd writes its banner to stderr and exits non-zero. musl names the
+# loader with the GNU architecture spelling, so arm64 maps back to aarch64.
+detect_linux_libc() {
+  local musl_arch=""
+  case "$arch" in
+    x86_64) musl_arch="x86_64" ;;
+    arm64) musl_arch="aarch64" ;;
+  esac
+
+  # SQRY_INSTALL_LOADER_DIR exists so this branch can be tested. It defaults to
+  # /lib, which is where every musl distribution puts the loader, and an
+  # unprivileged test cannot create a file there. Without the override this
+  # branch had ZERO coverage: deleting it outright left the suite fully green,
+  # which a reviewer demonstrated rather than my noticing it. A branch this
+  # function consults FIRST must not be the one nothing tests.
+  local loader_dir="${SQRY_INSTALL_LOADER_DIR:-/lib}"
+  if [[ -n "$musl_arch" && -e "${loader_dir}/ld-musl-${musl_arch}.so.1" ]]; then
+    echo musl
+    return
+  fi
+
+  # musl's ldd exits non-zero whatever it prints, and this script runs under
+  # `set -o pipefail`, so `ldd --version 2>&1 | grep -qi musl` evaluates false
+  # on exactly the hosts it is meant to detect: pipefail propagates ldd's
+  # status even though grep matched. Capture first, then match.
+  #
+  # Two output shapes, both non-zero. Up to Alpine 3.9 it is musl's banner
+  # ("musl libc (x86_64)"). From Alpine 3.10 /usr/bin/ldd is a shell script
+  # that execs the loader, so --version becomes a file it cannot load and the
+  # error names /lib/ld-musl-<arch>.so.1 instead. Matching on "musl" rather
+  # than on the banner covers both, because the loader path carries it. GNU
+  # config.guess dropped ldd-based musl detection over that second shape,
+  # which is why the loader file above is the primary signal here and this is
+  # only the fallback.
+  if command -v ldd >/dev/null 2>&1; then
+    local ldd_output
+    ldd_output=$(ldd --version 2>&1 || true)
+    if printf '%s' "$ldd_output" | grep -qi musl; then
+      echo musl
+      return
+    fi
+  fi
+
+  echo gnu
+}
+
 checksum_file="SHA256SUMS.txt"
 
 case "$os" in
   linux)
-    platform_suffix="linux-${arch}"
+    if [[ "$LIBC" == "auto" ]]; then
+      LIBC=$(detect_linux_libc)
+      echo "Detected C library: $LIBC"
+    fi
+    if [[ "$LIBC" == "musl" ]]; then
+      platform_suffix="linux-${arch}-musl"
+    else
+      platform_suffix="linux-${arch}"
+    fi
     ;;
   darwin)
+    if [[ "$LIBC" == "musl" ]]; then
+      echo "error: --libc musl is Linux only; macOS releases are glibc-free Mach-O builds" >&2
+      exit 1
+    fi
     platform_suffix="macos-${arch}"
     ;;
   *)
@@ -123,10 +213,51 @@ case "$COMPONENT" in
     ;;
 esac
 
+# Resolve "latest" without depending on the GitHub API being available to us.
+#
+# api.github.com allows 60 unauthenticated requests per hour, counted per source
+# IP. Anyone installing from CI, a NAT'd office, or a machine that also runs CI
+# shares that budget with everything else on the address, and when it is spent
+# the API returns 403. A single unauthenticated call therefore fails for reasons
+# that have nothing to do with this project or the user's network.
+#
+# The releases/latest web redirect is a plain HTTPS request to github.com rather
+# than the API. It is not rate limited and needs no credentials, which is what an
+# installer for the general public can actually rely on. The API is kept as a
+# fallback, and used first when the caller supplies a token.
 if [[ "$VERSION_TAG" == "latest" ]]; then
-  VERSION_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' | head -n1)
+  gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  VERSION_TAG=""
+
+  if [[ -n "$gh_token" ]]; then
+    # The token goes to curl on stdin, not on the command line. A process's
+    # arguments are readable by any local user through /proc, and this script
+    # runs on shared CI runners, so `-H "Authorization: Bearer $tok"` would
+    # expose the caller's token for the lifetime of the request. `-K -` reads
+    # the same header from a config on stdin, which touches neither argv nor
+    # disk.
+    VERSION_TAG=$(printf 'header = "Authorization: Bearer %s"\n' "$gh_token" \
+      | curl -fsSL -K - "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+      | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' | head -n1) || true
+  fi
+
   if [[ -z "$VERSION_TAG" ]]; then
-    echo "error: failed to resolve latest release tag from GitHub API" >&2
+    resolved_url=$(curl -fsSLI -o /dev/null -w '%{url_effective}' \
+      "https://github.com/${REPO}/releases/latest" 2>/dev/null) || true
+    VERSION_TAG="${resolved_url##*/tag/}"
+    [[ "$VERSION_TAG" == "$resolved_url" ]] && VERSION_TAG=""
+  fi
+
+  if [[ -z "$VERSION_TAG" ]]; then
+    VERSION_TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null \
+      | sed -n 's/.*"tag_name": "\([^"]*\)".*/\1/p' | head -n1) || true
+  fi
+
+  if [[ -z "$VERSION_TAG" ]]; then
+    echo "error: failed to resolve the latest release tag for ${REPO}." >&2
+    echo "  Tried: the releases/latest redirect and the GitHub API." >&2
+    echo "  If you are behind a proxy or the API budget for your address is spent," >&2
+    echo "  pass an explicit tag instead, for example: --version v1.2.3" >&2
     exit 1
   fi
 fi
@@ -163,6 +294,10 @@ sha256_of_file() {
     shasum -a 256 "$file_path" | awk '{print $1}'
   fi
 }
+
+# Components that installed AND proved they run, in order, so a failure partway
+# through --component all can report what it left behind.
+INSTALLED_OK=()
 
 tmp_dir=$(mktemp -d)
 trap 'rm -rf "$tmp_dir"' EXIT
@@ -266,7 +401,36 @@ download_and_install() {
 
   mkdir -p "$INSTALL_DIR"
   install -m 0755 "$asset_path" "$INSTALL_DIR/$component_name"
-  echo "Installed: $INSTALL_DIR/$component_name"
+
+  # Prove the installed binary runs here before calling the install a success.
+  # Everything above this line verifies bytes: the checksum says we received
+  # what was published and the attestation says who published it. Neither says
+  # the binary can execute on this host. A binary that cannot state its own
+  # version is a failed install, not a footnote on a successful one, so this
+  # exits non-zero rather than printing a warning beside the word "Installed".
+  local installed_path="$INSTALL_DIR/$component_name"
+  local version_output
+  if ! version_output=$("$installed_path" --version 2>&1); then
+    echo "error: installed $component_name cannot report its version" >&2
+    echo "  path: $installed_path" >&2
+    echo "  asset: $asset_name" >&2
+    # This exit can land midway through --component all. Say what is already on
+    # disk rather than leaving the user to discover a half-done install: the
+    # earlier binaries are installed and working, and re-running is safe.
+    if [[ ${#INSTALLED_OK[@]} -gt 0 ]]; then
+      echo "  already installed and working: ${INSTALLED_OK[*]}" >&2
+      echo "  this install is incomplete; re-running is safe" >&2
+    fi
+    [[ -n "$version_output" ]] && echo "  output: $version_output" >&2
+    if [[ "$os" == "linux" ]]; then
+      echo "  This host was detected as '$LIBC'. If that is wrong, reinstall with" >&2
+      echo "  --libc musl or --libc gnu." >&2
+    fi
+    exit 1
+  fi
+
+  INSTALLED_OK+=("$component_name")
+  echo "Installed: $installed_path ($version_output)"
 }
 
 if [[ "$COMPONENT" == "all" ]]; then

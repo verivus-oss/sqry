@@ -1251,8 +1251,8 @@ mod tests {
     fn print_tree_debug(node: tree_sitter::Node, source: &[u8], depth: usize) {
         let indent = "  ".repeat(depth);
         let text = node.utf8_text(source).unwrap_or("<invalid>");
-        let text_preview = if text.len() > 30 {
-            format!("{}...", &text[..30])
+        let text_preview = if text.chars().count() > 30 {
+            format!("{}...", text.chars().take(30).collect::<String>())
         } else {
             text.to_string()
         };

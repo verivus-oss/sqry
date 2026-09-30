@@ -1,6 +1,6 @@
 # sqry Quick Start
 
-**Version**: 31.0.0
+**Version**: 32.0.1
 **Rust**: 1.94+ (Edition 2024; repository toolchain 1.94.1)
 
 This guide gets you from install to useful semantic queries.
@@ -151,13 +151,30 @@ See [Daemon Mode](docs/user-guide/daemon.md).
 ## MCP
 
 ```bash
-sqry mcp setup --tool claude
-sqry mcp setup --tool codex
-sqry mcp setup --tool gemini
+sqry mcp setup --tool claude --scope global
+sqry mcp setup --tool codex --scope global
+sqry mcp setup --tool gemini --scope global
+sqry mcp status
 sqry-mcp --list-tools
 ```
 
+`--scope` defaults to `auto`, which resolves to a per-project Claude Code entry when the working directory sits inside a repository, and errors when it does not. Pass `--scope global` for a machine-wide entry.
+
 Standalone MCP exposes the full local tool catalog. Daemon-hosted MCP exposes a smaller daemon-backed subset. Use `tools/list`, `sqry-mcp --list-tools`, or `sqry://meta/manifest` for the authoritative schema. See [MCP Guide](docs/user-guide/mcp.md).
+
+## Agent Skills
+
+MCP gives an agent the tools. The skills tell it when to reach for them mid-task. They live in [verivus-oss/sqry-skills](https://github.com/verivus-oss/sqry-skills), which publishes eight: `sqry-semantic-search` plus one each for Claude Code, Codex, Gemini CLI, Grok, OpenCode, Antigravity, and Mistral Vibe.
+
+```bash
+# Plugin route: skills plus sqry-mcp and sqry-lsp registration.
+git clone --depth 1 https://github.com/verivus-oss/sqry-skills ~/.grok/plugins/sqry
+
+# Skills only.
+npx skills add https://github.com/verivus-oss/sqry-skills
+```
+
+The installer does not stage these today, so this step is manual. See [Agent Setup](README.md#agent-setup).
 
 ## VS Code
 

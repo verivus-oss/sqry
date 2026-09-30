@@ -13,13 +13,25 @@ Thank you for your interest in contributing to sqry! This guide covers everythin
 - [Testing](#testing)
 - [Pull Request Process](#pull-request-process)
 - [Adding a Language Plugin](#adding-a-language-plugin)
+- [Community Posture](#community-posture)
 - [Communication](#communication)
+- [Additional Resources](#additional-resources)
+- [License](#license)
 
 ---
 
 ## Project Overview
 
-sqry is a semantic code search tool built in Rust that understands code structure through AST analysis. It supports 37 languages (28 with full relation extraction, 9 with symbol extraction + imports), provides CLI, LSP, and MCP interfaces, and runs entirely locally with no telemetry.
+sqry is a semantic code search tool built in Rust that understands code structure through AST analysis. It provides CLI, LSP, and MCP interfaces, and runs entirely locally with no telemetry.
+
+Counts of languages and tools are deliberately not written down here. They move every release and a stale number in a contributor guide is worse than no number. Ask the build you have:
+
+```bash
+sqry --list-languages      # languages the installed binary enables
+sqry-mcp --list-tools      # MCP tools the installed server exposes
+```
+
+The `sqry://meta/manifest` MCP resource reports the same figures for a connected server.
 
 ---
 
@@ -42,10 +54,17 @@ Every contribution must pass the **Semantic Search Litmus Test**:
 
 ### What We Won't Accept
 
-- Feature bloat (metrics exporters, language-specific linters)
-- Features that don't serve semantic code search
+- Features that do not serve semantic code search
 - Changes that break the plugin architecture
 - Complexity without clear value
+
+The litmus test is about the graph, not about a category name. sqry does emit
+Prometheus-format index status (`sqry index --status --metrics-format prometheus`)
+and does run declarative rule packs (`sqry rules`), both because they answer
+questions about the graph it already builds. An earlier version of this list
+rejected "metrics exporters" and "language-specific linters" outright while both
+of those shipped. If a proposal reads like one of those, argue it against the
+litmus test rather than against the label.
 
 ---
 
@@ -53,16 +72,18 @@ Every contribution must pass the **Semantic Search Litmus Test**:
 
 ### Prerequisites
 
-- **Rust 1.90+** with Edition 2024 (hard requirement)
+- **Rust**, Edition 2024. The exact toolchain is pinned in `rust-toolchain.toml`, and
+  rustup honours it automatically inside the repository, so you do not need to pick a
+  version yourself.
 - **Git** for version control
 
 ```bash
-# Install or update Rust
+# Install rustup if you do not have it
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-rustup update stable
 
-# Verify version (must be 1.90+)
+# Inside the repo, this reports the pinned toolchain, not your default
 rustc --version
+cat rust-toolchain.toml
 ```
 
 ### Initial Setup
@@ -105,20 +126,28 @@ sqry/
 ├── sqry-cli/               # CLI binary (sqry)
 ├── sqry-lsp/               # LSP server (sqry lsp)
 ├── sqry-mcp/               # MCP server for AI assistants
-├── sqry-lang-*/            # 37 language plugins
+├── sqry-daemon/            # Daemon binary and library (sqryd)
+├── sqry-daemon-protocol/   # Daemon wire types and framing
+├── sqry-daemon-client/     # Daemon client library
+├── sqry-db/                # Derived-analysis cache and query planner
+├── sqry-classpath/         # JVM classpath analysis
+├── sqry-rules/             # Declarative rule layer
+├── sqry-mcp-redaction/     # MCP response redaction
+├── sqry-plugin-registry/   # Plugin registration and discovery
+├── sqry-lang-*/            # Language plugins
 ├── sqry-lang-support/      # Plugin infrastructure
 ├── sqry-tree-sitter-support/ # Tree-sitter bindings
-├── sqry-test-support/      # Test utilities
-├── sqry-test-fixtures/     # Shared test fixtures
-├── benchmarks/             # Performance benchmarks
-├── crates/                 # Custom tree-sitter grammars
-├── docs/                   # Documentation
-│   ├── development/        # Per-feature development docs
-│   ├── templates/          # Process document templates
-│   └── user-guide/         # User-facing docs
+├── sqry-vscode/            # VS Code extension
+├── agent-skills/           # Consumer agent skills and plugin manifests
+├── crates/                 # Vendored tree-sitter grammars
+├── docs/user-guide/        # User-facing documentation
 ├── test-fixtures/          # Language-specific test code
+├── tests/                  # Workspace-level integration tests
 └── .github/workflows/      # CI pipelines
 ```
+
+`cargo metadata --no-deps --format-version 1` is the authoritative list; the tree above
+is a map, not an inventory.
 
 ### Core Crates
 
@@ -126,16 +155,29 @@ sqry/
 |-------|---------|
 | `sqry-core` | Graph architecture, symbol types, search engine, query parser, plugin system |
 | `sqry-cli` | CLI commands (`sqry index`, `sqry query`, `sqry graph`, etc.) |
-| `sqry-lsp` | LSP server with 27 custom handlers (hover, definition, references, call hierarchy) |
-| `sqry-mcp` | MCP server with 34 tools for AI assistants |
+| `sqry-lsp` | LSP server (hover, definition, references, call hierarchy, and custom handlers) |
+| `sqry-mcp` | MCP server for AI assistants; run `sqry-mcp --list-tools` for the current catalog |
 
 ### Language Plugins
 
 Each `sqry-lang-*` crate implements the `GraphBuilder` trait to extract symbols and relationships from source code via tree-sitter AST parsing.
 
-**Full relation support (28)**: C, C++, C#, CSS, Dart, Elixir, Go, Groovy, Haskell, HTML, Java, JavaScript, Kotlin, Lua, Perl, PHP, Python, R, Ruby, Rust, Scala, Shell, SQL, Svelte, Swift, TypeScript, Vue, Zig
+Plugins differ in depth. Some extract symbols and full relations; others extract symbols
+and imports only. Some are compiled by default and some sit behind Cargo features.
 
-**Symbol extraction + imports (7)**: Oracle PL/SQL, Salesforce Apex, SAP ABAP, ServiceNow Xanadu, Terraform, Puppet, Pulumi
+Rather than repeat a breakdown that goes stale, read it off the build:
+
+```bash
+sqry --list-languages                      # what this binary enables
+SQRY_INCLUDE_HIGH_COST=1 sqry --list-languages   # plus the high-cost plugins
+```
+
+`--include-high-cost` is a flag on `sqry index`, not on `--list-languages`, so
+the environment variable is the form that works for listing.
+
+Two earlier revisions of this file disagreed with each other about the split, one
+paragraph saying nine symbol-and-imports languages and another saying seven and then
+listing seven. That is the failure mode this section now avoids.
 
 ---
 
@@ -143,22 +185,22 @@ Each `sqry-lang-*` crate implements the `GraphBuilder` trait to extract symbols 
 
 ### Process Selection
 
-| Change Type | Documentation Required |
-|-------------|----------------------|
-| Bug fix (<50 LOC) | `04_PROGRESS-_SLUG_.md` + `06_TEST_EXECUTION-_SLUG_.md` entry |
-| Documentation updates | None |
-| Test additions | None |
-| Language plugin | 3-doc pack (SPEC/IMPL/TESTS) |
-| Feature (>50 LOC) | Full 6-doc pack |
-| Architecture change | Full 6-doc pack |
+What an outside contribution needs is a clear description of the change and evidence
+that it works. Nothing more is asked of you here.
 
-### Feature Proposals
+| Change Type | What to include in the PR |
+|-------------|---------------------------|
+| Bug fix | The failing case, and a test that fails without the fix |
+| Documentation | The change, and how you checked the claim it makes |
+| Test additions | What behaviour the test pins, and evidence it fails when that behaviour is removed |
+| Language plugin | A short spec, the implementation, and per-construct tests |
+| Feature | A short spec (what and why), a design sketch (how), and a test plan |
+| Architecture change | The same, plus the migration story for existing indexes |
 
-For major features (>50 LOC), open an issue or PR with:
-
-1. **Spec** - What and why (requirements, goals)
-2. **Design** - How (architecture, data structures)
-3. **Test plan** - How you'll verify the implementation
+Earlier revisions of this file required a numbered six-document pack whose templates
+live in `docs/templates/`, a directory that is not part of this repository. Asking an
+outside contributor for documents they cannot see was a mistake, and the requirement
+was internal-process residue rather than something this project needs from you.
 
 ---
 
@@ -357,7 +399,7 @@ PRs trigger the following CI checks:
 | **Fuzzy Search** | Tests both Jaccard and ratio modes |
 | **Unwrap Safety** | Advisory check for `unwrap`/`expect` usage |
 
-Key steps within the **Test** job: malformed input tests (FFI safety across 35 plugin suites) and code quality checks.
+Key steps within the **Test** job: malformed-input tests, which exercise FFI safety across the language plugins, and code quality checks. The suites are the `malformed_input.rs` files under `sqry-lang-*/tests/`; `find . -name malformed_input.rs | wc -l` is the count, and it moves with the plugin set.
 
 All CI jobs must pass before merge.
 
@@ -392,7 +434,26 @@ pub trait GraphBuilder: Send + Sync {
 
 ### Node Kinds
 
-Plugins emit nodes with `NodeKind` variants (28 total): `Function`, `Method`, `Class`, `Interface`, `Trait`, `Module`, `Variable`, `Constant`, `Type`, `Struct`, `Enum`, `EnumVariant`, `Macro`, `Parameter`, `Property`, `CallSite`, `Import`, `Export`, `StyleRule`, `StyleAtRule`, `StyleVariable`, `Lifetime`, `Component`, `Service`, `Resource`, `Endpoint`, `Test`, `Other`.
+Plugins emit nodes typed by the `NodeKind` enum and edges typed by `EdgeKind`. Both
+grow, so read them from the source rather than from a list here:
+
+```bash
+sqry index .                                             # once, if you have not already
+sqry query 'kind:enum name:NodeKind' sqry-core/src/graph
+sqry query 'kind:enum name:EdgeKind' sqry-core/src/graph
+```
+
+Each returns two hits. The ones under `sqry-core/src/graph/unified/` are the current
+definitions that plugins emit into; the pair directly under `sqry-core/src/graph/` are
+the older types.
+
+The index and the path scope both matter. Without an index `sqry query` currently aborts
+rather than reporting that there is none (verivus-oss/sqry#829), and an unscoped
+query over the whole workspace is what triggers it.
+
+An earlier revision of this file listed 28 `NodeKind` variants while the enum had 35,
+and that stale count survived a rewrite whose whole purpose was removing stale counts.
+Hence the query rather than the list.
 
 ### Edge Kinds
 
@@ -408,13 +469,31 @@ Plugins emit edges including: `Defines`, `Contains`, `Calls`, `References`, `Imp
 
 ---
 
+## Community Posture
+
+Read this before investing time in a large change.
+
+Issues and pull requests are open on the public repository, and outside contributions
+are read. Development happens primarily in a private tree and is mirrored here on each
+release, so a public pull request is landed by re-applying it internally rather than by
+merging the branch directly. That means your commit may reach the released code under a
+different SHA, and it means review latency is tied to the release cycle rather than to
+the working day.
+
+GitHub Discussions are not enabled. Use issues.
+
+For anything larger than a bug fix, open an issue describing the change before writing
+it, so the litmus test conversation happens before the work rather than after.
+
+---
+
 ## Communication
 
 ### Asking Questions
 
 - **GitHub Issues**: Bug reports and feature requests
-- **Pull Requests**: Code contributions and design discussions
-- **Discussions**: General questions and ideas
+- **Pull Requests**: Code contributions and design discussion
+- **Issues**: Bug reports, feature proposals, and general questions
 
 ### Reporting Bugs
 
@@ -440,8 +519,16 @@ Include:
 
 - [README.md](README.md) - Project overview and usage
 - [QUICKSTART.md](QUICKSTART.md) - Quick start guide
-- [docs/USAGE_EXAMPLES.md](docs/USAGE_EXAMPLES.md) - Usage examples
 - [docs/FEATURE_LIST.md](docs/FEATURE_LIST.md) - Complete feature list
+- [docs/user-guide/](docs/user-guide/) - Task-oriented user documentation
+- [SECURITY.md](SECURITY.md) - Reporting a vulnerability
+
+Every path linked above resolves in the published repository, which is where this guide
+is read. If you find one that does not, that is a bug in this file and worth an issue on
+its own: it means the guide has drifted from the tree it ships with, which has happened
+before. `SECURITY.md` is maintained directly on the published repository rather than
+mirrored into it, so it is the one link here that will not resolve in a development
+checkout.
 
 ---
 

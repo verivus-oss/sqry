@@ -23,11 +23,22 @@ use super::manifest::ConfigProvenance;
 ///   `source_uri`). The legacy `MAGIC_BYTES` / `VERSION` exports are preserved during Phase 1
 ///   to keep existing call sites compiling; later units bump the writer to V8 and treat V7 as
 ///   read-only.
+#[deprecated(
+    since = "32.0.1",
+    note = "ambiguous name: this is the V7 magic, not the current writer's. \
+            Use MAGIC_BYTES_V7 for the V7 reader path, or CURRENT_VERSION / \
+            FormatVersion for the format the writer emits."
+)]
 pub const MAGIC_BYTES: &[u8; 13] = b"SQRY_GRAPH_V7";
 
 /// Legacy V7 format version constant, preserved for existing call sites.
 ///
 /// See [`CURRENT_VERSION`] / [`FormatVersion`] for the Phase 1+ versioning contract.
+#[deprecated(
+    since = "32.0.1",
+    note = "ambiguous name: this is the V7 format version, not the current \
+            writer's. Use CURRENT_VERSION / FormatVersion instead."
+)]
 pub const VERSION: u32 = 7;
 
 /// Phase 1 V7 magic bytes (re-export under the versioned name).
@@ -402,7 +413,11 @@ impl GraphHeader {
         file_count: usize,
     ) -> Self {
         Self {
-            version: VERSION,
+            // Placeholder: the snapshot writers overwrite this with
+            // `FormatVersion::V17` before the header is serialised
+            // (`snapshot.rs`: `header.version = FormatVersion::V17.as_u32()`).
+            // Spelled explicitly rather than via the ambiguous `VERSION`.
+            version: FormatVersion::V7.as_u32(),
             node_count,
             edge_count,
             string_count,
@@ -427,7 +442,11 @@ impl GraphHeader {
         provenance: ConfigProvenance,
     ) -> Self {
         Self {
-            version: VERSION,
+            // Placeholder: the snapshot writers overwrite this with
+            // `FormatVersion::V17` before the header is serialised
+            // (`snapshot.rs`: `header.version = FormatVersion::V17.as_u32()`).
+            // Spelled explicitly rather than via the ambiguous `VERSION`.
+            version: FormatVersion::V7.as_u32(),
             node_count,
             edge_count,
             string_count,
@@ -453,7 +472,11 @@ impl GraphHeader {
         plugin_versions: HashMap<String, String>,
     ) -> Self {
         Self {
-            version: VERSION,
+            // Placeholder: the snapshot writers overwrite this with
+            // `FormatVersion::V17` before the header is serialised
+            // (`snapshot.rs`: `header.version = FormatVersion::V17.as_u32()`).
+            // Spelled explicitly rather than via the ambiguous `VERSION`.
+            version: FormatVersion::V7.as_u32(),
             node_count,
             edge_count,
             string_count,
@@ -533,12 +556,18 @@ mod tests {
     }
 
     #[test]
+    // Deliberately reads the deprecated aliases: the point of these
+    // tests is to pin that they still spell the V7 values.
+    #[allow(deprecated)]
     fn test_magic_bytes() {
         assert_eq!(MAGIC_BYTES, b"SQRY_GRAPH_V7");
         assert_eq!(MAGIC_BYTES.len(), 13);
     }
 
     #[test]
+    // Deliberately reads the deprecated aliases: the point of these
+    // tests is to pin that they still spell the V7 values.
+    #[allow(deprecated)]
     fn test_version() {
         assert_eq!(VERSION, 7);
     }
@@ -547,7 +576,7 @@ mod tests {
     fn test_graph_header_new() {
         let header = GraphHeader::new(100, 50, 200, 10);
 
-        assert_eq!(header.version, VERSION);
+        assert_eq!(header.version, FormatVersion::V7.as_u32());
         assert_eq!(header.node_count, 100);
         assert_eq!(header.edge_count, 50);
         assert_eq!(header.string_count, 200);
@@ -561,7 +590,7 @@ mod tests {
         let provenance = make_test_provenance();
         let header = GraphHeader::with_provenance(100, 50, 200, 10, provenance);
 
-        assert_eq!(header.version, VERSION);
+        assert_eq!(header.version, FormatVersion::V7.as_u32());
         assert_eq!(header.node_count, 100);
         assert_eq!(header.edge_count, 50);
         assert!(header.config_provenance.is_some());
@@ -727,6 +756,9 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
+    // Deliberately reads the deprecated aliases: the point of these
+    // tests is to pin that they still spell the V7 values.
+    #[allow(deprecated)]
     fn phase1_magic_bytes_v7_matches_legacy() {
         assert_eq!(MAGIC_BYTES_V7, b"SQRY_GRAPH_V7");
         assert_eq!(MAGIC_BYTES_V7, MAGIC_BYTES);
@@ -1103,7 +1135,7 @@ mod tests {
             plugin_versions.clone(),
         );
 
-        assert_eq!(header.version, VERSION);
+        assert_eq!(header.version, FormatVersion::V7.as_u32());
         assert_eq!(header.node_count, 100);
         assert!(header.config_provenance.is_some());
         assert_eq!(header.plugin_versions().len(), 2);

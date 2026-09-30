@@ -6,6 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [32.0.1](https://github.com/verivus-oss/sqry/compare/v31.0.0...v32.0.1) - 2026-09-30
+
+### Fixed
+
+- graph complexity perf, derived-cache key collisions, redundant unsafe impls, stale CLAUDE.md claims ([#894](https://github.com/verivus-oss/sqry/pull/894))
+- *(graph)* keep anonymous node names from unifying across files ([#851](https://github.com/verivus-oss/sqry/pull/851))
 ## [31.0.0](https://github.com/verivus-oss/sqry/compare/v30.0.1...v31.0.0) - 2026-09-02
 
 ### Fixed

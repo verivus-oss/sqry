@@ -60,6 +60,8 @@ pub mod snapshot;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+#[allow(deprecated)]
+// MAGIC_BYTES + VERSION stay exported for downstream readers of the V7 path.
 pub use format::{
     FormatVersion, GraphHeader, MAGIC_BYTES, MAGIC_BYTES_V7, MAGIC_BYTES_V8, MAGIC_BYTES_V9,
     MAGIC_BYTES_V10, MAGIC_BYTES_V11, MAGIC_BYTES_V12, MAGIC_BYTES_V13, MAGIC_BYTES_V14,

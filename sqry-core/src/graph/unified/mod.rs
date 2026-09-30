@@ -38,9 +38,10 @@
 //!
 //! # Usage
 //!
-//! The unified architecture is enabled via the `unified-graph` feature flag.
-//! When enabled, it provides the new Arena+CSR storage. The legacy DashMap
-//! storage remains available via the `legacy-graph` feature for fallback.
+//! The unified architecture is unconditional — it has been the only
+//! implementation since v2.0.0, and the legacy DashMap storage was removed
+//! along with its `unified-graph` / `legacy-graph` feature flags. There is no
+//! fallback path and nothing to enable.
 //!
 //! ```rust,ignore
 //! use sqry_core::graph::unified::{NodeId, NodeKind, EdgeKind};

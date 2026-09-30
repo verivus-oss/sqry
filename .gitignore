@@ -77,6 +77,12 @@ sqry-lang-*/.sqry/
 !.gemini/skills/
 !.gemini/skills/**
 .mcp.json
+# ...but agent-skills/ is a publishable plugin bundle, and its .mcp.json is the
+# server declaration consumers of that plugin read. It is not a repo-root
+# .mcp.json and does not shadow the user-scope MCP entries the workspace
+# convention reserves, so it is tracked. Without this, `git add -A` drops it
+# silently and the published plugin registers no MCP server.
+!agent-skills/.mcp.json
 .npm/
 claude-code-plugin/
 
@@ -172,7 +178,9 @@ benchmarks/swebench/results/
 hf_cache/
 **/hf_cache/
 
-# SonarQube local dev tooling
+# Retired SonarQube tooling (removed 2026-09-14). The patterns stay so
+# leftovers in older checkouts, such as tools/sonarqube/.env with its
+# token and passwords, cannot be committed by accident.
 .scannerwork/
 **/.scannerwork/
 .tmp-sonar-javascript-plugin.jar

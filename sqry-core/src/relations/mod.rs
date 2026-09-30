@@ -11,4 +11,6 @@ pub mod queries;
 pub mod types;
 
 pub use identity::{CallIdentityBuilder, CallIdentityKind, CallIdentityMetadata};
-pub use types::SyntheticNameBuilder;
+pub use types::{
+    SyntheticNameBuilder, has_synthetic_anonymous_segment, is_synthetic_anonymous_segment,
+};

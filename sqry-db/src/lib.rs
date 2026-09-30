@@ -305,7 +305,6 @@ impl QueryDb {
         if let Err(err) = self.cache.insert_query::<Q>(
             shard_idx,
             query_key.clone(),
-            key,
             value.clone(),
             file_deps.clone(),
             edge_rev,

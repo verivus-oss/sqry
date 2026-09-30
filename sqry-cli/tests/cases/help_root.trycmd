@@ -1,118 +1,132 @@
 ```console
-$ {{bin}} sqry --help
-sqry [VERSION]
+$ sqry --help
 sqry is a semantic code search tool that understands code structure through AST analysis.
 Find functions, classes, and symbols with precision using AST-aware queries.
+
+Search progress:
+  sqry <pattern> --verbose emits snapshot-load, lookup, and filter timing to stderr.
+  SQRY_LOG=info enables the same progress output without the flag.
+  Tier-1 search still loads in-process; when sqryd answers daemon/status, verbose mode notes that daemon-backed search is not yet attached.
+  Tier-2 daemon-backed search will attach to sqryd when reachable and fall through to in-process load otherwise.
 
 Examples:
   sqry main              # Search for 'main' in current directory
   sqry test src/         # Search for 'test' in src/
-  sqry --kind function   # Find all functions
+  sqry --kind function .  # Find all functions
   sqry --json main       # Output as JSON
+  sqry --csv --headers main  # Output as CSV with headers
+  sqry --preview main    # Show code context around matches
 
 Usage: sqry [OPTIONS] [PATTERN] [PATH] [COMMAND]
 
 Commands:
-  visualize    Visualize code relationships as diagrams
-  search       Search for symbols by pattern (simple pattern matching)
-  query        Execute AST-aware query (structured queries with boolean logic)
-  graph        Graph-based queries and analysis
-  shell        Start an interactive shell that keeps the session cache warm
-  batch        Execute multiple queries from a batch file using a warm session
-  index        Build symbol index for fast queries
-  lsp          Start the sqry Language Server Protocol endpoint
-  update       Update existing symbol index
-  watch        Watch directory and auto-update index on file changes
-  cache        Manage AST cache
-  completions  Generate shell completions
-  workspace    Manage multi-repository workspaces
-  help         Print this message or the help of the given subcommand(s)
+  search               Search for symbols by name pattern (regex / literal matching)
+  query                Execute a structural AST-aware query (sqry-core query parser)
+  plan-query           Execute a structural query through the sqry-db planner (DB13).
+  hier                 Hierarchical semantic search (RAG-optimized)
+  rules                Execute declarative rule-layer rules and packs (P5 L5).
+  context-propagation  Context-propagation analysis for Go code (T3.7).
+  index                Build symbol index and graph analyses for fast queries
+  update               Update existing symbol index
+  watch                Watch directory and auto-update index on file changes
+  analyze              Build precomputed graph analyses for fast query performance
+  repair               Repair corrupted index by fixing common issues
+  graph                Graph-based queries and analysis
+  duplicates           Find duplicate code in the codebase
+  cycles               Find circular dependencies in the codebase
+  unused               Find unused/dead code in the codebase
+  impact               Analyze what would break if a symbol changes
+  overview             Generate a high-signal orientation report for an unfamiliar repository
+  diff                 Compare semantic changes between git refs
+  explain              Explain a symbol with context and relations
+  shape-match          Find functions structurally similar to a reference function
+  similar              Find symbols similar to a reference symbol
+  subgraph             Extract a focused subgraph around seed symbols
+  visualize            Visualize code relationships as diagrams
+  export               Export the code graph in various formats
+  daemon               Manage the sqry daemon (sqryd).
+  config               Manage graph config (.sqry/graph/config/config.json)
+  cache                Manage AST cache
+  workspace            Manage multi-repository workspaces
+  alias                Manage saved query aliases
+  history              Manage query history
+  completions          Generate shell completions
+  lsp                  Start the sqry Language Server Protocol endpoint
+  mcp                  Configure MCP server integration for AI coding tools
+  doctor               Diagnose the local sqry installation.
+  shell                Start an interactive shell that keeps the session cache warm
+  batch                Execute multiple queries from a batch file using a warm session
+  insights             View usage insights and manage local diagnostics
+  troubleshoot         Generate a troubleshooting bundle for issue reporting
+  help                 Print this message or the help of the given subcommand(s)
 
 Arguments:
   [PATTERN]
           Search pattern (shorthand for 'search' command)
-
-          Treated as a regex by default. Invalid regex returns an error. Use `--exact` for byte-for-byte literal matching against the interned symbol name (same contract as the planner's `name:<literal>` predicate; glob meta is matched as literal characters).
+          
+          Treated as a regex by default. Invalid regex returns an error. Use `--exact` for literal matching against interned symbol names (same contract as the planner's `name:<literal>` predicate; native dot- and Ruby-`#` qualified display names also check graph-canonical `::`, and glob meta is matched as literal characters).
+          
+          This shorthand routes to `sqry search` (regex / literal). It does **not** accept planner predicates like `kind:function` or `name~=/regex/`. For anything beyond a single pattern, use `sqry search` (regex) or `sqry query` (structural planner). On workspaces with >50k symbols, prefer the explicit subcommand so you can scope with `--kind` / `--lang` / `path:` — see `docs/cli/scaling-large-codebases.md`.
 
   [PATH]
           Search path (defaults to current directory)
-          
-          [default: .]
 
 Options:
+  -h, --help
+          Print help (see a summary with '-h')
+
+  -V, --version
+          Print version
+
+Output Control:
+  -c, --count
+          Show count only (number of matches)
+
+  -v, --verbose
+          Show verbose progress output (stages + timing) to stderr.
+          
+          Honoured by the top-level shorthand `sqry <pat>` search path. For the explicit `sqry search` subcommand, use the per-subcommand `--verbose` flag instead — this top-level flag is not propagated to subcommands.
+          
+          As an env-driven equivalent, set `SQRY_LOG=info` (or `RUST_LOG=info`) before invocation; either form enables verbose. Explicit `--verbose` wins over env when both agree, and is required when env is unset.
+
+Match Behaviour:
+  -x, --exact
+          Exact (literal-only) match against interned symbol name (disables regex).
+          
+          Applies to search mode (top-level shorthand and `sqry search`). Contract-bound to the structural query planner's `name:<literal>` predicate (`B1_ALIGN`): `sqry --exact NeedTags .` and `sqry query 'name:NeedTags' .` return identical sets — both look up the pattern against `entry.name` / `entry.qualified_name` byte-for-byte and also check dot- and Ruby-`#` qualified display form as graph-canonical `::`. Synthetic placeholder nodes are excluded. `--exact` does not accept glob meta (`*`, `?`, `[`); they are matched as literal characters. For glob matching against names use `sqry query 'name:parse_*'` instead. For regex matching, omit `--exact` and `sqry search` will treat the pattern as a regex over interned strings.
+
+  -i, --ignore-case
+          Case-insensitive search
+
   -k, --kind <KIND>
           Filter by symbol type (function, class, struct, etc.)
+          
+          Applies to search mode (top-level shorthand and `sqry search`). For structured queries, use `sqry query "kind:function AND ..."` instead.
           
           [possible values: function, class, method, struct, enum, interface, trait, variable, constant, type, module, namespace]
 
   -l, --lang <LANG>
           Filter by programming language
-
-  -i, --ignore-case
-          Case-insensitive search
-
-  -x, --exact
-          Exact (literal-only) match against interned symbol name (disables regex).
-
-          Applies to search mode (top-level shorthand and `sqry search`). Contract-bound to the structural query planner's `name:<literal>` predicate (B1_ALIGN): `sqry --exact NeedTags .` and `sqry query 'name:NeedTags' .` return identical sets — both look up the pattern against `entry.name` / `entry.qualified_name` byte-for-byte (case-sensitive) and exclude synthetic placeholder nodes. `--exact` does not accept glob meta (`*`, `?`, `[`); they are matched as literal characters. For glob matching against names use `sqry query 'name:parse_*'` instead. For regex matching, omit `--exact` and `sqry search` will treat the pattern as a regex over interned strings.
-
-  -c, --count
-          Show count only (number of matches)
-
-      --max-depth <MAX_DEPTH>
-          Maximum directory depth to search
           
-          [default: 32]
+          Applies to search mode (top-level shorthand and `sqry search`). For structured queries, use `sqry query "lang:rust AND ..."` instead.
 
+File Filtering & Traversal:
       --hidden
           Include hidden files and directories
 
       --follow
           Follow symlinks
 
-      --limit <LIMIT>
-          Maximum number of results to return
+      --max-depth <MAX_DEPTH>
+          Maximum directory depth to search
           
-          Limits the output to prevent overwhelming LLM context windows. Defaults: search=100, query=1000, fuzzy=50
+          [default: 32]
 
-      --list-languages
-          List enabled languages and exit
-
-  -t, --text
-          Force text search mode (skip semantic, use ripgrep)
-
-  -s, --semantic
-          Force semantic search mode (skip text fallback)
-
-      --no-fallback
-          Disable automatic fallback to text search
-
-      --context <CONTEXT>
-          Number of context lines for text search results
-          
-          [default: 2]
-
-      --max-text-results <MAX_TEXT_RESULTS>
-          Maximum text search results
-          
-          [default: 1000]
-
-Common Options:
-  -j, --json
-          Output format as JSON
-
-      --no-color
-          Disable colored output
-
-  -h, --help
-          Print help information and exit
-
-  -V, --version
-          Print version information and exit
-
-Search Modes > Fuzzy:
+Search Modes — Fuzzy:
       --fuzzy
           Enable fuzzy search (requires index)
+          
+          Applies to search mode (top-level shorthand and `sqry search`).
 
       --fuzzy-algorithm <ALGORITHM>
           Fuzzy matching algorithm (jaro-winkler or levenshtein)
@@ -129,11 +143,26 @@ Search Modes > Fuzzy:
           
           [default: 1000]
 
-      --fuzzy-stream
-          Enable streaming mode for fuzzy search (shows results incrementally)
-
       --json-stream
           Enable JSON streaming mode for fuzzy search
           
-          Emits results as JSON-lines (newline-delimited JSON). Each line is a StreamEvent with either a partial result or final summary. Requires --fuzzy (fuzzy search) and is inherently JSON output.
+          Emits results as JSON-lines (newline-delimited JSON). Each line is a `StreamEvent` with either a partial result or final summary. Requires --fuzzy (fuzzy search) and is inherently JSON output.
+
+Search Modes:
+  -t, --text
+          Force text search mode (skip semantic, use ripgrep)
+
+  -s, --semantic
+          Structural search over the graph (the default; opposite of --text)
+
+      --context <CONTEXT>
+          Number of context lines for text search results
+          
+          [default: 2]
+
+      --max-text-results <MAX_TEXT_RESULTS>
+          Maximum text search results
+          
+          [default: 1000]
+
 ```

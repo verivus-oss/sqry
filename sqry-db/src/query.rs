@@ -7,6 +7,7 @@
 use std::any::TypeId;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 
@@ -110,22 +111,47 @@ pub trait DerivedQuery: Send + Sync + 'static {
 }
 
 /// A type-erased query cache key combining the query type's stable
-/// `QUERY_TYPE_ID` discriminator and the hash of the postcard encoding of the
-/// input key.
+/// `QUERY_TYPE_ID` discriminator with the postcard encoding of the input key.
 ///
-/// Key equality is **build/process-independent**: both components derive from
+/// Key equality is **build/process-independent**: every component derives from
 /// values that are stable across restarts, enabling PN3's `load_derived` to
 /// rehydrate entries directly into the same cache slots warm-path
 /// `insert_query` and `get` use.
-#[derive(Clone, Eq, PartialEq)]
+///
+/// # Equality is byte-exact, not hash-exact
+///
+/// `key_hash` exists only to give the shard `HashMap` a cheap bucket
+/// distribution. It does **not** decide equality: `PartialEq` compares
+/// `raw_key`, the exact postcard encoding of the input key.
+///
+/// This matters because the cache is type-erased. Two distinct inputs to the
+/// same query collide iff their encodings hash-collide, and both entries hold
+/// the same `Q::Value` type, so a hash-only comparison would downcast
+/// successfully and hand the caller another input's result with nothing
+/// anywhere reporting an anomaly. PN3 persistence would then make that
+/// collision durable across restarts. Comparing the bytes costs one `memcmp`
+/// on the hit path and removes the failure mode entirely.
+///
+/// Because equality is byte-exact, the choice of hasher is a performance
+/// concern only. `DefaultHasher`'s documented instability across Rust releases
+/// is therefore harmless here: `derived.sqry` persists `raw_key_bytes`, never
+/// a hash (see [`crate::persistence::PersistableEntry`]), so a rehydrating
+/// binary recomputes both the hash and the comparison from the same stored
+/// bytes it wrote.
+#[derive(Clone, Eq)]
 pub struct QueryKey {
     /// `Q::QUERY_TYPE_ID` (the stable u32 discriminator from spec §5.1) widened
     /// to `u64`. Shared between warm-path `QueryKey::new::<Q>` and cold-path
     /// `ShardedCache::insert_validated`.
     type_hash: u64,
-    /// Hash of `postcard::to_allocvec(&key)` bytes. Shared between warm-path
-    /// and cold-path for the same reason.
+    /// Hash of `raw_key`. Bucket distribution only — see the type-level note.
     key_hash: u64,
+    /// The postcard encoding of the input key. This is what decides equality.
+    ///
+    /// Shared by `Arc` with [`crate::cache::CachedResult::raw_key_bytes`] on
+    /// the persistent path, so carrying it here costs one pointer per live
+    /// key rather than a second copy of the bytes.
+    raw_key: Arc<[u8]>,
 }
 
 impl QueryKey {
@@ -149,40 +175,94 @@ impl QueryKey {
     /// failure would indicate a serde derive bug and is treated as a
     /// non-recoverable programmer error here.
     pub fn new<Q: DerivedQuery>(key: &Q::Key) -> Self {
-        let type_hash = u64::from(Q::QUERY_TYPE_ID);
-        let key_hash = Self::hash_serialized_key(key);
+        let bytes = postcard::to_allocvec(key).expect(
+            "DerivedQuery::Key requires serde::Serialize to be infallible; \
+             postcard::to_allocvec must not fail",
+        );
+        Self::from_key_bytes(
+            u64::from(Q::QUERY_TYPE_ID),
+            Arc::from(bytes.into_boxed_slice()),
+        )
+    }
+
+    /// Creates a query key from a type discriminator and an already-encoded
+    /// input key.
+    ///
+    /// This is the cold-load constructor: `ShardedCache::insert_validated` has
+    /// no typed `Q` and works from the `raw_key_bytes` read off disk, which
+    /// *are* the same postcard encoding [`QueryKey::new`] produces. Routing
+    /// both paths through here is what keeps warm and cold entries in one key
+    /// space, so the first typed `get::<Q>` after `load_derived` hits.
+    #[must_use]
+    pub fn from_key_bytes(type_hash: u64, raw_key: Arc<[u8]>) -> Self {
+        let mut hasher = std::hash::DefaultHasher::new();
+        raw_key.hash(&mut hasher);
         Self {
             type_hash,
-            key_hash,
+            key_hash: hasher.finish(),
+            raw_key,
         }
     }
 
+    /// The postcard encoding of the input key.
+    ///
+    /// `ShardedCache::insert_query` reuses this rather than re-serialising the
+    /// key it was handed, and stores the same `Arc` on the cache entry.
+    #[must_use]
+    pub fn raw_key(&self) -> &Arc<[u8]> {
+        &self.raw_key
+    }
+
     /// Creates a raw query key for testing purposes.
+    ///
+    /// The encoded key is empty, so two `from_raw` keys are equal iff their
+    /// `(type_hash, key_hash)` pairs match. Use
+    /// [`QueryKey::from_raw_with_bytes`] to construct keys that share a hash
+    /// but differ in their encoding.
     #[doc(hidden)]
     #[must_use]
     pub fn from_raw(type_hash: u64, key_hash: u64) -> Self {
         Self {
             type_hash,
             key_hash,
+            raw_key: Arc::from(Vec::new().into_boxed_slice()),
         }
     }
 
-    /// Hash the postcard encoding of a key. This matches the key-space used by
-    /// `ShardedCache::insert_validated` at cold-load time: both paths hash the
-    /// same byte sequence, so a typed `get::<Q>(&key)` issued immediately after
-    /// `load_derived` will find the rehydrated entry on the **first** call.
-    fn hash_serialized_key<K: serde::Serialize>(key: &K) -> u64 {
-        let bytes = postcard::to_allocvec(key).expect(
-            "DerivedQuery::Key requires serde::Serialize to be infallible; \
-             postcard::to_allocvec must not fail",
-        );
-        let mut hasher = std::hash::DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        hasher.finish()
+    /// Creates a query key with a caller-chosen hash, for testing.
+    ///
+    /// Exists so tests can force the hash collision that byte-exact equality
+    /// is there to survive: two keys with identical `(type_hash, key_hash)`
+    /// and different `raw_key` must not compare equal.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn from_raw_with_bytes(type_hash: u64, key_hash: u64, raw_key: Arc<[u8]>) -> Self {
+        Self {
+            type_hash,
+            key_hash,
+            raw_key,
+        }
+    }
+}
+
+impl PartialEq for QueryKey {
+    /// Byte-exact. The hashes are compared first only because they reject
+    /// non-matching keys in two integer comparisons, before the `memcmp`.
+    fn eq(&self, other: &Self) -> bool {
+        self.type_hash == other.type_hash
+            && self.key_hash == other.key_hash
+            && self.raw_key == other.raw_key
     }
 }
 
 impl Hash for QueryKey {
+    /// Hashes the two `u64`s only, not `raw_key`.
+    ///
+    /// This upholds the `HashMap` requirement (`k1 == k2` implies
+    /// `hash(k1) == hash(k2)`) because equality is a strict refinement of the
+    /// hashed fields: equal keys agree on `type_hash` and `key_hash` by
+    /// definition. Hashing the bytes again here would only re-derive
+    /// `key_hash` at every probe.
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.type_hash.hash(state);
         self.key_hash.hash(state);
@@ -194,6 +274,7 @@ impl std::fmt::Debug for QueryKey {
         f.debug_struct("QueryKey")
             .field("type_hash", &format!("{:#018x}", self.type_hash))
             .field("key_hash", &format!("{:#018x}", self.key_hash))
+            .field("raw_key_len", &self.raw_key.len())
             .finish()
     }
 }

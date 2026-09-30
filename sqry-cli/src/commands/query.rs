@@ -22,7 +22,6 @@ use sqry_core::query::types::{Expr, Value};
 use sqry_core::query::validator::ValidationOptions;
 use sqry_core::relations::CallIdentityMetadata;
 use sqry_core::search::Match as TextMatch;
-use sqry_core::search::classifier::{QueryClassifier, QueryType};
 use sqry_core::search::fallback::{FallbackConfig, FallbackSearchEngine, SearchResults};
 use sqry_core::session::{SessionManager, SessionStats};
 use std::env;
@@ -59,11 +58,6 @@ struct QueryExecution {
     executor: Option<QueryExecutor>,
 }
 
-enum QueryExecutionOutcome {
-    Terminal,
-    Continue(Box<QueryExecution>),
-}
-
 struct NonSessionQueryParams<'a> {
     cli: &'a Cli,
     query_string: &'a str,
@@ -81,8 +75,6 @@ struct QueryExecutionParams<'a> {
     search_path: &'a Path,
     validation_options: ValidationOptions,
     no_parallel: bool,
-    start: Instant,
-    query_type: QueryType,
     variables: Option<&'a std::collections::HashMap<String, String>>,
     /// Provider-acquired graph for the canonical workspace. Threaded into
     /// the semantic execution path so the executor uses
@@ -97,24 +89,6 @@ struct QueryRenderParams<'a> {
     start: Instant,
     relation_context: &'a RelationDisplayContext,
     index_info: IndexDiagnosticInfo,
-}
-
-struct HybridQueryParams<'a> {
-    cli: &'a Cli,
-    query_string: &'a str,
-    search_path: &'a Path,
-    validation_options: ValidationOptions,
-    no_parallel: bool,
-    start: Instant,
-    query_type: QueryType,
-    variables: Option<&'a std::collections::HashMap<String, String>>,
-    /// Provider-acquired graph. SGA03 Major #1 (codex iter2): the CLI
-    /// hybrid path threads this `Arc<CodeGraph>` directly into
-    /// [`FallbackSearchEngine::search_with_preloaded_graph`] (and
-    /// siblings) so the semantic attempt runs through
-    /// [`QueryExecutor::execute_on_preloaded_graph`] instead of the
-    /// executor's `execute_on_graph` cache+disk-load path.
-    acquisition: &'a GraphAcquisition,
 }
 
 /// Run a query command to search for symbols using AST-aware predicates
@@ -541,15 +515,16 @@ fn run_query_non_session(
     // wins over an invalid query — matching the existing precedence
     // tested in `cli_invalid_path_rejected_before_graph_load`.
     //
-    // The probe is gated on `QueryClassifier::classify(query) == Semantic`
-    // so it only fires for queries that pre-SGA03 would have produced an
-    // exit-2 parse error anyway. Hybrid- and Text-classified queries keep
-    // their forgiving fallback semantics (e.g. `unknown_field:value`
-    // falling back to a text search at exit 0) — the parse probe must
-    // not regress that behavior.
-    if QueryClassifier::classify(query_string) == QueryType::Semantic {
-        probe_validate_query_syntax(cli, search_path_path, query_string, validation_options)?;
-    }
+    // Every query is validated. The probe used to be gated on
+    // `QueryClassifier::classify(query) == Semantic`, which meant a query was
+    // validated only when it happened to contain one of 21 literal
+    // substrings; everything else was text-searched at exit 0 with the
+    // parser's diagnostic discarded. A well-formed predicate could be
+    // silently discarded that way, and so could a typo with a ready-made
+    // did-you-mean. `sqry query` is structural, so a query that is not
+    // structural is an error, not a different kind of answer.
+    probe_validate_query_syntax(cli, search_path_path, query_string, validation_options)
+        .map_err(|err| not_a_structural_query(err, query_string))?;
 
     // SGA03: route the read-only graph acquisition through
     // `FilesystemGraphProvider`. The provider canonicalizes the path,
@@ -570,8 +545,6 @@ fn run_query_non_session(
         info: index_info,
     } = resolution;
 
-    let query_type = QueryClassifier::classify(&effective_query);
-
     let start = Instant::now();
     let execution_params = QueryExecutionParams {
         cli,
@@ -579,8 +552,6 @@ fn run_query_non_session(
         search_path: &effective_index_root,
         validation_options,
         no_parallel,
-        start,
-        query_type,
         variables,
         acquisition: &acquisition,
     };
@@ -599,46 +570,22 @@ fn run_query_non_session(
 fn execute_query_mode(
     streams: &mut OutputStreams,
     params: &QueryExecutionParams<'_>,
-) -> Result<QueryExecutionOutcome> {
-    let cli = params.cli;
-    let query_string = params.query_string;
-    let search_path = params.search_path;
-    let validation_options = params.validation_options;
-    let no_parallel = params.no_parallel;
-    let start = params.start;
-    let query_type = params.query_type;
-    let variables = params.variables;
-    let acquisition = params.acquisition;
-
-    if should_use_hybrid_search(cli) {
-        let params = HybridQueryParams {
-            cli,
-            query_string,
-            search_path,
-            validation_options,
-            no_parallel,
-            start,
-            query_type,
-            variables,
-            acquisition,
-        };
-        execute_hybrid_query(streams, &params)
-    } else {
-        execute_semantic_query(
-            cli,
-            query_string,
-            search_path,
-            validation_options,
-            no_parallel,
-            variables,
-            acquisition,
-        )
-    }
+) -> Result<Box<QueryExecution>> {
+    let _ = streams;
+    execute_semantic_query(
+        params.cli,
+        params.query_string,
+        params.search_path,
+        params.validation_options,
+        params.no_parallel,
+        params.variables,
+        params.acquisition,
+    )
 }
 
 fn render_query_outcome(
     streams: &mut OutputStreams,
-    outcome: QueryExecutionOutcome,
+    mut execution: Box<QueryExecution>,
     params: QueryRenderParams<'_>,
 ) -> Result<()> {
     let QueryRenderParams {
@@ -649,7 +596,7 @@ fn render_query_outcome(
         relation_context,
         index_info,
     } = params;
-    if let QueryExecutionOutcome::Continue(mut execution) = outcome {
+    {
         let elapsed = start.elapsed();
         let execution = &mut *execution;
         let diagnostics = QueryDiagnostics::Standard { index_info };
@@ -709,7 +656,7 @@ fn run_query_text_only(
     // discarded `validation_options` nor `no_parallel` hooks are observable
     // here. Strict path validation already ran in `run_query` before
     // dispatching, satisfying the SGA03 invalid-path tightening.
-    let config = build_hybrid_config(cli);
+    let config = build_text_config(cli);
     let mut engine = FallbackSearchEngine::with_config(config)?;
 
     let start = Instant::now();
@@ -746,70 +693,6 @@ fn run_query_text_only(
     Ok(())
 }
 
-fn execute_hybrid_query(
-    streams: &mut OutputStreams,
-    params: &HybridQueryParams<'_>,
-) -> Result<QueryExecutionOutcome> {
-    let cli = params.cli;
-    let query_string = params.query_string;
-    let search_path = params.search_path;
-    let validation_options = params.validation_options;
-    let no_parallel = params.no_parallel;
-    let start = params.start;
-    let query_type = params.query_type;
-    let variables = params.variables;
-    let acquisition = params.acquisition;
-
-    // Resolve variables in the query string for hybrid search.
-    // FallbackSearchEngine doesn't support variable threading, so we resolve
-    // at the AST level and serialize back to a query string before passing it.
-    let effective_query = if let Some(vars) = variables {
-        let ast = QueryParser::parse_query(query_string)
-            .map_err(|e| anyhow::anyhow!("Failed to parse query for variable resolution: {e}"))?;
-        let resolved = sqry_core::query::types::resolve_variables(&ast.root, vars)
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
-        let resolved_ast = sqry_core::query::types::Query {
-            root: resolved,
-            span: ast.span,
-        };
-        std::borrow::Cow::Owned(sqry_core::query::parsed_query::serialize_query(
-            &resolved_ast,
-        ))
-    } else {
-        std::borrow::Cow::Borrowed(query_string)
-    };
-
-    // Use hybrid search engine with plugin-enabled executor
-    // This allows metadata queries like async:true and visibility:public to work
-    let config = build_hybrid_config(cli);
-    let mut executor = create_executor_with_plugins_for_cli(cli, search_path)?
-        .with_validation_options(validation_options);
-    if no_parallel {
-        executor = executor.without_parallel();
-    }
-    let mut engine = FallbackSearchEngine::with_config_and_executor(config.clone(), executor)?;
-
-    emit_search_mode_diagnostic(cli, streams, query_type, &config)?;
-
-    let results = run_hybrid_search(cli, &mut engine, &effective_query, search_path, acquisition)?;
-    let elapsed = start.elapsed();
-
-    match results {
-        SearchResults::Semantic { results, .. } => {
-            let symbols = query_results_to_display_symbols(&results);
-            Ok(QueryExecutionOutcome::Continue(Box::new(QueryExecution {
-                stats: build_query_stats(true, symbols.len()),
-                symbols,
-                executor: None,
-            })))
-        }
-        SearchResults::Text { matches, .. } => {
-            render_text_results(cli, streams, &matches, elapsed)?;
-            Ok(QueryExecutionOutcome::Terminal)
-        }
-    }
-}
-
 fn execute_semantic_query(
     cli: &Cli,
     query_string: &str,
@@ -818,7 +701,7 @@ fn execute_semantic_query(
     no_parallel: bool,
     variables: Option<&std::collections::HashMap<String, String>>,
     acquisition: &GraphAcquisition,
-) -> Result<QueryExecutionOutcome> {
+) -> Result<Box<QueryExecution>> {
     let mut executor = create_executor_with_plugins_for_cli(cli, search_path)?
         .with_validation_options(validation_options);
     if no_parallel {
@@ -838,67 +721,11 @@ fn execute_semantic_query(
     )?;
     let symbols = query_results_to_display_symbols(&query_results);
     let stats = SimpleQueryStats { used_index: true };
-    Ok(QueryExecutionOutcome::Continue(Box::new(QueryExecution {
+    Ok(Box::new(QueryExecution {
         stats,
         symbols,
         executor: Some(executor),
-    })))
-}
-
-fn emit_search_mode_diagnostic(
-    cli: &Cli,
-    streams: &mut OutputStreams,
-    query_type: QueryType,
-    config: &FallbackConfig,
-) -> Result<()> {
-    if !config.show_search_mode || cli.json {
-        return Ok(());
-    }
-
-    let message = match query_type {
-        QueryType::Semantic => "[Semantic search mode]",
-        QueryType::Text => "[Text search mode]",
-        QueryType::Hybrid => "[Hybrid mode: trying semantic first...]",
-    };
-    streams.write_diagnostic(message)?;
-    Ok(())
-}
-
-fn run_hybrid_search(
-    cli: &Cli,
-    engine: &mut FallbackSearchEngine,
-    query_string: &str,
-    search_path: &Path,
-    acquisition: &GraphAcquisition,
-) -> Result<SearchResults> {
-    if cli.text {
-        // Force text-only search — graph is unused on this branch.
-        engine.search_text_only(query_string, search_path)
-    } else if cli.semantic {
-        // Force semantic-only search against the provider-acquired graph.
-        // SGA03 Major #1 (codex iter2): `search_semantic_only` re-enters
-        // the executor's cache+disk-load path; the preloaded variant
-        // forwards the acquired `Arc<CodeGraph>` straight to
-        // `execute_on_preloaded_graph`.
-        engine.search_semantic_only_with_preloaded_graph(
-            query_string,
-            Arc::clone(&acquisition.graph),
-            search_path,
-        )
-    } else {
-        // Automatic hybrid search with fallback — same provider-acquired
-        // graph is reused for both the semantic attempt and any text
-        // fallback that follows.
-        engine.search_with_preloaded_graph(
-            query_string,
-            Arc::clone(&acquisition.graph),
-            search_path,
-        )
-    }
-}
-
-fn build_query_stats(used_index: bool, _symbol_count: usize) -> SimpleQueryStats {
-    SimpleQueryStats { used_index }
+    }))
 }
 
 fn render_text_results(
@@ -961,17 +788,15 @@ fn run_query_with_session(
     // parse / validation errors (exit 2) rather than being masked by
     // a "no graph found" acquisition error (exit 1) when the path is
     // valid but unindexed. Mirrors the probe in `run_query_non_session`,
-    // including the `Semantic`-only classification gate that preserves
-    // the forgiving Hybrid/Text fallback behavior pinned by
-    // `tests/exit_codes.rs`.
-    if QueryClassifier::classify(query_string) == QueryType::Semantic {
-        probe_validate_query_syntax(
-            cli,
-            search_path_path,
-            query_string,
-            build_validation_options(cli),
-        )?;
-    }
+    // which is likewise ungated: session mode classified the same way and
+    // inherited the same silent-degradation defect.
+    probe_validate_query_syntax(
+        cli,
+        search_path_path,
+        query_string,
+        build_validation_options(cli),
+    )
+    .map_err(|err| not_a_structural_query(err, query_string))?;
 
     // SGA03: enforce strict path policy via the shared provider before any
     // session work runs. Session mode keeps its own warm graph cache, so the
@@ -1651,14 +1476,14 @@ fn maybe_emit_debug_cache(
 }
 
 /// Build hybrid search configuration from CLI flags
-fn build_hybrid_config(cli: &Cli) -> FallbackConfig {
+/// Configuration for the explicit `--text` path. There is no fallback to
+/// configure any more: `sqry query` is structural and `--text` selects the
+/// text searcher outright, so the only knobs left are the ones that shape
+/// text output.
+fn build_text_config(cli: &Cli) -> FallbackConfig {
     let mut config = FallbackConfig::from_env();
 
-    // Override with CLI flags
-    if cli.no_fallback {
-        config.fallback_enabled = false;
-    }
-
+    config.fallback_enabled = false;
     config.text_context_lines = cli.context;
     config.max_text_results = cli.max_text_results;
 
@@ -1668,19 +1493,6 @@ fn build_hybrid_config(cli: &Cli) -> FallbackConfig {
     }
 
     config
-}
-
-/// Determine if hybrid search should be used based on CLI flags
-fn should_use_hybrid_search(cli: &Cli) -> bool {
-    // Cache debugging requires direct access to QueryExecutor stats.
-    if should_debug_cache(cli) {
-        return false;
-    }
-
-    // Always use hybrid search (it handles --text, --semantic, and hybrid modes)
-    // The only reason NOT to use it would be if hybrid search is explicitly disabled
-    // via environment variable or if we need old behavior for compatibility
-    true
 }
 
 /// Create a `QueryExecutor` with all built-in plugins registered
@@ -1754,6 +1566,24 @@ pub(crate) fn create_executor_with_plugins_for_cli(
 /// Returns `Ok(())` when the query is well-formed; otherwise returns the
 /// underlying [`QueryError`] / [`RichQueryError`] so the CLI's existing
 /// error-mapping in `main::handle_run_error` produces exit code 2.
+/// A query that does not parse and validate is not a structural query.
+///
+/// The parser already formats a precise diagnostic, including a did-you-mean
+/// for a near-miss field name. That diagnostic used to be discarded and the
+/// input run through the text searcher instead, so a mistake and an honest
+/// empty result were indistinguishable at exit 0. Report it, and name the
+/// command that does what the input actually asks for.
+fn not_a_structural_query(err: anyhow::Error, query_string: &str) -> anyhow::Error {
+    // `context` rather than a formatted `anyhow!`: the typed QueryError or
+    // ValidationError has to stay in the chain, because that is what maps an
+    // invalid query to exit 2. Flattening it into a string made the same
+    // failure exit 1.
+    err.context(format!(
+        "`sqry query` evaluates structural predicates. For a text search over \
+         the same input, run:\n    sqry search {query_string:?}"
+    ))
+}
+
 fn probe_validate_query_syntax(
     cli: &Cli,
     search_path: &Path,
@@ -2809,21 +2639,5 @@ mod tests {
             std::env::remove_var("SQRY_CACHE_DEBUG");
         }
         assert!(!result);
-    }
-
-    // ==========================================================================
-    // build_query_stats tests
-    // ==========================================================================
-
-    #[test]
-    fn test_build_query_stats_with_index() {
-        let stats = build_query_stats(true, 10);
-        assert!(stats.used_index);
-    }
-
-    #[test]
-    fn test_build_query_stats_without_index() {
-        let stats = build_query_stats(false, 10);
-        assert!(!stats.used_index);
     }
 }

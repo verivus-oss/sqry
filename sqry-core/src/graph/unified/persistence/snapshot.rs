@@ -14,7 +14,7 @@ use std::collections::HashMap;
 
 use super::format::{
     FormatVersion, GraphHeader, MAGIC_BYTES_V9, MAGIC_BYTES_V10, MAGIC_BYTES_V11, MAGIC_BYTES_V12,
-    MAGIC_BYTES_V14, MAGIC_BYTES_V16, MAGIC_BYTES_V17, VERSION,
+    MAGIC_BYTES_V14, MAGIC_BYTES_V16, MAGIC_BYTES_V17,
 };
 use super::manifest::ConfigProvenance;
 use crate::config::buffers::max_snapshot_bytes;
@@ -2590,7 +2590,7 @@ fn validate_snapshot_header(
     header: &GraphHeader,
     plugins: Option<&PluginManager>,
 ) -> Result<(), PersistenceError> {
-    if header.version != VERSION
+    if header.version != FormatVersion::V7.as_u32()
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
@@ -2865,7 +2865,7 @@ pub fn validate_snapshot(path: impl AsRef<Path>) -> Result<bool, PersistenceErro
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
     // Validate version: accept V7 (legacy)..V16 (upconvert), V17 (current).
-    if header.version != VERSION
+    if header.version != FormatVersion::V7.as_u32()
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
@@ -2919,7 +2919,7 @@ pub fn load_header_from_path(path: impl AsRef<Path>) -> Result<GraphHeader, Pers
     let header: GraphHeader = postcard::from_bytes(&header_buf)?;
 
     // Validate version: accept V7 (legacy)..V16 (upconvert), V17 (current).
-    if header.version != VERSION
+    if header.version != FormatVersion::V7.as_u32()
         && header.version != FormatVersion::V8.as_u32()
         && header.version != FormatVersion::V9.as_u32()
         && header.version != FormatVersion::V10.as_u32()
@@ -2961,7 +2961,7 @@ pub fn check_config_drift(
 
 #[cfg(test)]
 mod tests {
-    use super::super::format::{MAGIC_BYTES, MAGIC_BYTES_V8};
+    use super::super::format::{MAGIC_BYTES_V7, MAGIC_BYTES_V8};
     use super::super::manifest::{OverrideEntry, OverrideSource};
     use super::*;
     use crate::graph::node::Language;
@@ -3281,7 +3281,7 @@ mod tests {
         let header_bytes = postcard::to_allocvec(&corrupt_header).unwrap();
 
         let mut file = File::create(path).unwrap();
-        file.write_all(MAGIC_BYTES).unwrap();
+        file.write_all(MAGIC_BYTES_V7).unwrap();
         file.write_all(
             &u32::try_from(header_bytes.len())
                 .expect("header fits in u32")
@@ -3313,7 +3313,7 @@ mod tests {
 
         // Write magic + header_len that exceeds remaining file bytes
         let mut file = File::create(path).unwrap();
-        file.write_all(MAGIC_BYTES).unwrap();
+        file.write_all(MAGIC_BYTES_V7).unwrap();
         file.write_all(&999_999u32.to_le_bytes()).unwrap(); // header_len way too big
         file.flush().unwrap();
 
@@ -3338,7 +3338,7 @@ mod tests {
         let header_bytes = postcard::to_allocvec(&header).unwrap();
 
         let mut file = File::create(path).unwrap();
-        file.write_all(MAGIC_BYTES).unwrap();
+        file.write_all(MAGIC_BYTES_V7).unwrap();
         file.write_all(
             &u32::try_from(header_bytes.len())
                 .expect("header fits in u32")
@@ -3520,7 +3520,7 @@ mod tests {
         let header_bytes = postcard::to_allocvec(&corrupt_header).unwrap();
 
         let mut file = File::create(path).unwrap();
-        file.write_all(MAGIC_BYTES).unwrap();
+        file.write_all(MAGIC_BYTES_V7).unwrap();
         file.write_all(
             &u32::try_from(header_bytes.len())
                 .expect("header fits in u32")
@@ -3554,7 +3554,7 @@ mod tests {
         let header_bytes = postcard::to_allocvec(&corrupt_header).unwrap();
 
         let mut file = File::create(path).unwrap();
-        file.write_all(MAGIC_BYTES).unwrap();
+        file.write_all(MAGIC_BYTES_V7).unwrap();
         file.write_all(
             &u32::try_from(header_bytes.len())
                 .expect("header fits in u32")
@@ -3587,7 +3587,7 @@ mod tests {
         let header_bytes = postcard::to_allocvec(&corrupt_header).unwrap();
 
         let mut file = File::create(path).unwrap();
-        file.write_all(MAGIC_BYTES).unwrap();
+        file.write_all(MAGIC_BYTES_V7).unwrap();
         file.write_all(
             &u32::try_from(header_bytes.len())
                 .expect("header fits in u32")
@@ -3643,7 +3643,7 @@ mod tests {
         // Write magic, then a header_len that exceeds MAX_HEADER_BYTES (1 MB)
         let declared_header_len: u32 = (MAX_HEADER_BYTES as u32) + 1;
         let mut file = File::create(path).unwrap();
-        file.write_all(MAGIC_BYTES).unwrap();
+        file.write_all(MAGIC_BYTES_V7).unwrap();
         file.write_all(&declared_header_len.to_le_bytes()).unwrap();
         // Write enough padding so the file is large enough that the
         // "exceeds remaining bytes" check doesn't trigger first
@@ -3679,7 +3679,7 @@ mod tests {
         // guarantees `max_snapshot_bytes() <= MAX_MAX_SNAPSHOT_BYTES < u64::MAX`.
         let declared_data_len: u64 = max_snapshot_bytes() + 1;
         let mut file = File::create(path).unwrap();
-        file.write_all(MAGIC_BYTES).unwrap();
+        file.write_all(MAGIC_BYTES_V7).unwrap();
         file.write_all(
             &u32::try_from(header_bytes.len())
                 .expect("header fits in u32")
@@ -3769,7 +3769,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// Helper: writes a V7-format blob programmatically (no provenance fields
-    /// in the data section, MAGIC_BYTES V7 in the header). This is the
+    /// in the data section, MAGIC_BYTES_V7 V7 in the header). This is the
     /// "frozen V7 writer shim" described in the Phase 1 test plan; it lives
     /// in test code only, not in the production writer path.
     fn write_v7_fixture(path: &Path, graph: &CodeGraph) -> Result<(), PersistenceError> {
@@ -3807,7 +3807,7 @@ mod tests {
         let data_bytes = postcard::to_allocvec(&v7_data)?;
 
         let mut file = File::create(path)?;
-        file.write_all(MAGIC_BYTES)?; // V7 magic
+        file.write_all(MAGIC_BYTES_V7)?; // V7 magic
         file.write_all(
             &u32::try_from(header_bytes.len())
                 .expect("header fits in u32")

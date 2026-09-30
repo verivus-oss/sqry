@@ -85,7 +85,7 @@ impl LanguagePlugin for RubyPlugin {
     }
 
     fn language(&self) -> Language {
-        tree_sitter_ruby::LANGUAGE.into()
+        tree_sitter_ruby_sqry::language()
     }
 
     fn parse_ast(&self, content: &[u8]) -> Result<Tree, ParseError> {
@@ -123,7 +123,7 @@ impl RubyPlugin {
         file_path: &Path,
     ) -> Result<Vec<Scope>, ScopeError> {
         let root_node = tree.root_node();
-        let language = tree_sitter_ruby::LANGUAGE.into();
+        let language = tree_sitter_ruby_sqry::language();
 
         let scope_query = Self::scope_query_source();
 
@@ -251,5 +251,48 @@ mod tests {
 
         let tree = plugin.parse_ast(source).unwrap();
         assert!(!tree.root_node().has_error());
+    }
+
+    /// Regression for the fuzz crash reported as issue #747.
+    ///
+    /// The vendored tree-sitter-ruby external scanner overflowed its 1024-byte
+    /// serialization buffer on heredocs: the bounds guard in `serialize`
+    /// counted two bytes per open heredoc while the loop body wrote four plus
+    /// the identifier, and the identifier length was stored in a single byte.
+    /// `deserialize` then read a different number of bytes than `serialize`
+    /// wrote and aborted the process through `assert(size == length)`. The
+    /// input here is the artifact libFuzzer minimised, not a reconstruction of
+    /// it. The call path is the fuzz target's own: `parse_ast` then
+    /// `extract_scopes`.
+    #[test]
+    fn fuzz_747_heredoc_serialization_does_not_abort() {
+        let data = include_bytes!("../tests/fixtures/fuzz-crash-747-heredoc-serialization.rb");
+        // Pin the artifact by digest. The earlier guard here counted heredoc
+        // openers, which a fixture edited into something that no longer
+        // reproduces the crash would still satisfy.
+        let digest: String = <sha2::Sha256 as sha2::Digest>::digest(data)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest, "dcd9729168e09affb61e54195702126777c03c8edd861308ee54e0450af36e9b",
+            "fixture must remain the libFuzzer artifact, byte for byte"
+        );
+        let plugin = RubyPlugin::default();
+        if let Ok(tree) = plugin.parse_ast(data) {
+            let _ = plugin.extract_scopes(&tree, data, Path::new("fuzz.rb"));
+        }
+    }
+
+    /// The defect independent of the fuzz corpus: a heredoc identifier past the
+    /// 255-character limit the old one-byte length field could represent.
+    #[test]
+    fn heredoc_identifier_past_the_single_byte_length_limit() {
+        let word = "A".repeat(300);
+        let source = format!("<<~{word}\ncontent\n{word}\n");
+        let data = source.as_bytes();
+        let plugin = RubyPlugin::default();
+        let tree = plugin.parse_ast(data).expect("heredoc source should parse");
+        let _ = plugin.extract_scopes(&tree, data, Path::new("heredoc.rb"));
     }
 }

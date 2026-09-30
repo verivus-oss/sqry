@@ -187,9 +187,14 @@ impl CssPlugin {
                 && let Ok(text) = child.utf8_text(content)
             {
                 let selector = text.trim();
-                // Truncate long selectors
-                let display_name = if selector.len() > 50 {
-                    format!("{}...", &selector[..47])
+                // Truncate long selectors. `len()` is a BYTE count and `[..47]`
+                // is a BYTE offset, so a multi-byte character straddling byte 47
+                // panicked: "end byte index 47 is not a char boundary; it is
+                // inside '\u{b9}'". Counting characters is both safe and the
+                // right unit for a display name.
+                let display_name = if selector.chars().count() > 50 {
+                    let head: String = selector.chars().take(47).collect();
+                    format!("{head}...")
                 } else {
                     selector.to_string()
                 };
@@ -630,5 +635,45 @@ mod tests {
         // Should not panic, may return empty or partial results
         assert!(result.is_ok(), "Should handle malformed CSS gracefully");
     }
+
+    /// Regression for the fuzz crash reported as issue #703.
+    ///
+    /// `extract_ruleset_scope` truncated a long selector with `&selector[..47]`
+    /// after testing `selector.len() > 50`. Both are byte quantities, so an
+    /// input whose selector carries a multi-byte character across byte 47
+    /// panicked with "end byte index 47 is not a char boundary". The input here
+    /// is the artifact libFuzzer minimised, not a reconstruction of it, and it
+    /// carries U+00B9 at byte 54. The call path is the fuzz target's own:
+    /// `parse_ast` then `extract_scopes`.
+    #[test]
+    fn fuzz_703_multibyte_selector_does_not_panic() {
+        let data = include_bytes!("../tests/fixtures/fuzz-crash-703-multibyte-selector.css");
+        assert!(
+            String::from_utf8_lossy(data).contains('\u{00b9}'),
+            "fixture must retain the multi-byte character that triggered the crash"
+        );
+        let plugin = CssPlugin::default();
+        if let Ok(tree) = plugin.parse_ast(data) {
+            let _ = plugin.extract_scopes(&tree, data, Path::new("fuzz.css"));
+        }
+    }
+
+    /// The truncation boundary itself, independent of the fuzz corpus: a
+    /// selector whose 48th byte falls inside a multi-byte character.
+    #[test]
+    fn long_selector_with_multibyte_at_the_truncation_boundary() {
+        let css = format!(
+            "{}\u{00b9}{} {{ color: red; }}",
+            "a".repeat(46),
+            "b".repeat(20)
+        );
+        let data = css.as_bytes();
+        let plugin = CssPlugin::default();
+        let tree = plugin
+            .parse_ast(data)
+            .expect("selector text should still parse");
+        let _ = plugin.extract_scopes(&tree, data, Path::new("boundary.css"));
+    }
 }
+
 // Nested conditionals retained for readability in parser traversal
