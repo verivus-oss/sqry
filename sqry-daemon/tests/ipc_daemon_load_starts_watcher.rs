@@ -3,11 +3,15 @@
 //! `daemon/load` must wire the file watcher into the production bootstrap:
 //! after a successful `get_or_load`, the handler calls
 //! [`RebuildDispatcher::start_watching`], so a loaded workspace has a live
-//! `SourceTreeWatcher` and edits trigger a debounced incremental rebuild
-//! without a manual `sqry daemon rebuild`.
+//! `SourceTreeWatcher` and edits trigger a debounced rebuild without a
+//! manual `sqry daemon rebuild`.
 //!
 //! Before the fix, `ensure_watching` was reachable only from test harnesses,
 //! so `daemon/load` left zero watchers resident and graphs drifted silently.
+
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
 
 mod support;
 

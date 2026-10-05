@@ -6,7 +6,7 @@
 //!
 //!   (a) `sqry search <pat> --verbose` emits `[sqry] load snapshot` +
 //!       `complete in ` to stderr.
-//!   (b) `sqry --semantic --exact <pat> --verbose` (shorthand) emits
+//!   (b) `sqry --exact <pat> --verbose` (shorthand) emits
 //!       `[sqry] exact name lookup` to stderr.
 //!   (c) `SQRY_LOG=info sqry --exact <pat>` (no `--verbose`) emits the
 //!       same stages as (a) — env-driven enablement.

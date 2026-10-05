@@ -950,10 +950,11 @@ pub struct ReindexRequiredData {
 pub struct RulesRunData {
     /// Resolved rule-or-pack selector (echoed for traceability).
     ///
-    /// Named `selector` rather than `source` deliberately: `source` is a
-    /// `sqry-mcp-redaction` `PATH_FIELDS` key, so a `source` field would be
-    /// rewritten by the path-redaction walker under the minimal preset and
-    /// the selector echo (e.g. `bbnty.intake`) would not survive verbatim.
+    /// Named `selector` rather than `source`: `source` is a
+    /// `sqry-mcp-redaction` contextual path key (`CONTEXTUAL_PATH_FIELDS`),
+    /// rewritten when its value holds a path separator, so a selector naming
+    /// a TOML pack by path would not be echoed verbatim; a key outside the
+    /// path lists keeps every selector (e.g. `bbnty.intake`) as given.
     pub selector: String,
     /// One result per rule in the loaded pack.
     pub results: Vec<RulesRunResultData>,

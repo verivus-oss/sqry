@@ -188,15 +188,15 @@ fn data_uses_camel_case_envelope() {
         results: Vec::new(),
     };
     let json = serde_json::to_value(&data).expect("serialize data");
-    // `selector` (not `source`) so the minimal redaction preset does not
-    // rewrite the echoed selector through the path-field walker.
+    // `selector` (not `source`): `source` is a contextual path key, which
+    // the walker rewrites when its value is an absolute path.
     assert_eq!(
         json.get("selector").and_then(|v| v.as_str()),
         Some("bbnty.intake")
     );
     assert!(
         json.get("source").is_none(),
-        "must not use PATH_FIELDS `source`"
+        "must not use the contextual path key `source`"
     );
     assert!(
         json.get("results").is_some(),
@@ -281,9 +281,10 @@ fn execute_loaded_rule_emits_witness_for_ok_and_unsupported_for_beside_cache() {
 #[test]
 fn selector_survives_minimal_redaction() {
     // Codex P5U10 finding: a field named `source` collides with a
-    // sqry-mcp-redaction PATH_FIELDS key and would be rewritten by the
-    // path walker under the default `minimal` preset. The `selector` rename
-    // must survive a minimal-preset redaction round-trip verbatim.
+    // sqry-mcp-redaction path key. The walker now rewrites a `source` value
+    // only when it is an absolute path, and the `selector` key is outside
+    // the path lists, so the echo survives a minimal-preset redaction
+    // round-trip verbatim.
     let mut json = serde_json::to_value(RulesRunData {
         selector: "bbnty.intake".to_string(),
         results: Vec::new(),

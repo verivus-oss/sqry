@@ -3,8 +3,9 @@
 //! Loads a real `rust_small` fixture (copied to a temp dir so writes
 //! don't pollute the source tree), boots a [`WorkspaceManager`] +
 //! [`RebuildDispatcher`], and drives two back-to-back
-//! [`RebuildDispatcher::handle_changes`] calls through the real
-//! `build_unified_graph` / `incremental_rebuild` pipeline.
+//! [`RebuildDispatcher::handle_changes`] calls through the real rebuild
+//! pipeline (each iteration builds the whole graph; the mode is the
+//! scheduler's decision).
 //!
 //! Assertions:
 //!
@@ -18,6 +19,7 @@
 //!   dispatches and stays under the configured limit (indirect check
 //!   for reservation leaks).
 
+use sqry_daemon::WorkspaceRosterResolver;
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -178,12 +180,19 @@ impl WorkspaceBuilder for RealGraphBuilder {
     fn build(
         &self,
         workspace_root: &Path,
-    ) -> Result<sqry_core::graph::CodeGraph, sqry_daemon::DaemonError> {
+    ) -> Result<sqry_daemon::BuiltGraph, sqry_daemon::DaemonError> {
         sqry_core::graph::unified::build::build_unified_graph(
             workspace_root,
             &self.plugins,
             &self.cfg,
         )
+        .map(|graph| {
+            sqry_daemon::BuiltGraph::with_manager(
+                graph,
+                &self.plugins,
+                sqry_plugin_registry::RosterSource::Fallback,
+            )
+        })
         .map_err(|e| sqry_daemon::DaemonError::WorkspaceBuildFailed {
             root: workspace_root.to_path_buf(),
             reason: format!("test build: {e}"),
@@ -206,7 +215,7 @@ async fn dispatcher_end_to_end_on_rust_small_fixture() {
     let dispatcher = RebuildDispatcher::new(
         Arc::clone(&manager),
         Arc::clone(&config),
-        Arc::clone(&plugins),
+        Arc::new(WorkspaceRosterResolver::new()),
     );
 
     let key = WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
@@ -308,7 +317,7 @@ async fn dispatcher_end_to_end_on_rust_small_fixture() {
     // independent of the prior graph's epoch — the two graphs are not
     // in an ancestor relationship. Assert publish occurred by
     // verifying the graph is non-empty and has a comparable node
-    // count to the incrementally-updated graph (the tempdir fixture
+    // count to the incremental-mode graph (the tempdir fixture
     // is the same workspace, plus the appended function).
     assert!(
         post_full_graph.node_count() > 0,
@@ -420,7 +429,7 @@ async fn direct_index_then_daemon_load_then_force_rebuild_keeps_filesystem_index
     let dispatcher = RebuildDispatcher::new(
         Arc::clone(&manager),
         Arc::clone(&config),
-        Arc::clone(&plugins),
+        Arc::new(WorkspaceRosterResolver::new()),
     );
     let key = WorkspaceKey::new(root.clone(), ProjectRootMode::WorkspaceFolder, 0);
     let builder = RealGraphBuilder {
@@ -459,6 +468,12 @@ async fn direct_index_then_daemon_load_then_force_rebuild_keeps_filesystem_index
     assert_filesystem_graph_loads(&root, &plugins);
 }
 
+/// A durable persist that fails neither publishes the new graph nor
+/// changes the index it started from: the manifest is the one on disk
+/// before the rebuild, byte for byte, and the snapshot path is as the
+/// failure injection left it (decision D-i7-4: the transaction puts the old
+/// pair back on failure; it used to remove the manifest and leave whatever
+/// it had written).
 #[tokio::test]
 async fn durable_rebuild_persistence_failure_does_not_publish_or_leave_stale_manifest() {
     let tmp = make_tiny_rust_workspace();
@@ -471,7 +486,7 @@ async fn durable_rebuild_persistence_failure_does_not_publish_or_leave_stale_man
     let dispatcher = RebuildDispatcher::new(
         Arc::clone(&manager),
         Arc::clone(&config),
-        Arc::clone(&plugins),
+        Arc::new(WorkspaceRosterResolver::new()),
     );
     let key = WorkspaceKey::new(root.clone(), ProjectRootMode::WorkspaceFolder, 0);
     let builder = RealGraphBuilder {
@@ -495,6 +510,7 @@ async fn durable_rebuild_persistence_failure_does_not_publish_or_leave_stale_man
     .expect("write new source file");
 
     let storage = GraphStorage::new(&root);
+    let manifest_before = fs::read(storage.manifest_path()).expect("manifest before the rebuild");
     fs::remove_file(storage.snapshot_path()).expect("remove snapshot before failure injection");
     fs::create_dir(storage.snapshot_path()).expect("replace snapshot path with directory");
 
@@ -515,15 +531,20 @@ async fn durable_rebuild_persistence_failure_does_not_publish_or_leave_stale_man
     let served_workspace = manager
         .lookup(&key)
         .expect("workspace must remain registered after failed rebuild");
-    let served_graph = served_workspace.graph.load_full();
+    let served_graph = served_workspace.graph();
     assert_eq!(
         served_graph.node_count(),
         prior_node_count,
         "failed durable rebuild must not publish the new graph",
     );
+    assert_eq!(
+        fs::read(storage.manifest_path()).ok(),
+        Some(manifest_before),
+        "a failed durable rebuild leaves the manifest it started from",
+    );
     assert!(
-        !storage.manifest_path().exists(),
-        "failed durable rebuild must remove stale manifest before touching snapshot",
+        storage.snapshot_path().is_dir(),
+        "nothing replaced the snapshot path",
     );
 }
 
@@ -638,7 +659,7 @@ async fn pf08_pf09_query_db_hook_writes_derived_sqry_header_after_publish() {
 // verivus-oss/sqry#358. The load path (`get_or_load`) dispatched the hook,
 // but `RebuildDispatcher::execute_one_rebuild` published a new graph without
 // firing it. The derived-cache save therefore ran only on load: after every
-// `sqry daemon rebuild` / incremental rebuild the snapshot SHA changed while
+// `sqry daemon rebuild` / watcher-driven rebuild the snapshot SHA changed while
 // `derived.sqry` stayed bound to the pre-rebuild SHA, so it was discarded as
 // stale on the next query and never rewritten until the next load. This test
 // drives a real rebuild and asserts derived.sqry is refreshed against the
@@ -664,7 +685,7 @@ async fn rebuild_path_dispatches_query_db_hook_and_refreshes_derived_cache() {
     let dispatcher = RebuildDispatcher::new(
         Arc::clone(&manager),
         Arc::clone(&config),
-        Arc::clone(&plugins),
+        Arc::new(WorkspaceRosterResolver::new()),
     );
     let key = WorkspaceKey::new(root.clone(), ProjectRootMode::WorkspaceFolder, 0);
     let builder = RealGraphBuilder {

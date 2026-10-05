@@ -951,6 +951,7 @@ fn test_e2e_index_status_manifest_only_fallback() -> Result<()> {
         confidence: HashMap::new(),
         last_indexed_commit: None,
         plugin_selection: None,
+        macro_options: None,
     };
 
     // Save manifest

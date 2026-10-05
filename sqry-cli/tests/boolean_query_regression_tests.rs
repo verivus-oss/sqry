@@ -120,7 +120,6 @@ fn test_boolean_and_basic() {
 
     // Query with AND: must match both conditions
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND name~=/public/")
         .arg("--limit")
@@ -163,7 +162,6 @@ fn test_boolean_and_with_regex() {
     )]);
 
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND name~=/^public_/")
         .arg("--limit")
@@ -213,7 +211,6 @@ fn test_boolean_or_basic() {
     )]);
 
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function OR kind:struct")
         .arg("--limit")
@@ -258,7 +255,6 @@ fn test_boolean_not_basic() {
     )]);
 
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND NOT name~=/test/")
         .arg("--limit")
@@ -304,7 +300,6 @@ fn test_boolean_parentheses_grouping() {
 
     // (kind:function OR kind:struct) AND name~=/public/i
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("(kind:function OR kind:struct) AND name~=/public/i")
         .arg("--limit")
@@ -345,7 +340,6 @@ fn test_boolean_regex_pattern() {
     )]);
 
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND name~=/^get_/")
         .arg("--limit")
@@ -392,7 +386,6 @@ fn test_boolean_complex_expression() {
 
     // kind:function AND NOT name~=/test/
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND NOT name~=/test/")
         .arg("--limit")
@@ -477,9 +470,9 @@ fn test_hybrid_mode_preserves_boolean_syntax() {
 }
 
 #[test]
-fn test_semantic_flag_boolean_query() {
+fn test_default_structural_mode_boolean_query() {
     init_logging();
-    log::info!("REGRESSION TEST: --semantic flag with boolean query");
+    log::info!("REGRESSION TEST: default structural mode with boolean query");
 
     let project = create_indexed_project(&[(
         "test.rs",
@@ -489,9 +482,9 @@ fn test_semantic_flag_boolean_query() {
         ",
     )]);
 
-    // Force semantic mode with boolean query
+    // Structural mode is the default (surface parity W4 removed the
+    // no-op `--semantic` flag), so the boolean query runs against the graph.
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND name~=/public/")
         .arg("--limit")
@@ -506,7 +499,7 @@ fn test_semantic_flag_boolean_query() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    log::info!("✓ PASS: --semantic flag works with boolean syntax");
+    log::info!("✓ PASS: default structural mode works with boolean syntax");
 }
 
 #[test]
@@ -878,7 +871,6 @@ fn test_boolean_syntax_error_reporting() {
 
     // Invalid boolean query: AND without right operand
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND")
         .arg("--limit")
@@ -915,7 +907,6 @@ fn test_boolean_regex_security_large_quantifier() {
 
     // Very large quantifier - Rust regex should handle safely (no ReDoS)
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND name~=/[a-z]{10000}/")
         .arg("--limit")

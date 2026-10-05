@@ -686,8 +686,10 @@ pub struct RebuildResult {
     /// graph. Populated only when `status == Completed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files_indexed: Option<u64>,
-    /// `true` when the rebuild was a full (non-incremental) rebuild.
-    /// Populated only when `status == Completed`.
+    /// The mode the request's own iteration ran in: `true` for full,
+    /// `false` for incremental-triggered (full whenever a request merged
+    /// into it forced one). Both modes parse every file and persist a
+    /// complete graph. Populated only when `status == Completed`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub was_full: Option<bool>,
 }

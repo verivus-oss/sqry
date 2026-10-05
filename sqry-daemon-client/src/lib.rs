@@ -46,7 +46,7 @@
 
 pub mod management;
 
-pub use management::{DEFAULT_HELLO_TIMEOUT, DaemonClient};
+pub use management::{DEFAULT_HELLO_TIMEOUT, DaemonClient, RebuildOptions};
 pub use sqry_daemon_protocol::{
     ArtifactId, ArtifactInputDigest, ENVELOPE_VERSION, ListRevisionsRequest, ListRevisionsResult,
     LoadRevisionRequest, LoadRevisionResult, ObjectFormat, PruneRevisionCandidate,
@@ -238,6 +238,29 @@ pub enum ClientError {
         /// JSON-RPC method whose response failed to deserialise.
         method: &'static str,
         /// Underlying decode failure.
+        #[source]
+        source: serde_json::Error,
+    },
+
+    /// A request parameter could not be encoded as JSON, so the request was
+    /// never sent. The cause is a path that is not valid UTF-8: JSON text
+    /// cannot carry it, and `serde_json` refuses it (the `json!` macro
+    /// panics on that refusal, which is why every management call encodes
+    /// its parameters through a fallible helper instead).
+    #[error(
+        "cannot encode `{field}`{} for {method}: {source}; nothing was sent",
+        path.as_deref().map(|path| format!(" ({})", path.display())).unwrap_or_default()
+    )]
+    RequestEncoding {
+        /// JSON-RPC method whose request could not be encoded.
+        method: &'static str,
+        /// The parameter that could not be encoded (`params` for a whole
+        /// typed request).
+        field: &'static str,
+        /// The path that could not be encoded, when the parameter is one
+        /// (shown lossily).
+        path: Option<PathBuf>,
+        /// Underlying encode failure.
         #[source]
         source: serde_json::Error,
     },

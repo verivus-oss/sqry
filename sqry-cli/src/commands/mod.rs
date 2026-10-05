@@ -64,10 +64,10 @@ pub use index::{run_graph_status_with_format, run_index, run_index_status, run_u
 pub use insights::run_insights;
 pub use overview::{OverviewOptions, run_overview};
 pub use planner_query::run_planner_query;
-pub use query::run_query;
+pub use query::{check_query_arguments, run_query};
 pub use repair::run_repair;
 pub use rules::run_rules;
-pub use search::run_search;
+pub use search::{check_search_arguments, run_search};
 pub use shape_match::run_shape_match;
 pub use shell::run_shell;
 pub use similar::run_similar;

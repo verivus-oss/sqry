@@ -23,8 +23,20 @@ fn copy_fixture_dir(relative: &str) -> TempDir {
         .parent()
         .expect("workspace root");
     let source = workspace_root.join(relative);
-    let temp = TempDir::new().expect("create temp dir");
+    let temp = project_tempdir();
     copy_dir(&source, temp.path()).expect("copy fixture");
+    temp
+}
+
+/// A temp directory that is its own project: an empty `.git` marker at
+/// its root stops every ancestor walk there (the provider's index
+/// discovery, `sqry index`'s nested-index check and gitRoot project
+/// resolution), so an index, project marker or repository above `TMPDIR`
+/// can neither be read nor refuse the fixture (decision D-i8-60, the
+/// pattern of `dfdb87944`).
+fn project_tempdir() -> TempDir {
+    let temp = TempDir::new().expect("create temp dir");
+    fs::create_dir(temp.path().join(".git")).expect("project marker");
     temp
 }
 
@@ -149,10 +161,154 @@ fn index_status_transitions_from_missing() {
 
     let reporter = sqry_core::progress::no_op_reporter();
     // Use force=false to test normal lock behavior
-    index::rebuild_index(&session, project.path(), &reporter, false).expect("rebuild");
+    let summary =
+        index::rebuild_index(&session, project.path(), &reporter, false).expect("rebuild");
+    // Invariant I9 (surface parity W4): a missing index is built even
+    // without force.
+    assert!(
+        summary.built,
+        "a missing index must be built even without force"
+    );
 
     let after = index::index_status(&session, None).expect("status");
     assert!(after.exists, "index should exist after rebuild");
+}
+
+/// T7 (surface parity W4, design W4-D5): the `sqry.index` handler honours
+/// `force`. Over an existing index, `force = false` loads the persisted
+/// graph, reports `built == false` and leaves every index byte untouched;
+/// `force = true` rebuilds, reports `built == true` and the manifest's
+/// build site is the handler's. On the pre-change head `force` was bound
+/// under an underscore and both calls rebuilt.
+#[test]
+fn rebuild_index_without_force_loads_the_existing_index_and_writes_nothing() {
+    let project = copy_fixture_dir("sqry-lang-csharp/tests/fixtures/relation_tracking");
+    build_index(project.path());
+    let session = session_for(project.path());
+    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(project.path());
+    let snapshot_before = std::fs::read(storage.snapshot_path()).expect("snapshot bytes");
+    let manifest_before = std::fs::read(storage.manifest_path()).expect("manifest bytes");
+    let site_before = storage
+        .load_manifest()
+        .expect("manifest readable")
+        .build_provenance
+        .build_command;
+    println!("build site before: {site_before}");
+    assert_ne!(
+        site_before, "lsp:rebuild_index",
+        "fixture precondition: built by the CLI"
+    );
+
+    let reporter = sqry_core::progress::no_op_reporter();
+    let loaded = index::rebuild_index(&session, project.path(), &reporter, false)
+        .expect("force = false over an existing index loads it");
+    println!(
+        "force = false: built {} symbols {}",
+        loaded.built, loaded.total_symbols
+    );
+    assert!(
+        !loaded.built,
+        "force = false must not build over an existing index"
+    );
+    assert!(loaded.total_symbols > 0, "the loaded graph has symbols");
+    assert_eq!(
+        std::fs::read(storage.snapshot_path()).expect("snapshot bytes"),
+        snapshot_before,
+        "force = false must leave the snapshot bytes unchanged"
+    );
+    assert_eq!(
+        std::fs::read(storage.manifest_path()).expect("manifest bytes"),
+        manifest_before,
+        "force = false must leave the manifest bytes unchanged"
+    );
+
+    let rebuilt = index::rebuild_index(&session, project.path(), &reporter, true)
+        .expect("force = true rebuilds");
+    println!(
+        "force = true: built {} symbols {}",
+        rebuilt.built, rebuilt.total_symbols
+    );
+    assert!(rebuilt.built, "force = true must build");
+    assert_eq!(
+        rebuilt.total_symbols, loaded.total_symbols,
+        "the same source, the same count"
+    );
+    let site_after = storage
+        .load_manifest()
+        .expect("manifest readable")
+        .build_provenance
+        .build_command;
+    assert_eq!(
+        site_after, "lsp:rebuild_index",
+        "the forced rebuild wrote the manifest"
+    );
+}
+
+/// U4 behaviour leg (surface parity W4 round 2, design W4-D16): the index
+/// existence probe answers through the session's logical workspace. An
+/// indexed source root answers `true`; an unindexed source root answers
+/// `false`; an indexed directory the workspace does not own answers
+/// `false`, so the probe is the classifier's answer and not a bare
+/// filesystem check. The classification of every path is printed and
+/// asserted first, so a fixture whose root is not a source root cannot
+/// pass this vacuously.
+#[test]
+fn persisted_index_exists_answers_through_the_logical_workspace() {
+    let indexed = copy_fixture_dir("sqry-lang-csharp/tests/fixtures/relation_tracking");
+    build_index(indexed.path());
+    let unindexed = copy_fixture_dir("sqry-lang-csharp/tests/fixtures/relation_tracking");
+    let outside = copy_fixture_dir("sqry-lang-csharp/tests/fixtures/relation_tracking");
+    build_index(outside.path());
+
+    let indexed_session = session_for(indexed.path());
+    let unindexed_session = session_for(unindexed.path());
+
+    let indexed_class = indexed_session.classify_path(indexed.path());
+    let unindexed_class = unindexed_session.classify_path(unindexed.path());
+    let outside_class = indexed_session.classify_path(outside.path());
+    println!("classify(indexed root) = {indexed_class:?}");
+    println!("classify(unindexed root) = {unindexed_class:?}");
+    println!("classify(indexed directory outside the workspace) = {outside_class:?}");
+    assert_eq!(
+        indexed_class,
+        sqry_core::workspace::Classification::Source,
+        "instrument: the indexed fixture root is a source root"
+    );
+    assert_eq!(
+        unindexed_class,
+        sqry_core::workspace::Classification::Source,
+        "instrument: the unindexed fixture root is a source root"
+    );
+    assert_eq!(
+        outside_class,
+        sqry_core::workspace::Classification::Unknown,
+        "instrument: the other directory is outside the workspace"
+    );
+    let outside_on_disk = GraphStorage::new(outside.path()).exists();
+    println!("indexed directory outside the workspace has an index on disk: {outside_on_disk}");
+    assert!(
+        outside_on_disk,
+        "instrument: the outside directory really is indexed"
+    );
+
+    let indexed_answer = indexed_session.persisted_index_exists(indexed.path());
+    let unindexed_answer = unindexed_session.persisted_index_exists(unindexed.path());
+    let outside_answer = indexed_session.persisted_index_exists(outside.path());
+    println!("persisted_index_exists(indexed root) = {indexed_answer}");
+    println!("persisted_index_exists(unindexed root) = {unindexed_answer}");
+    println!("persisted_index_exists(outside) = {outside_answer}");
+    assert!(
+        indexed_answer,
+        "an indexed source root has a persisted index"
+    );
+    assert!(
+        !unindexed_answer,
+        "an unindexed source root has no persisted index"
+    );
+    assert!(
+        !outside_answer,
+        "a directory the workspace does not own answers false even when it is indexed"
+    );
 }
 
 #[test]
@@ -221,6 +377,27 @@ fn multi_workspace_index_status_self_heals_corrupt_graph() {
         status.symbol_count.unwrap_or(0) > 0,
         "rebuilt index should contain the fixture symbol"
     );
+
+    // T26 (surface parity W1 round 2, D9, LSP self-heal row, declared
+    // control): the `{}` manifest above is unreadable, so the self-heal
+    // fell back to the fast path; the rewritten manifest must record that
+    // fallback selection, not `None` and not a wider roster.
+    let rewritten = storage
+        .load_manifest()
+        .expect("manifest readable after self-heal");
+    let selection = rewritten
+        .plugin_selection
+        .expect("the self-heal must record a plugin selection");
+    assert_eq!(
+        selection.high_cost_mode.as_deref(),
+        Some("fast_path_default"),
+        "the fallback mode must be recorded"
+    );
+    assert!(
+        !selection.active_plugin_ids.iter().any(|id| id == "json"),
+        "the fallback must be the fast path, got {:?}",
+        selection.active_plugin_ids
+    );
 }
 
 #[test]
@@ -265,7 +442,9 @@ fn rebuild_index_clears_multi_workspace_project_graph_cache() {
     );
 
     fs::write(&source_path, "pub fn after_rebuild() {}\n").expect("rewrite fixture");
-    index::rebuild_index(&session, project.path(), &reporter, false).expect("second rebuild");
+    // Surface parity W4 (W4-D5): `force = false` over an existing index
+    // loads it and builds nothing, so the second rebuild asks for a build.
+    index::rebuild_index(&session, project.path(), &reporter, true).expect("second rebuild");
 
     let after_symbols = document_symbol_names(&session, &source_path);
     assert!(

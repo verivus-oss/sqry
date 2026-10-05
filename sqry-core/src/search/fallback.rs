@@ -361,14 +361,9 @@ impl FallbackSearchEngine {
         })
     }
 
-    /// Force text search only (no semantic attempt)
-    ///
-    /// # Errors
-    ///
-    /// Returns [`anyhow::Error`] when text search is disabled/unavailable or when ripgrep
-    /// returns an error while scanning the requested paths.
-    pub fn search_text_only(&mut self, query: &str, path: &Path) -> Result<SearchResults> {
-        let config = SearchConfig {
+    /// The configuration [`Self::search_text_only`] searches with.
+    fn text_only_search_config(&self) -> SearchConfig {
+        SearchConfig {
             mode: SearchMode::Regex,
             case_insensitive: false,
             include_hidden: false,
@@ -378,7 +373,33 @@ impl FallbackSearchEngine {
             exclude_patterns: Vec::new(),
             before_context: self.config.text_context_lines,
             after_context: self.config.text_context_lines,
-        };
+        }
+    }
+
+    /// Refuse what [`Self::search_text_only`] refuses before it reads a
+    /// file: an unavailable text searcher, and a query its matcher cannot
+    /// compile. Each refusal is the one the search gives, with the same
+    /// context, so a caller that would write before searching can check
+    /// first.
+    ///
+    /// # Errors
+    ///
+    /// The refusal [`Self::search_text_only`] would give for `query`.
+    pub fn check_text_only_query(&self, query: &str) -> Result<()> {
+        self.text_searcher()
+            .context("Text search unavailable in hybrid engine")?;
+        TextSearcher::check_pattern(query, &self.text_only_search_config())
+            .context("Text search failed")
+    }
+
+    /// Force text search only (no semantic attempt)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`anyhow::Error`] when text search is disabled/unavailable or when ripgrep
+    /// returns an error while scanning the requested paths.
+    pub fn search_text_only(&mut self, query: &str, path: &Path) -> Result<SearchResults> {
+        let config = self.text_only_search_config();
 
         let searcher = self
             .text_searcher()

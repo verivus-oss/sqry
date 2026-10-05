@@ -136,6 +136,39 @@ pub struct WorkspaceStatus {
     /// of thousands of distinct workspaces. `None` for anonymous keys.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id_full: Option<String>,
+
+    /// The plugin roster the resident graph was built with, compared
+    /// against the workspace manifest (surface parity W1). `None` when the
+    /// workspace has no published graph (never loaded, or evicted).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin_roster: Option<RosterStatus>,
+}
+
+/// The resident roster of a workspace as `daemon/status` reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RosterStatus {
+    /// Ordered plugin ids the resident graph was built with.
+    pub active_plugin_ids: Vec<String>,
+    /// High-cost mode string the selection was resolved under, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub high_cost_mode: Option<String>,
+    /// `persisted_manifest`, `legacy_manifest` or `fallback`.
+    pub source: String,
+    /// Set when the resident roster and the manifest on disk name
+    /// different plugin sets; absent when they agree, when there is no
+    /// manifest, or when the manifest cannot be compared (unreadable or
+    /// naming an uncompiled id, both of which the serve path refuses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diverges_from_manifest: Option<RosterDivergence>,
+}
+
+/// How a resident roster differs from the manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RosterDivergence {
+    /// Manifest ids the resident graph was not built with.
+    pub missing_plugin_ids: Vec<String>,
+    /// Resident ids the manifest does not record.
+    pub extra_plugin_ids: Vec<String>,
 }
 
 #[cfg(test)]
@@ -167,6 +200,15 @@ mod tests {
                 retry_count: 0,
                 workspace_id_short: None,
                 workspace_id_full: None,
+                plugin_roster: Some(RosterStatus {
+                    active_plugin_ids: vec!["rust".into(), "json".into()],
+                    high_cost_mode: Some("include_all".into()),
+                    source: "persisted_manifest".into(),
+                    diverges_from_manifest: Some(RosterDivergence {
+                        missing_plugin_ids: vec![],
+                        extra_plugin_ids: vec!["json".into()],
+                    }),
+                }),
             }],
             revisions: Vec::new(),
         };
@@ -190,5 +232,9 @@ mod tests {
         .expect("deserialize old workspace status without watching");
 
         assert!(!status.watching);
+        assert!(
+            status.plugin_roster.is_none(),
+            "an old payload without plugin_roster must deserialize to None"
+        );
     }
 }

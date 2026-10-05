@@ -3,8 +3,11 @@
 //! Binds a UDS (Unix) or named pipe (Windows), accepts incoming
 //! connections, and spawns a per-connection handler task. Graceful
 //! shutdown is driven by a [`tokio_util::sync::CancellationToken`];
-//! after cancellation, the loop drains active connections bounded by
-//! [`crate::config::DaemonConfig::ipc_shutdown_drain_secs`].
+//! after cancellation, the loop stops the rebuild work
+//! ([`RebuildDispatcher::shutdown`]: every file watcher is stopped and
+//! every rebuild in flight cancelled), drains active connections bounded
+//! by [`crate::config::DaemonConfig::ipc_shutdown_drain_secs`], and waits
+//! up to [`WATCHER_EXIT_GRACE`] for the watchers to exit.
 //!
 //! The two Unix bind branches (`RuntimeDir` vs `Configured`) implement
 //! the Phase 8a iter-1 B2 fix: runtime-dir paths are auto-managed
@@ -47,6 +50,11 @@ use super::methods::HandlerContext;
 use super::router::run_connection;
 use super::shim_registry::ShimRegistry;
 
+/// How long [`IpcServer::run`] waits, after the drain, for the stopped file
+/// watchers to exit. Each one observes its stop signal within one 100 ms
+/// poll, so this is a bound on a slow scheduler, not an expected wait.
+pub const WATCHER_EXIT_GRACE: Duration = Duration::from_secs(2);
+
 /// Top-level IPC server handle. Construct with [`Self::bind`] then
 /// drive with [`Self::run`].
 pub struct IpcServer {
@@ -65,6 +73,9 @@ pub struct IpcServer {
     active_connections: Arc<AtomicU64>,
     config: Arc<DaemonConfig>,
     daemon_version: &'static str,
+    /// How the daemon-hosted MCP redacts its responses (decision D-i7-5):
+    /// the preset of the daemon's MCP configuration, read once at bind.
+    mcp_redaction: Arc<crate::mcp_host::redaction::McpRedaction>,
 }
 
 impl std::fmt::Debug for IpcServer {
@@ -101,10 +112,18 @@ impl IpcServer {
         // with uninitialized caches — the gap that made `trace_path` /
         // `subgraph` panic and crash the daemon. The inits are idempotent, so
         // repeated binds in the same process are safe.
-        sqry_mcp::init_mcp_caches(
-            &sqry_mcp::McpConfig::load_or_default().map_err(DaemonError::Internal)?,
-        )
-        .map_err(DaemonError::Internal)?;
+        //
+        // The same configuration names the redaction preset the
+        // daemon-hosted MCP applies to every response (decision D-i7-5),
+        // as the standalone server takes its preset from it.
+        let mcp_config = sqry_mcp::McpConfig::load_or_default().map_err(DaemonError::Internal)?;
+        sqry_mcp::init_mcp_caches(&mcp_config).map_err(DaemonError::Internal)?;
+        // An unknown preset, or a redaction configuration the redactor
+        // refuses, refuses the bind rather than serving unredacted (D-i8-20).
+        let mcp_redaction = Arc::new(
+            crate::mcp_host::redaction::McpRedaction::from_mcp_config(&mcp_config)
+                .map_err(DaemonError::Internal)?,
+        );
 
         // Issue #519 part a: pre-validate the resolved socket path against
         // the platform `sockaddr_un.sun_path` limit before any bind attempt,
@@ -134,7 +153,22 @@ impl IpcServer {
             active_connections: Arc::new(AtomicU64::new(0)),
             config,
             daemon_version: env!("CARGO_PKG_VERSION"),
+            mcp_redaction,
         })
+    }
+
+    /// Replace the redaction the daemon-hosted MCP applies (the bound
+    /// default is the daemon's MCP configuration's preset). For tests that
+    /// compare a daemon-hosted payload with the standalone executor's raw
+    /// output ([`crate::mcp_host::redaction::McpRedaction::disabled`]), or
+    /// that pin one preset whatever the environment says.
+    #[must_use]
+    pub fn with_mcp_redaction(
+        mut self,
+        redaction: crate::mcp_host::redaction::McpRedaction,
+    ) -> Self {
+        self.mcp_redaction = Arc::new(redaction);
+        self
     }
 
     /// Returns the bound socket path (Unix) or named-pipe name
@@ -159,7 +193,10 @@ impl IpcServer {
         Arc::clone(&self.shim_registry)
     }
 
-    /// Accept loop. Returns when the shutdown token fires.
+    /// Accept loop. Returns when the shutdown token fires, after the
+    /// rebuild work is stopped ([`RebuildDispatcher::shutdown`]), the open
+    /// connections are drained (bounded by `ipc_shutdown_drain_secs`), and
+    /// the file watchers have exited (bounded by [`WATCHER_EXIT_GRACE`]).
     ///
     /// # Errors
     ///
@@ -178,6 +215,7 @@ impl IpcServer {
             active_connections,
             config,
             daemon_version,
+            mcp_redaction,
             ..
         } = self;
 
@@ -202,6 +240,7 @@ impl IpcServer {
                             shutdown: shutdown.clone(),
                             config: Arc::clone(&config),
                             daemon_version,
+                            mcp_redaction: Arc::clone(&mcp_redaction),
                         };
                         active_connections.fetch_add(1, Ordering::AcqRel);
                         let tracker = Arc::clone(&active_connections);
@@ -228,6 +267,13 @@ impl IpcServer {
             }
         }
 
+        // Stop the rebuild work before the drain (issue #902): every file
+        // watcher is told to stop, so no new rebuild starts while the open
+        // connections drain and no watcher thread is left for the runtime
+        // to wait on at exit, and every rebuild in flight is cancelled, so
+        // its waiting callers are answered (`-32004`) during the drain.
+        dispatcher.shutdown().await;
+
         // Drain phase.
         let deadline = Instant::now() + Duration::from_secs(config.ipc_shutdown_drain_secs);
         while Instant::now() < deadline && active_connections.load(Ordering::Acquire) > 0 {
@@ -239,6 +285,17 @@ impl IpcServer {
                 lingering,
                 "ipc_server: {} connections still active at drain deadline",
                 lingering
+            );
+        }
+        // Each watcher's blocking loop observes its stop signal within one
+        // poll (100 ms); give them a bounded moment to exit and be reaped.
+        if !dispatcher
+            .wait_for_watchers_to_exit(WATCHER_EXIT_GRACE)
+            .await
+        {
+            tracing::warn!(
+                "ipc_server: file watchers still running {} ms after shutdown",
+                WATCHER_EXIT_GRACE.as_millis()
             );
         }
         Ok(())

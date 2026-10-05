@@ -63,13 +63,13 @@ rebuild-internals = []
 
 [dependencies]
 # sqry workspace crates
-sqry-core = { version = "32.0.1", path = "../sqry-core", features = ["rebuild-internals"] }
-sqry-plugin-registry = { version = "32.0.1", path = "../sqry-plugin-registry" }
+sqry-core = { version = "33.0.0", path = "../sqry-core", features = ["rebuild-internals"] }
+sqry-plugin-registry = { version = "33.0.0", path = "../sqry-plugin-registry" }
 # Phase 8c U1: wire types + framing codec extracted into the
 # `sqry-daemon-protocol` leaf crate so shim clients can depend on
 # the wire format without pulling in the full daemon (and creating
 # a `sqry-daemon → sqry-lsp → sqry-daemon` cycle).
-sqry-daemon-protocol = { version = "32.0.1", path = "../sqry-daemon-protocol" }
+sqry-daemon-protocol = { version = "33.0.0", path = "../sqry-daemon-protocol" }
 # Phase 8b Task 7 — the daemon routes 14 MCP tool methods through
 # sqry-mcp's `daemon_adapter::execute_*_for_daemon` wrappers and the
 # shared `build_tool_response` renderer (via `tool_response_json`).
@@ -77,7 +77,10 @@ sqry-daemon-protocol = { version = "32.0.1", path = "../sqry-daemon-protocol" }
 # sqry-mcp-redaction / sqry-plugin-registry — none of which depend on
 # sqry-daemon, so this edge does not create a cycle (verified via
 # `cargo tree -p sqry-daemon`).
-sqry-mcp = { version = "32.0.1", path = "../sqry-mcp" }
+sqry-mcp = { version = "33.0.0", path = "../sqry-mcp" }
+# The daemon-hosted MCP redacts its responses as the standalone server does
+# (`mcp_host::redaction`), with the same redactor.
+sqry-mcp-redaction = { version = "33.0.0", path = "../sqry-mcp-redaction" }
 
 # Phase 8c U10 — the daemon hosts an in-process tower_lsp server on
 # each LSP shim byte-pump connection via
@@ -85,7 +88,7 @@ sqry-mcp = { version = "32.0.1", path = "../sqry-mcp" }
 # depends only on sqry-core / sqry-db /
 # sqry-plugin-registry — none of which depend on sqry-daemon.
 # Confirmed via `cargo tree -p sqry-daemon` post-commit.
-sqry-lsp = { version = "32.0.1", path = "../sqry-lsp" }
+sqry-lsp = { version = "33.0.0", path = "../sqry-lsp" }
 
 # Phase 8c U8 — the daemon hosts an in-process rmcp `ServerHandler`
 # (`mcp_host::DaemonMcpHandler`) on each MCP shim byte-pump connection
@@ -100,7 +103,7 @@ rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
 # The dependency is unconditional rather than feature-gated because the
 # corrective program (PF03A spec) requires the production hook to be present
 # in every production sqryd build, not opt-in.
-sqry-db = { version = "32.0.1", path = "../sqry-db" }
+sqry-db = { version = "33.0.0", path = "../sqry-db" }
 
 # Core utilities
 anyhow = { workspace = true }
@@ -164,6 +167,11 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage
 sd-notify = { workspace = true }
 
 [dev-dependencies]
+# Surface parity W4 (design W4-D13): the one `sqry` binary resolver for
+# tests, `sqry_core::test_support::binaries::sqry_binary`. The helpers in
+# this crate's test tree delegate to it so a run with an out-of-tree
+# `CARGO_TARGET_DIR` finds the binary instead of panicking.
+sqry-core = { path = "../sqry-core", features = ["test-support"] }
 # Phase 8c U15 — MCP host integration tests drive `tools/call` and
 # `tools/list` through an rmcp client (`serve_client` + `Peer` methods).
 # The client feature is NOT needed by the production daemon code (which
@@ -171,7 +179,9 @@ sd-notify = { workspace = true }
 rmcp = { version = "1.7.0", features = ["client", "transport-io"] }
 # Task 9 U14 — e2e smoke tests use `connect_shim_with_timeouts` to perform
 # the shim handshake and assert `daemon_version` against the live sqryd binary.
-sqry-daemon-client = { version = "32.0.1", path = "../sqry-daemon-client" }
+sqry-daemon-client = { version = "33.0.0", path = "../sqry-daemon-client" }
+# The watcher rebuild test writes a real expand cache entry.
+sqry-lang-rust = { version = "33.0.0", path = "../sqry-lang-rust" }
 # Codex gpt-5.4 iter-1 MINOR fix — integration tests that mutate
 # process-global state (current working directory) must run
 # serialised; `serial_test` mirrors sqry-mcp's existing usage
@@ -190,3 +200,8 @@ sha2 = { workspace = true }
 # the canonical helper used by sqry-cli, sqry-lsp, and sqry-core's
 # `test-support` feature for the same purpose.
 assert_cmd = "2.2.2"
+# Surface parity W4 round 2 (design W4-D14): `tests/env_lock_discipline.rs`
+# derives the environment-touching test set from a tree-sitter parse of
+# `sqry-daemon/src`. Both are workspace dependencies already.
+tree-sitter = { workspace = true }
+tree-sitter-rust = { workspace = true }

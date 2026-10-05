@@ -63,7 +63,6 @@ pub fn other_function() -> u32 { 10 }
 fn cli_query_uses_filesystem_acquirer_for_existing_graph() {
     let tmp = build_indexed_workspace();
     Command::new(sqry_bin())
-        .arg("--semantic")
         .arg("query")
         .arg("name:func_alpha")
         .arg(tmp.path())
@@ -79,10 +78,7 @@ fn cli_query_uses_filesystem_acquirer_for_existing_graph() {
 fn cli_query_from_subdir_preserves_ancestor_scope_filter() {
     let tmp = build_indexed_workspace();
     let subdir = tmp.path().join("src");
-    // Use `--semantic` so the CLI does not classify a bare `name:` query as
-    // text-only and short-circuit the filtered-to diagnostic.
     Command::new(sqry_bin())
-        .arg("--semantic")
         .arg("query")
         .arg("name:func_alpha")
         .arg(&subdir)
@@ -103,7 +99,6 @@ fn cli_query_file_scope_preserves_exact_file_filter() {
     let tmp = build_indexed_workspace();
     let file_path = tmp.path().join("src/lib.rs");
     Command::new(sqry_bin())
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function")
         .arg(&file_path)
@@ -191,7 +186,8 @@ fn cli_text_mode_does_not_require_graph() {
 }
 
 /// SGA03 Major #1 (codex iter2) — the default hybrid mode (neither
-/// `--text` nor `--semantic`) must execute the semantic attempt against
+/// `--text`; surface parity W4 removed the no-op `--semantic`) must execute
+/// the semantic attempt against
 /// the provider-acquired graph, not re-load it through the executor's
 /// disk-backed cache. We can't directly observe `execute_on_preloaded_graph`
 /// from the CLI binary, so this test stands as the integration-level
@@ -204,7 +200,7 @@ fn cli_hybrid_mode_executes_against_provider_acquired_graph() {
     let tmp = build_indexed_workspace();
     Command::new(sqry_bin())
         .arg("query")
-        // No `--semantic` / `--text` — hybrid auto-classify path.
+        // No `--text`: the hybrid auto-classify path.
         .arg("name:func_alpha")
         .arg(tmp.path())
         .env("NO_COLOR", "1")
@@ -424,7 +420,7 @@ fn cli_invalid_path_rejected_before_pipeline_dispatch() {
 /// `standalone_mcp_existing_disk_snapshot_uses_provider` test from the
 /// MCP side, but exercises the CLI surface end-to-end.
 ///
-/// We intentionally use the SEMANTIC path (`--semantic`) because
+/// We intentionally use the default structural path (not `--text`) because
 /// `--text` deliberately bypasses the manifest plugin-compat check —
 /// see `cli_text_mode_succeeds_with_incompatible_graph_manifest`.
 #[test]
@@ -451,7 +447,6 @@ fn cli_query_unknown_plugin_id_returns_incompatible_graph() {
     .expect("write manifest");
 
     let output = Command::new(sqry_bin())
-        .arg("--semantic")
         .arg("query")
         .arg("name:func_alpha")
         .arg(tmp.path())
@@ -494,7 +489,6 @@ fn cli_query_json_output_schema_unchanged() {
     let tmp = build_indexed_workspace();
     let output = Command::new(sqry_bin())
         .arg("--json")
-        .arg("--semantic")
         .arg("query")
         .arg("name:func_alpha")
         .arg(tmp.path())
@@ -536,5 +530,166 @@ fn cli_query_json_output_schema_unchanged() {
     assert!(
         stdout.contains("func_alpha"),
         "CLI --json query must still surface func_alpha; stdout={stdout}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Round 3 (design D18, codex Finding 5, verifier R11): the CLI pipeline path
+// loads through the executor's own `get_or_load_graph`, whose build now
+// runs only through the injected `cli_auto_build_hook`, which records the
+// selection it resolved. On `28f7337e1` both executor sites built with the
+// executor's manager through the 4-argument `build_and_persist_graph` and
+// recorded `high_cost_mode: None`.
+// ---------------------------------------------------------------------------
+
+const PLUGIN_ENV: [&str; 5] = [
+    "SQRY_INCLUDE_HIGH_COST",
+    "SQRY_EXCLUDE_HIGH_COST",
+    "SQRY_ENABLE_PLUGINS",
+    "SQRY_DISABLE_PLUGINS",
+    "SQRY_AUTO_INDEX",
+];
+
+/// `sqry query "kind:function | count" <root>` with a clean plugin
+/// environment, standalone.
+fn pipeline_count_query(root: &std::path::Path) -> std::process::Output {
+    let mut command = std::process::Command::new(sqry_bin());
+    command
+        .arg("query")
+        .arg("kind:function | count")
+        .arg(root)
+        .current_dir(root)
+        .env("NO_COLOR", "1")
+        .env("SQRY_FORCE_STANDALONE", "1");
+    for key in PLUGIN_ENV {
+        command.env_remove(key);
+    }
+    command.output().expect("run sqry query")
+}
+
+fn recorded_selection(root: &std::path::Path) -> serde_json::Value {
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &fs::read(root.join(".sqry/graph/manifest.json")).expect("manifest bytes"),
+    )
+    .expect("manifest json");
+    manifest["plugin_selection"].clone()
+}
+
+fn ids_of(selection: &serde_json::Value) -> Vec<String> {
+    selection["active_plugin_ids"]
+        .as_array()
+        .expect("active_plugin_ids array")
+        .iter()
+        .map(|id| id.as_str().expect("id string").to_string())
+        .collect()
+}
+
+fn plugin_ids(plugins: &sqry_core::plugin::PluginManager) -> Vec<String> {
+    plugins
+        .plugins()
+        .iter()
+        .map(|plugin| plugin.metadata().id.to_string())
+        .collect()
+}
+
+/// T36: the pipeline path over a root with no index auto-indexes through
+/// the hook and records `high_cost_mode: fast_path_default` with the
+/// fast-path ids. Red on `28f7337e1`: `high_cost_mode` was `None`.
+#[test]
+fn cli_pipeline_auto_index_records_the_fast_path_selection() {
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().canonicalize().expect("canonical root");
+    fs::create_dir_all(root.join("src")).expect("src dir");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn alpha() -> u32 { beta() }\npub fn beta() -> u32 { 2 }\n",
+    )
+    .expect("write lib.rs");
+    assert!(
+        !root.join(".sqry").exists(),
+        "fixture precondition: no index"
+    );
+
+    let out = pipeline_count_query(&root);
+    assert!(
+        out.status.success(),
+        "the pipeline query over an unindexed root auto-indexes; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let selection = recorded_selection(&root);
+    assert_eq!(
+        selection["high_cost_mode"].as_str(),
+        Some("fast_path_default"),
+        "the pipeline auto-index must record the mode it resolved, not None: {selection}"
+    );
+    assert_eq!(
+        ids_of(&selection),
+        plugin_ids(&sqry_plugin_registry::create_plugin_manager()),
+        "the pipeline auto-index records the fast-path ids"
+    );
+}
+
+/// T37: the pipeline path over an `include_all` manifest beside a snapshot
+/// that cannot load rebuilds through the hook and keeps
+/// `high_cost_mode: include_all`. The ids leg is green on both heads (the
+/// executor's manager was resolved from the same manifest) and is a
+/// declared control; the mode leg is red on `28f7337e1` (`None`).
+#[test]
+fn cli_pipeline_self_heal_keeps_the_include_all_selection() {
+    use sqry_core::graph::unified::persistence::{
+        BuildProvenance, GraphStorage, Manifest, PluginSelectionManifest,
+    };
+
+    let tmp = TempDir::new().expect("tempdir");
+    let root = tmp.path().canonicalize().expect("canonical root");
+    fs::create_dir_all(root.join("src")).expect("src dir");
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn alpha() -> u32 { beta() }\npub fn beta() -> u32 { 2 }\n",
+    )
+    .expect("write lib.rs");
+    fs::write(
+        root.join("config.json"),
+        r#"{"name": "fixture", "nested": {"enabled": true}}"#,
+    )
+    .expect("write config.json");
+    let full_ids = plugin_ids(&sqry_plugin_registry::create_plugin_manager_all());
+    assert!(
+        full_ids.iter().any(|id| id == "json"),
+        "fixture precondition"
+    );
+    let storage = GraphStorage::new(&root);
+    fs::create_dir_all(storage.graph_dir()).expect("graph dir");
+    Manifest::new(
+        root.to_string_lossy().to_string(),
+        1,
+        1,
+        "fixture-sha256",
+        BuildProvenance::new("test", "test:t37"),
+    )
+    .with_plugin_selection(Some(PluginSelectionManifest {
+        active_plugin_ids: full_ids.clone(),
+        high_cost_mode: Some("include_all".to_string()),
+    }))
+    .save(storage.manifest_path())
+    .expect("manifest saved");
+    fs::write(storage.snapshot_path(), b"not a sqry snapshot").expect("corrupt snapshot");
+
+    let out = pipeline_count_query(&root);
+    assert!(
+        out.status.success(),
+        "the pipeline query self-heals over a corrupt snapshot; stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let selection = recorded_selection(&root);
+    assert_eq!(
+        selection["high_cost_mode"].as_str(),
+        Some("include_all"),
+        "the self-heal must carry high_cost_mode through, not drop it to None: {selection}"
+    );
+    assert_eq!(
+        ids_of(&selection),
+        full_ids,
+        "control leg: the self-heal records exactly the ids the manifest recorded"
     );
 }

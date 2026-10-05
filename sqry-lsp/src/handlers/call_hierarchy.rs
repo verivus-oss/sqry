@@ -27,9 +27,35 @@ pub(crate) const UNSAVED_MESSAGE: &str = "Save file to enable call hierarchy";
 pub enum CallHierarchyError {
     IndexMissing,
     InvalidData(String),
-    UnsavedBuffer { uri: Url },
+    UnsavedBuffer {
+        uri: Url,
+    },
     RelationQueryFailed(String),
     SerializationError(String),
+    /// The graph the request needs is refused (a manifest naming a plugin
+    /// id this binary did not compile, a self-heal whose rebuild was
+    /// refused): sent as LSP `RequestFailed` with the refusal's whole text
+    /// and `data.kind`, as every other handler sends it (S4, round 7).
+    Refused {
+        /// The refusal, every cause in its chain.
+        message: String,
+        /// `{"kind": ..., "root": ...}`.
+        data: Option<serde_json::Value>,
+    },
+}
+
+/// An error as the call hierarchy reports it: a refusal
+/// ([`crate::handlers::LspHandlerError::RequestFailed`], from the graph
+/// acquisition) stays a refusal, anything else is a relation query failure;
+/// both carry the whole chain, so no context hides its cause.
+fn handler_error(err: anyhow::Error) -> CallHierarchyError {
+    let message = crate::handlers::render_error_chain(&err);
+    match err.downcast::<crate::handlers::LspHandlerError>() {
+        Ok(crate::handlers::LspHandlerError::RequestFailed { data, .. }) => {
+            CallHierarchyError::Refused { message, data }
+        }
+        _ => CallHierarchyError::RelationQueryFailed(message),
+    }
 }
 
 impl fmt::Display for CallHierarchyError {
@@ -53,6 +79,7 @@ impl fmt::Display for CallHierarchyError {
             CallHierarchyError::SerializationError(reason) => {
                 write!(f, "Serialization error: {reason}")
             }
+            CallHierarchyError::Refused { message, .. } => write!(f, "{message}"),
         }
     }
 }
@@ -120,9 +147,7 @@ pub fn prepare(
     let position = params.text_document_position_params.position;
 
     // Use graph-native node lookup at position
-    let node = session
-        .node_at(uri, position)
-        .map_err(|err| CallHierarchyError::RelationQueryFailed(err.to_string()))?;
+    let node = session.node_at(uri, position).map_err(handler_error)?;
 
     let Some(node) = node else {
         return Ok(None);
@@ -156,9 +181,7 @@ pub fn incoming(
     pause_for_test();
 
     let saved_data = parse_saved_request(&params.item)?;
-    let workspace_root = session
-        .resolve_path(None)
-        .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
+    let workspace_root = session.resolve_path(None).map_err(handler_error)?;
 
     let config = session.config();
     let max_results = config.call_hierarchy.max_results;
@@ -173,7 +196,7 @@ pub fn incoming(
     // the name predicate via the preloaded executor entrypoint.
     let graph = session
         .graph_for_path(&workspace_root)
-        .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
+        .map_err(handler_error)?;
     let Some(graph) = graph else {
         return Ok(CallHierarchyResponse {
             items: Vec::new(),
@@ -186,7 +209,7 @@ pub fn incoming(
     let name_query = format!("name:{}", saved_data.qualified_name);
     let target_results = executor
         .execute_on_preloaded_graph(graph, &name_query, &workspace_root, None)
-        .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
+        .map_err(handler_error)?;
 
     let graph = target_results.graph();
     let all_target_node_ids: Vec<_> = target_results.node_ids().to_vec();
@@ -236,9 +259,7 @@ pub fn outgoing(
     pause_for_test();
 
     let saved_data = parse_saved_request(&params.item)?;
-    let workspace_root = session
-        .resolve_path(None)
-        .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
+    let workspace_root = session.resolve_path(None).map_err(handler_error)?;
 
     let config = session.config();
     let max_results = config.call_hierarchy.max_results;
@@ -248,7 +269,7 @@ pub fn outgoing(
     // the name predicate via the preloaded executor entrypoint.
     let graph = session
         .graph_for_path(&workspace_root)
-        .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
+        .map_err(handler_error)?;
     let Some(graph) = graph else {
         return Ok(CallHierarchyResponse {
             items: Vec::new(),
@@ -262,7 +283,7 @@ pub fn outgoing(
     let name_query = format!("name:{}", saved_data.qualified_name);
     let source_results = executor
         .execute_on_preloaded_graph(graph, &name_query, &workspace_root, None)
-        .map_err(|e| CallHierarchyError::RelationQueryFailed(e.to_string()))?;
+        .map_err(handler_error)?;
 
     // Find the matching node by file path
     let graph = source_results.graph();
@@ -540,8 +561,7 @@ fn build_saved_item(session: &SessionManager, node: &NodeMatch) -> Result<CallHi
     let uri = Url::from_file_path(file_path)
         .map_err(|()| CallHierarchyError::SerializationError("invalid file path".into()))?;
 
-    let range = super::node_range_lsp(session, node)
-        .map_err(|err| CallHierarchyError::RelationQueryFailed(err.to_string()))?;
+    let range = super::node_range_lsp(session, node).map_err(handler_error)?;
 
     let language = node
         .language
@@ -578,8 +598,7 @@ fn build_unsaved_item(session: &SessionManager, node: &NodeMatch) -> Result<Call
     let uri = Url::from_file_path(file_path)
         .map_err(|()| CallHierarchyError::SerializationError("invalid file path".into()))?;
 
-    let range = super::node_range_lsp(session, node)
-        .map_err(|err| CallHierarchyError::RelationQueryFailed(err.to_string()))?;
+    let range = super::node_range_lsp(session, node).map_err(handler_error)?;
 
     let data = CallHierarchyData::Unsaved {
         file_path: file_path.clone(),

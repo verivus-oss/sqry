@@ -107,7 +107,21 @@ pub fn run(_cli: &Cli, action: &DaemonAction) -> Result<()> {
             force,
             timeout,
             json,
-        } => run_daemon_rebuild(path, *force, *timeout, *json),
+            cfg_flags,
+            expand_cache,
+            no_macro_options,
+        } => run_daemon_rebuild(
+            path,
+            *force,
+            *timeout,
+            *json,
+            &sqry_core::graph::unified::build::MacroOptionsRequest::try_from_flags(
+                cfg_flags,
+                expand_cache.as_deref(),
+                *no_macro_options,
+            )
+            .context("sqry daemon rebuild refused the macro build options; nothing was sent")?,
+        ),
         DaemonAction::Reset { path, force } => run_daemon_reset(path, *force),
     }
 }
@@ -429,7 +443,13 @@ fn run_daemon_reset(path: &Path, force: bool) -> Result<()> {
 // rebuild.
 // ---------------------------------------------------------------------------
 
-fn run_daemon_rebuild(path: &Path, force: bool, timeout: u64, json: bool) -> Result<()> {
+fn run_daemon_rebuild(
+    path: &Path,
+    force: bool,
+    timeout: u64,
+    json: bool,
+    macro_request: &sqry_core::graph::unified::build::MacroOptionsRequest,
+) -> Result<()> {
     let config = load_daemon_config()?;
     let socket_path = config.socket_path();
 
@@ -454,6 +474,7 @@ fn run_daemon_rebuild(path: &Path, force: bool, timeout: u64, json: bool) -> Res
         force,
         timeout,
         json,
+        macro_request,
     ))?;
 
     Ok(())
@@ -465,10 +486,19 @@ async fn run_rebuild_request(
     force: bool,
     timeout: u64,
     json: bool,
+    macro_request: &sqry_core::graph::unified::build::MacroOptionsRequest,
 ) -> Result<()> {
     let mut client = sqry_daemon_client::DaemonClient::connect(socket_path)
         .await
         .with_context(|| format!("failed to connect to daemon at {}", socket_path.display()))?;
+    // Surface parity W4 (W4-D8): the three macro fields ride the same
+    // `daemon/rebuild` request; absent fields keep the recorded options.
+    let options = rebuild_options(force, macro_request);
+
+    if timeout == 0 {
+        return send_rebuild_without_waiting(&mut client, canonical_path, &options, json).await;
+    }
+
     let started = Instant::now();
     let poll_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let poll_handle = spawn_rebuild_poll(
@@ -480,7 +510,7 @@ async fn run_rebuild_request(
 
     let result = tokio::time::timeout(
         Duration::from_secs(timeout),
-        client.rebuild(canonical_path, force),
+        client.rebuild_with_options(canonical_path, &options),
     )
     .await;
     poll_done.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -495,7 +525,71 @@ async fn run_rebuild_request(
             message,
             ..
         })) => bail_workspace_not_loaded(canonical_path, &message)?,
+        Ok(Err(e @ sqry_daemon_client::ClientError::RequestEncoding { .. })) => {
+            return Err(anyhow::anyhow!("sqry daemon rebuild refused: {e}"));
+        }
         Ok(Err(e)) => return Err(anyhow::anyhow!("daemon/rebuild failed: {e}")),
+    }
+    Ok(())
+}
+
+/// The `daemon/rebuild` request options a `sqry daemon rebuild` invocation
+/// sends: `force` and the macro request's three components, each sent only
+/// when given (the CLI made `--expand-cache` absolute against the caller's
+/// working directory in [`MacroOptionsRequest::try_from_flags`]).
+///
+/// [`MacroOptionsRequest::try_from_flags`]: sqry_core::graph::unified::build::MacroOptionsRequest::try_from_flags
+fn rebuild_options(
+    force: bool,
+    macro_request: &sqry_core::graph::unified::build::MacroOptionsRequest,
+) -> sqry_daemon_client::RebuildOptions {
+    sqry_daemon_client::RebuildOptions {
+        force,
+        cfg_flags: macro_request.cfg_flags.clone(),
+        expand_cache: macro_request.expand_cache_dir.clone(),
+        reset_macro_options: macro_request.reset,
+    }
+}
+
+/// `--timeout 0`: deliver the request and return without waiting for the
+/// outcome. Delivered means the request frame was written to the daemon
+/// socket without error; the daemon reads a frame whole before acting on
+/// it and does not watch the connection while it rebuilds, so the rebuild
+/// runs to its end after this process exits. The outcome (completed,
+/// refused, failed) is not observed: `sqry daemon status` shows the
+/// workspace state, and the daemon log names a refusal.
+async fn send_rebuild_without_waiting(
+    client: &mut sqry_daemon_client::DaemonClient,
+    canonical_path: &Path,
+    options: &sqry_daemon_client::RebuildOptions,
+    json: bool,
+) -> Result<()> {
+    match client
+        .send_rebuild_with_options(canonical_path, options)
+        .await
+    {
+        Ok(()) => {}
+        Err(e @ sqry_daemon_client::ClientError::RequestEncoding { .. }) => {
+            return Err(anyhow::anyhow!("sqry daemon rebuild refused: {e}"));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!(
+                "daemon/rebuild could not be delivered: {e}"
+            ));
+        }
+    }
+    if json {
+        let out = serde_json::json!({
+            "status": "sent",
+            "message": "rebuild request delivered; not waiting for the outcome (--timeout 0)"
+        });
+        println!("{}", serde_json::to_string_pretty(&out)?);
+    } else {
+        println!(
+            "sqry: rebuild request for {} delivered to the daemon; not waiting for the outcome \
+             (--timeout 0). Check progress with `sqry daemon status`.",
+            canonical_path.display()
+        );
     }
     Ok(())
 }
@@ -601,36 +695,37 @@ fn extract_workspace_state(status: &serde_json::Value, path: &Path) -> Option<St
 }
 
 fn render_rebuild_human(value: &serde_json::Value, path: &Path) {
-    if let Some(r) = value.get("result") {
-        let duration = r
-            .get("duration_ms")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let nodes = r
-            .get("nodes")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let edges = r
-            .get("edges")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let files = r
-            .get("files_indexed")
-            .and_then(serde_json::Value::as_u64)
-            .unwrap_or(0);
-        let was_full = r
-            .get("was_full")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-        let mode = if was_full { "full" } else { "incremental" };
-        eprintln!(
-            "sqry: {mode} rebuild of {} completed in {:.1}s ({nodes} nodes, {edges} edges, {files} files)",
-            path.display(),
-            Duration::from_millis(duration).as_secs_f64()
-        );
+    eprintln!("{}", rebuild_summary(value, path));
+}
+
+/// The line `sqry daemon rebuild` prints for the daemon's answer.
+///
+/// `was_full` is the mode the request's own iteration ran in: `true` for a
+/// full rebuild, `false` for an incremental-triggered one. Both modes parse
+/// every file and persist a complete graph, so the second is reported as an
+/// "incremental-triggered full" rebuild, never as an incremental one.
+fn rebuild_summary(value: &serde_json::Value, path: &Path) -> String {
+    let Some(r) = value.get("result") else {
+        return format!("sqry: rebuild completed for {}", path.display());
+    };
+    let count = |key: &str| r.get(key).and_then(serde_json::Value::as_u64).unwrap_or(0);
+    let was_full = r
+        .get("was_full")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mode = if was_full {
+        "full"
     } else {
-        eprintln!("sqry: rebuild completed for {}", path.display());
-    }
+        "incremental-triggered full"
+    };
+    format!(
+        "sqry: {mode} rebuild of {} completed in {:.1}s ({} nodes, {} edges, {} files)",
+        path.display(),
+        Duration::from_millis(count("duration_ms")).as_secs_f64(),
+        count("nodes"),
+        count("edges"),
+        count("files_indexed")
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -691,11 +786,12 @@ fn run_daemon_start(sqryd_path: Option<&Path>, timeout: u64) -> Result<()> {
 // stop.
 // ---------------------------------------------------------------------------
 
-/// Connect to the daemon, send `daemon/stop`, then poll until the socket
-/// is unreachable or the timeout elapses.
+/// Connect to the daemon, send `daemon/stop`, then wait until the daemon
+/// process has exited ([`wait_for_daemon_exit`]) or the timeout elapses.
 fn run_daemon_stop(timeout: u64) -> Result<()> {
     let config = load_daemon_config()?;
     let socket_path = config.socket_path();
+    let lock_path = config.lock_path();
 
     if !try_connect_sync(&socket_path)? {
         eprintln!("sqry: daemon is not running");
@@ -717,25 +813,56 @@ fn run_daemon_stop(timeout: u64) -> Result<()> {
         let _ = client.stop().await;
 
         let deadline = Instant::now() + Duration::from_secs(timeout);
-        loop {
-            // Sleep first so we let the daemon begin shutdown.
-            tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
-
-            if !try_connect_async(&socket_path).await {
-                break;
-            }
-            if Instant::now() >= deadline {
-                anyhow::bail!(
-                    "daemon did not exit within {timeout} seconds; \
-                     check the daemon log for errors"
-                );
-            }
+        if !wait_for_daemon_exit(&socket_path, &lock_path, deadline).await {
+            anyhow::bail!(
+                "daemon did not exit within {timeout} seconds (a durable persist it had \
+                 begun finishes before it exits); it is still running, so do not start \
+                 another daemon or index its workspaces yet; check the daemon log"
+            );
         }
         anyhow::Ok(())
     })?;
 
     eprintln!("sqry: daemon stopped");
     Ok(())
+}
+
+/// Wait until a stopped daemon's process has exited: its socket no longer
+/// answers and its pidfile lock (`sqryd.lock`) is free. The daemon holds
+/// that lock until the moment it exits, after every durable persist in
+/// flight has finished, so a stop reported here can no longer overlap a
+/// second `sqryd` or a `sqry index` writing the same index. The socket
+/// closes earlier, when the daemon stops serving. Returns `false` when
+/// `deadline` passes first.
+async fn wait_for_daemon_exit(socket_path: &Path, lock_path: &Path, deadline: Instant) -> bool {
+    loop {
+        // Sleep first so we let the daemon begin shutdown.
+        tokio::time::sleep(Duration::from_millis(STOP_POLL_INTERVAL_MS)).await;
+        if !try_connect_async(socket_path).await && daemon_lock_is_free(lock_path) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+    }
+}
+
+/// Whether no process holds the daemon's pidfile lock. A lock file that
+/// does not exist is free. The probe takes the lock without blocking and
+/// releases it at once.
+fn daemon_lock_is_free(lock_path: &Path) -> bool {
+    let file = match std::fs::OpenOptions::new().read(true).open(lock_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            true
+        }
+        Err(_) => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1268,6 +1395,13 @@ fn render_workspace_line_into(ws: &serde_json::Value, out: &mut dyn Write) -> st
         .unwrap_or("Loaded");
     tags.push(state);
 
+    // Surface parity W1: a resident roster that differs from the manifest
+    // is a visible tag, never a silent state.
+    let roster_tag = roster_divergence_tag(ws);
+    if let Some(tag) = roster_tag.as_deref() {
+        tags.push(tag);
+    }
+
     // Surface the most recent error as a stale tag if present.
     if let Some(err_msg) = ws.get("last_error").and_then(serde_json::Value::as_str) {
         // Format the error tag with the reason inline.
@@ -1314,6 +1448,42 @@ fn render_workspace_line_into(ws: &serde_json::Value, out: &mut dyn Write) -> st
         }
     }
     Ok(())
+}
+
+/// Render the `plugin_roster.diverges_from_manifest` block of a
+/// `daemon/status` workspace row as a status tag:
+/// `roster: narrower than manifest (json)` when the resident graph lacks
+/// ids the manifest records, `roster: wider than manifest (json)` when it
+/// has ids the manifest does not, and `roster: diverges from manifest
+/// (missing a; extra b)` when both. `None` when the row carries no
+/// divergence.
+fn roster_divergence_tag(ws: &serde_json::Value) -> Option<String> {
+    let divergence = ws.get("plugin_roster")?.get("diverges_from_manifest")?;
+    let ids = |field: &str| -> Vec<&str> {
+        divergence
+            .get(field)
+            .and_then(serde_json::Value::as_array)
+            .map(|items| items.iter().filter_map(serde_json::Value::as_str).collect())
+            .unwrap_or_default()
+    };
+    let missing = ids("missing_plugin_ids");
+    let extra = ids("extra_plugin_ids");
+    match (missing.is_empty(), extra.is_empty()) {
+        (true, true) => None,
+        (false, true) => Some(format!(
+            "roster: narrower than manifest ({})",
+            missing.join(", ")
+        )),
+        (true, false) => Some(format!(
+            "roster: wider than manifest ({})",
+            extra.join(", ")
+        )),
+        (false, false) => Some(format!(
+            "roster: diverges from manifest (missing {}; extra {})",
+            missing.join(", "),
+            extra.join(", ")
+        )),
+    }
 }
 
 /// Replace the home directory prefix in a path string with `~`.
@@ -1610,7 +1780,81 @@ async fn try_connect_async(socket_path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// Round 7 audit B1: `sqry daemon stop` reports a stop only once the
+    /// daemon process has exited, which its released pidfile lock shows.
+    /// Before the repair it reported one as soon as the socket stopped
+    /// answering, while the process was still finishing a persist, so a
+    /// second `sqryd` or a `sqry index --force` overlapped the first.
+    #[test]
+    fn a_stop_waits_for_the_daemon_lock_after_the_socket_closes() {
+        let tmp = tempfile::tempdir().unwrap();
+        // No socket at all: it is unreachable from the start.
+        let socket = tmp.path().join("sqryd.sock");
+        let lock_path = tmp.path().join("sqryd.lock");
+        let held = std::fs::File::create(&lock_path).unwrap();
+        held.lock().unwrap();
+        let releaser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            held.unlock().unwrap();
+        });
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let started = Instant::now();
+        let exited = rt.block_on(super::wait_for_daemon_exit(
+            &socket,
+            &lock_path,
+            Instant::now() + Duration::from_secs(10),
+        ));
+        let took = started.elapsed();
+        releaser.join().unwrap();
+        assert!(exited, "the wait ends once the lock is released");
+        assert!(
+            took >= Duration::from_millis(700),
+            "the stop was reported after {took:?}, while the daemon still held its lock"
+        );
+        // A lock nobody holds, and one that does not exist, are free.
+        assert!(super::daemon_lock_is_free(&lock_path));
+        assert!(super::daemon_lock_is_free(&tmp.path().join("absent.lock")));
+    }
+
     use super::*;
+
+    /// Round 7 surfaces audit (CL12): the completion line names the mode
+    /// `was_full` reports, and an iteration the scheduler ran in
+    /// incremental-triggered mode is reported as the full rebuild it is,
+    /// never as "incremental". An answer without `was_full` reads as that
+    /// mode; one without a result is the bare line.
+    #[test]
+    fn rebuild_summary_names_both_modes_as_full_rebuilds() {
+        let path = Path::new("/ws");
+        let answer = |was_full: Option<bool>| {
+            let mut result = serde_json::json!({
+                "duration_ms": 1500, "nodes": 3, "edges": 2, "files_indexed": 1
+            });
+            if let Some(was_full) = was_full {
+                result["was_full"] = serde_json::json!(was_full);
+            }
+            serde_json::json!({ "result": result })
+        };
+        assert_eq!(
+            rebuild_summary(&answer(Some(true)), path),
+            "sqry: full rebuild of /ws completed in 1.5s (3 nodes, 2 edges, 1 files)"
+        );
+        for was_full in [Some(false), None] {
+            assert_eq!(
+                rebuild_summary(&answer(was_full), path),
+                "sqry: incremental-triggered full rebuild of /ws completed in 1.5s (3 nodes, 2 \
+                 edges, 1 files)",
+                "{was_full:?}"
+            );
+        }
+        assert_eq!(
+            rebuild_summary(&serde_json::json!({}), path),
+            "sqry: rebuild completed for /ws"
+        );
+    }
 
     // -----------------------------------------------------------------------
     // resolve_sqryd_binary tests.
@@ -1972,6 +2216,73 @@ mod tests {
     /// This test captures rendered output into a `Vec<u8>` buffer via
     /// [`render_workspace_line_into`] so a regression to old field names (e.g.
     /// `path`, `memory_bytes`) would cause the assertions to fail.
+    /// T5b (surface parity W1): the human renderer turns
+    /// `plugin_roster.diverges_from_manifest` into a visible tag in both
+    /// directions and prints no roster tag when the roster matches.
+    #[test]
+    fn daemon_status_human_renders_roster_divergence_tag() {
+        let render = |ws: serde_json::Value| -> String {
+            let mut buf: Vec<u8> = Vec::new();
+            render_workspace_line_into(&ws, &mut buf).expect("render");
+            String::from_utf8(buf).expect("utf-8")
+        };
+        let base = |roster: serde_json::Value| {
+            serde_json::json!({
+                "index_root": "/repos/parity",
+                "state": "Loaded",
+                "pinned": false,
+                "watching": true,
+                "current_bytes": 1024_u64,
+                "high_water_bytes": 2048_u64,
+                "last_good_at": null,
+                "last_error": null,
+                "retry_count": 0,
+                "plugin_roster": roster
+            })
+        };
+
+        let narrower = render(base(serde_json::json!({
+            "active_plugin_ids": ["rust"],
+            "source": "fallback",
+            "diverges_from_manifest": {"missing_plugin_ids": ["json"], "extra_plugin_ids": []}
+        })));
+        assert!(
+            narrower.contains("roster: narrower than manifest (json)"),
+            "narrower roster must be tagged; got:\n{narrower}"
+        );
+
+        let wider = render(base(serde_json::json!({
+            "active_plugin_ids": ["rust", "json"],
+            "source": "fallback",
+            "diverges_from_manifest": {"missing_plugin_ids": [], "extra_plugin_ids": ["json"]}
+        })));
+        assert!(
+            wider.contains("roster: wider than manifest (json)"),
+            "wider roster must be tagged; got:\n{wider}"
+        );
+
+        let both = render(base(serde_json::json!({
+            "active_plugin_ids": ["rust", "sql"],
+            "source": "fallback",
+            "diverges_from_manifest": {"missing_plugin_ids": ["json"], "extra_plugin_ids": ["sql"]}
+        })));
+        assert!(
+            both.contains("roster: diverges from manifest (missing json; extra sql)"),
+            "two-sided divergence must name both lists; got:\n{both}"
+        );
+
+        let matching = render(base(serde_json::json!({
+            "active_plugin_ids": ["rust", "json"],
+            "high_cost_mode": "include_all",
+            "source": "persisted_manifest"
+        })));
+        assert!(
+            !matching.contains("roster:"),
+            "a matching roster must print no roster tag; got:\n{matching}"
+        );
+        assert_eq!(roster_divergence_tag(&base(serde_json::Value::Null)), None);
+    }
+
     #[test]
     fn daemon_status_human_renders_workspace_canonical_fields() {
         let ws = serde_json::json!({

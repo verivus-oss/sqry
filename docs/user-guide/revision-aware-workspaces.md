@@ -13,7 +13,7 @@ queries.
 
 | Term | Meaning |
 |------|---------|
-| Live workspace | The checked-out source root loaded by `sqry daemon load`. It keeps the existing watcher and incremental rebuild behavior. |
+| Live workspace | The checked-out source root loaded by `sqry daemon load`. It keeps the existing watcher, which rebuilds the whole graph when files change. |
 | Revision selector | User input that names `live`, `dirty`, a ref, a commit, a tree, or a managed worktree. |
 | Resolved revision | The pinned result of resolving a selector at load time. A branch or tag is not followed lazily during query. |
 | Immutable revision | A graph built from stable Git object content, normally through raw tree/blob traversal. |

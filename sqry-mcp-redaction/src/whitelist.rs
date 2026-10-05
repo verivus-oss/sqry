@@ -28,6 +28,13 @@ pub const DOCUMENTATION_FIELDS: &[&str] = &[
 ];
 
 /// Path-related fields that should be redacted.
+///
+/// A string under one of these keys is rewritten only when it carries a
+/// path (see `walker`): any non-empty string under a key that always names a
+/// path, and, under a key in [`CONTEXTUAL_PATH_FIELDS`], a value that holds
+/// a path separator and is not one URL of another scheme
+/// ([`crate::rules::path::classify_contextual_value`]). A null, boolean or
+/// number is never a path and is left as it is.
 pub const PATH_FIELDS: &[&str] = &[
     "file_uri",
     "fileUri",
@@ -43,6 +50,33 @@ pub const PATH_FIELDS: &[&str] = &[
     "src",
     "dst",
 ];
+
+/// The [`PATH_FIELDS`] keys whose values are paths in some envelopes and not
+/// in others, so the key alone cannot say that a value is a path. sqry's own
+/// responses put a symbol name under `source` and `target` (`direct_callees`,
+/// `direct_callers`, `semantic_diff` edges) and an enumerated value under
+/// `source` (`query_too_broad` refusals say `static_estimate` or
+/// `runtime_budget`, classpath provenance says `classpath`); a URL of any
+/// scheme may sit under `uri` or `url`.
+///
+/// A value under one of these keys is read by
+/// [`crate::rules::path::classify_contextual_value`]. It carries a path when
+/// it contains a path separator (`/` or `\`) and is not one URL of a scheme
+/// other than `file`. If it is then exactly one absolute path (surrounding
+/// whitespace trimmed), it is redacted as a path key's value is; any other
+/// value with a separator (a relative, home or drive-relative path, a path
+/// after a prefix or with whitespace in it, prose holding a path) is
+/// redacted as a path outside the workspace
+/// ([`crate::rules::path::redact_unanchored_path`]). A value with no
+/// separator, or one URL of another scheme, is walked as an ordinary
+/// string: in-string detection ([`crate::rules::pattern`]) finds nothing in
+/// a value with no separator, so it passes unchanged, and keeps the own
+/// path of a URL of a scheme other than `file` (`https://host/home/u/x`
+/// names no file on this host), redacting only a host path in its query or
+/// parameters (`?f=/home/u/x`). A name that contains a separator
+/// (`/api/users`, `github.com/org/pkg`, `operator/`, a PHP name written
+/// with `\`) cannot be told from a path and is redacted as one.
+pub const CONTEXTUAL_PATH_FIELDS: &[&str] = &["uri", "url", "source", "target", "src", "dst"];
 
 /// Workspace path fields that should be redacted.
 pub const WORKSPACE_FIELDS: &[&str] = &[
@@ -223,6 +257,13 @@ pub fn is_path_field(field: &str) -> bool {
     PATH_FIELDS.contains(&field)
 }
 
+/// Check if a field name is a path field whose values are paths only in
+/// some envelopes ([`CONTEXTUAL_PATH_FIELDS`]).
+#[inline]
+pub fn is_contextual_path_field(field: &str) -> bool {
+    CONTEXTUAL_PATH_FIELDS.contains(&field)
+}
+
 /// Check if a field name is a workspace-related field.
 #[inline]
 pub fn is_workspace_field(field: &str) -> bool {
@@ -252,6 +293,21 @@ mod tests {
         assert!(is_path_field("file_path"));
         assert!(!is_path_field("name"));
         assert!(!is_path_field("kind"));
+    }
+
+    /// Every contextual key is a path key (the walker reaches the
+    /// contextual check only through `is_path_field`), and the keys that
+    /// always name a path are not contextual.
+    #[test]
+    fn contextual_path_fields_are_path_fields() {
+        for field in CONTEXTUAL_PATH_FIELDS {
+            assert!(is_path_field(field), "{field}");
+            assert!(is_contextual_path_field(field), "{field}");
+        }
+        for field in ["path", "file_path", "filePath", "fileUri", "file_uri"] {
+            assert!(is_path_field(field), "{field}");
+            assert!(!is_contextual_path_field(field), "{field}");
+        }
     }
 
     #[test]

@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 use sqry_core::git::WorktreeManager;
 use sqry_core::graph::diff::{DiffSummary, GraphComparator, NodeLocation};
 use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
-use sqry_plugin_registry::create_plugin_manager;
+use sqry_plugin_registry::{PluginSelectionConfig, resolve_workspace_roster};
 
 use crate::protocol::{
     SqryDiffSummary, SqrySemanticDiffParams, SqrySemanticDiffResult, SqrySymbolChange,
@@ -56,21 +56,50 @@ pub fn execute(
         root = root.display()
     );
 
+    // Resolve the roster the repository's manifest records before any
+    // worktree is created (surface parity W1). The temporary worktrees
+    // have no manifest of their own, so the roster is resolved from
+    // `root`, with the fast-path fallback when `root` has no index. This
+    // is a read-only diff, so it refuses a manifest that exists but cannot
+    // be read, exactly as `sqry diff` does (`PluginSelectionMode::Diff`
+    // refuses): a diff over an unknown recorded selection would compare
+    // graphs the index was not built with (round 2, design D9).
+    // A refused roster is a valid request the workspace's state refuses:
+    // LSP `RequestFailed` carrying the registry's own text.
+    let roster =
+        resolve_workspace_roster(&root, &PluginSelectionConfig::default()).map_err(|e| {
+            #[allow(deprecated)]
+            let kind = match &e {
+                sqry_plugin_registry::PluginSelectionError::UnknownPluginIdsCtx { .. }
+                | sqry_plugin_registry::PluginSelectionError::UnknownPluginIds { .. } => {
+                    "workspace_incompatible_graph"
+                }
+                _ => "workspace_not_ready",
+            };
+            anyhow::Error::new(super::LspHandlerError::RequestFailed {
+                message: format!("Failed to resolve the workspace plugin roster: {e}"),
+                data: Some(serde_json::json!({
+                    "kind": kind,
+                    "root": root.display().to_string(),
+                })),
+            })
+        })?;
+    let plugins = roster.plugin_manager;
+
     // Phase 1: Create git worktrees using shared implementation
     let worktree_mgr = WorktreeManager::create(&root, base_ref, target_ref)
         .map_err(|e| anyhow::anyhow!("Failed to create git worktrees: {e}"))?;
 
-    // Phase 2: Build CodeGraphs for both worktrees
-    let plugins = create_plugin_manager();
+    // Phase 2: Build CodeGraphs for both worktrees with that roster.
     let config = BuildConfig::default();
 
     let base_graph = Arc::new(
         build_unified_graph(worktree_mgr.base_path(), &plugins, &config)
-            .map_err(|e| anyhow::anyhow!("Failed to build base graph: {e}"))?,
+            .map_err(|e| anyhow::anyhow!("Failed to build base graph: {e:#}"))?,
     );
     let target_graph = Arc::new(
         build_unified_graph(worktree_mgr.target_path(), &plugins, &config)
-            .map_err(|e| anyhow::anyhow!("Failed to build target graph: {e}"))?,
+            .map_err(|e| anyhow::anyhow!("Failed to build target graph: {e:#}"))?,
     );
 
     // Phase 3: Compare graphs using shared comparator

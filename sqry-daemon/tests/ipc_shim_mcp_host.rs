@@ -26,6 +26,9 @@
 //!    `c64bfbb0d`).
 
 #![allow(clippy::too_many_lines)]
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
 
 mod support;
 
@@ -45,7 +48,7 @@ use sqry_daemon::{
 };
 use sqry_daemon_protocol::{ShimProtocol, ShimRegister, ShimRegisterAck};
 use sqry_mcp::tools_schema::DAEMON_SUPPORTED_TOOL_NAMES;
-use support::ipc::TestServer;
+use support::ipc::{TestIpcClient, TestServer, expect_error, expect_success};
 use tempfile::TempDir;
 use tokio::net::UnixStream;
 
@@ -1044,10 +1047,15 @@ async fn mcp_host_rebuild_index_cache_hit_preserves_built_at() {
         confidence: std::collections::HashMap::new(),
         last_indexed_commit: None,
         plugin_selection: None,
+        macro_options: None,
     };
     manifest
         .save(graph_dir.join("manifest.json"))
         .expect("write seed manifest");
+    // An index is its manifest and its snapshot (round 7: a manifest alone
+    // is built, not reported). The cache-hit leg reads no snapshot bytes,
+    // so a placeholder file is enough.
+    std::fs::write(graph_dir.join("snapshot.sqry"), b"placeholder").expect("write snapshot");
 
     // Issue rebuild_index with `force=false`. Must return the
     // existing manifest's built_at (no fresh `now()`-stamp).
@@ -1264,5 +1272,1240 @@ async fn mcp_host_rebuild_index_symlinked_file_resolves_to_target_parent() {
     );
 
     drop(running);
+    server.stop().await;
+}
+
+// ---------------------------------------------------------------------------
+// Surface parity W4 (design W4-D8) and decision D-i7-2: the daemon-hosted
+// `rebuild_index` accepts `cfg_flags`, `expand_cache` and
+// `reset_macro_options`, builds with them, records them in the index it
+// persists (as the standalone `rebuild_index` and `daemon/rebuild` do),
+// advertises them, and refuses a recorded expand cache directory that no
+// longer exists through `daemon_err_to_mcp`. The oracles are the resident
+// graph's cfg activation, the manifest's record, and the snapshot as the CLI
+// loads it.
+// ---------------------------------------------------------------------------
+
+const W4_CFG_LIB_RS: &str =
+    "#[cfg(test)]\npub fn gated_by_test() -> u32 { 1 }\n\npub fn always_present() -> u32 { 2 }\n";
+
+/// Index `root` in-process with the fast-path roster and `macro_options`,
+/// so the manifest records them (W4-D6) for the daemon host to reuse.
+fn w4_index_with_macro_options(
+    root: &std::path::Path,
+    macro_options: sqry_core::graph::unified::build::MacroBuildOptions,
+) {
+    w4_write_source(root);
+    let plugins = sqry_plugin_registry::create_plugin_manager();
+    let ids: Vec<String> = plugins
+        .plugins()
+        .iter()
+        .map(|plugin| plugin.metadata().id.to_string())
+        .collect();
+    let config = sqry_core::graph::unified::build::BuildConfig {
+        macro_options,
+        ..sqry_core::graph::unified::build::BuildConfig::default()
+    };
+    sqry_core::graph::unified::build::build_and_persist_graph_with_progress(
+        root,
+        &plugins,
+        &config,
+        "test:w4_mcp_host",
+        Some(
+            sqry_core::graph::unified::persistence::PluginSelectionManifest {
+                active_plugin_ids: ids,
+                high_cost_mode: Some("fast_path_default".to_string()),
+            },
+        ),
+        sqry_core::progress::no_op_reporter(),
+    )
+    .expect("index persists");
+}
+
+/// Write the fixture's source (a `cfg(test)` item beside an ungated one)
+/// under `root`, without indexing it.
+fn w4_write_source(root: &std::path::Path) {
+    std::fs::create_dir_all(root.join("src")).expect("src dir");
+    std::fs::write(root.join("src").join("lib.rs"), W4_CFG_LIB_RS).expect("write lib.rs");
+}
+
+fn w4_recorded_macro_options(
+    root: &std::path::Path,
+) -> Option<sqry_core::graph::unified::persistence::MacroOptionsManifest> {
+    sqry_core::graph::unified::persistence::GraphStorage::new(root)
+        .load_manifest()
+        .expect("manifest readable")
+        .macro_options
+}
+
+/// The cfg flags the manifest at `root` records, `None` with no record.
+fn w4_recorded_cfg_flags(root: &std::path::Path) -> Option<Vec<String>> {
+    w4_recorded_macro_options(root).map(|record| record.cfg_flags)
+}
+
+/// The activation `graph` records for the fixture's `cfg(test)` item.
+fn w4_cfg_test_activation(graph: &sqry_core::graph::CodeGraph) -> Option<bool> {
+    let pairs: Vec<(String, Option<bool>)> = graph
+        .macro_metadata()
+        .iter()
+        .filter_map(|(_, meta)| meta.cfg_condition.clone().map(|c| (c, meta.cfg_active)))
+        .collect();
+    println!("cfg pairs: {pairs:?}");
+    pairs
+        .iter()
+        .find(|(condition, _)| condition.contains("test"))
+        .unwrap_or_else(|| {
+            panic!("fixture precondition: the cfg(test) item is recorded: {pairs:?}")
+        })
+        .1
+}
+
+/// The activation the resident graph of `root` records for the fixture's
+/// `cfg(test)` item.
+fn w4_resident_cfg_test_activation(server: &TestServer, root: &std::path::Path) -> Option<bool> {
+    let key = WorkspaceKey::new(root.to_path_buf(), ProjectRootMode::default(), 0);
+    let ws = server
+        .manager
+        .lookup(&key)
+        .expect("workspace resident after rebuild_index");
+    w4_cfg_test_activation(&ws.graph())
+}
+
+/// The activation the snapshot on disk records for the fixture's
+/// `cfg(test)` item, loaded the way the CLI loads it
+/// (`load_from_path` with the plugin manager).
+fn w4_snapshot_cfg_test_activation(root: &std::path::Path) -> Option<bool> {
+    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(root);
+    let plugins = sqry_plugin_registry::create_plugin_manager();
+    let graph = sqry_core::graph::unified::persistence::load_from_path(
+        storage.snapshot_path(),
+        Some(&plugins),
+    )
+    .expect("the snapshot loads");
+    w4_cfg_test_activation(&graph)
+}
+
+async fn w4_real_builder_server() -> TestServer {
+    w4_real_builder_server_with(DaemonConfig::default()).await
+}
+
+async fn w4_real_builder_server_with(config: DaemonConfig) -> TestServer {
+    let resolver = Arc::new(sqry_daemon::WorkspaceRosterResolver::new());
+    let builder: Arc<dyn sqry_daemon::WorkspaceBuilder> = Arc::new(
+        sqry_daemon::RealWorkspaceBuilder::new(Arc::clone(&resolver)),
+    );
+    TestServer::with_builder_config_and_roster(builder, config, resolver).await
+}
+
+fn w4_index_bytes(root: &std::path::Path) -> (Vec<u8>, Vec<u8>) {
+    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(root);
+    (
+        std::fs::read(storage.manifest_path()).expect("manifest bytes"),
+        std::fs::read(storage.snapshot_path()).expect("snapshot bytes"),
+    )
+}
+
+/// The command the manifest at `root` says built the index.
+fn w4_build_command(root: &std::path::Path) -> String {
+    sqry_core::graph::unified::persistence::GraphStorage::new(root)
+        .load_manifest()
+        .expect("manifest readable")
+        .build_provenance
+        .build_command
+}
+
+/// An IPC client past the hello handshake.
+async fn w4_ipc_client(server: &TestServer) -> TestIpcClient {
+    let mut client = TestIpcClient::connect(&server.path).await;
+    client.hello(1).await;
+    client
+}
+
+/// `daemon/rebuild` of `root` with `force: true` and `extra` parameters.
+async fn w4_ipc_rebuild(
+    client: &mut TestIpcClient,
+    root: &std::path::Path,
+    extra: &[(&str, serde_json::Value)],
+) -> sqry_daemon::ipc::protocol::JsonRpcResponse {
+    let mut params = serde_json::Map::from_iter([
+        ("path".to_string(), json!(root.to_string_lossy().as_ref())),
+        ("force".to_string(), json!(true)),
+    ]);
+    for (name, value) in extra {
+        params.insert((*name).to_string(), value.clone());
+    }
+    client
+        .request("daemon/rebuild", serde_json::Value::Object(params))
+        .await
+}
+
+/// The `daemon/status` row of `root`.
+async fn w4_status_row(client: &mut TestIpcClient, root: &std::path::Path) -> serde_json::Value {
+    let resp = client.request("daemon/status", json!({})).await;
+    let status = expect_success(&resp);
+    let wanted = root.to_string_lossy().to_string();
+    status["result"]["workspaces"]
+        .as_array()
+        .and_then(|rows| {
+            rows.iter()
+                .find(|row| row["index_root"].as_str() == Some(wanted.as_str()))
+        })
+        .cloned()
+        .unwrap_or_else(|| panic!("a status row for {wanted}: {status}"))
+}
+
+/// `rebuild_index` with `path`, `force` and `extra` arguments.
+async fn w4_rebuild_index(
+    peer: &rmcp::Peer<rmcp::RoleClient>,
+    root: &std::path::Path,
+    force: bool,
+    extra: &[(&str, serde_json::Value)],
+) -> Result<rmcp::model::CallToolResult, rmcp::ServiceError> {
+    let mut arguments = serde_json::Map::from_iter([
+        ("path".to_string(), json!(root.to_string_lossy().as_ref())),
+        ("force".to_string(), json!(force)),
+    ]);
+    for (name, value) in extra {
+        arguments.insert((*name).to_string(), value.clone());
+    }
+    peer.call_tool(call_tool_request("rebuild_index", arguments))
+        .await
+}
+
+/// The MCP error of a refused tool call.
+fn w4_mcp_error(
+    label: &str,
+    outcome: Result<rmcp::model::CallToolResult, rmcp::ServiceError>,
+) -> rmcp::ErrorData {
+    match outcome {
+        Ok(result) => panic!("{label}: the call must be refused, got {result:?}"),
+        Err(rmcp::ServiceError::McpError(err)) => err,
+        Err(other) => panic!("{label}: expected an MCP error envelope, got {other:?}"),
+    }
+}
+
+/// The message both legs of `rebuild_index` give for macro options beside
+/// `force=false` when a graph exists (on disk or resident): F3.
+fn w4_need_force_message(root: &std::path::Path) -> String {
+    format!(
+        "invalid argument: rebuild_index: cfg_flags, expand_cache and reset_macro_options need \
+         force=true when a graph already exists at {} (an index on disk or a workspace loaded \
+         in the daemon); nothing was built",
+        root.display()
+    )
+}
+
+/// T13 (daemon-hosted leg) and T15 (daemon-hosted `rebuild_index`), as
+/// decision D-i7-2 settles them: the daemon-hosted `rebuild_index` accepts
+/// the macro arguments, builds with them, and records them in the index it
+/// persists. With nothing resident (the load leg) a forced rebuild without
+/// arguments reuses the record and persists the index; resident (the
+/// in-place leg) `cfg_flags` replaces the record; a plain `daemon/rebuild`
+/// afterwards, and a load after an unload, keep what was recorded;
+/// `reset_macro_options` drops the record, and a plain `daemon/rebuild`
+/// after it records nothing. A wrong type and a macro argument beside
+/// `force=false` over an existing index are refused and write nothing.
+/// Before D-i7-2 the daemon-hosted surface built with the options but never
+/// recorded them, so the next plain rebuild dropped them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_host_rebuild_index_accepts_records_and_reuses_the_macro_options() {
+    let server = w4_real_builder_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let canon = canonicalize_path(dir.path()).unwrap();
+    w4_index_with_macro_options(
+        &canon,
+        sqry_core::graph::unified::build::MacroBuildOptions {
+            cfg_flags: vec!["test".to_string()],
+            expand_cache_dir: None,
+        },
+    );
+    assert_eq!(
+        w4_recorded_cfg_flags(&canon),
+        Some(vec!["test".to_string()]),
+        "fixture precondition: the manifest records the flag"
+    );
+    assert_eq!(w4_build_command(&canon), "test:w4_mcp_host");
+    let mut client = w4_ipc_client(&server).await;
+    let (rh, wh) = connect_mcp_shim(&server).await;
+    let running = rmcp::serve_client((), (rh, wh))
+        .await
+        .expect("rmcp initialize");
+    let peer = running.peer();
+    let assert_options = |leg: &str, activation: Option<bool>, flags: Option<Vec<String>>| {
+        assert_eq!(
+            w4_resident_cfg_test_activation(&server, &canon),
+            activation,
+            "{leg}: the resident graph"
+        );
+        assert_eq!(
+            w4_snapshot_cfg_test_activation(&canon),
+            activation,
+            "{leg}: the snapshot the CLI loads"
+        );
+        assert_eq!(
+            w4_recorded_cfg_flags(&canon),
+            flags,
+            "{leg}: the manifest's record"
+        );
+    };
+
+    // Load leg, no arguments: the record is reused and the index persisted.
+    let result = w4_rebuild_index(peer, &canon, true, &[])
+        .await
+        .expect("rebuild_index without macro arguments must succeed");
+    assert!(result.is_error != Some(true), "{result:?}");
+    assert_eq!(
+        w4_build_command(&canon),
+        "daemon:rebuild_index",
+        "the daemon-hosted rebuild_index persisted the index"
+    );
+    assert_options("load leg", Some(true), Some(vec!["test".to_string()]));
+
+    // In-place leg: explicit flags replace the record.
+    let result = w4_rebuild_index(peer, &canon, true, &[("cfg_flags", json!(["feature=w4"]))])
+        .await
+        .expect("rebuild_index with cfg_flags must succeed");
+    assert!(result.is_error != Some(true), "{result:?}");
+    assert_options(
+        "in-place leg",
+        Some(false),
+        Some(vec!["feature=w4".to_string()]),
+    );
+
+    // A plain `daemon/rebuild` reuses what rebuild_index recorded.
+    let resp = w4_ipc_rebuild(&mut client, &canon, &[]).await;
+    expect_success(&resp);
+    assert_options(
+        "plain daemon/rebuild",
+        Some(false),
+        Some(vec!["feature=w4".to_string()]),
+    );
+
+    // So does a load after an unload (the load leg, no arguments).
+    let resp = client
+        .request(
+            "daemon/unload",
+            json!({ "index_root": canon.to_string_lossy().as_ref() }),
+        )
+        .await;
+    expect_success(&resp);
+    let result = w4_rebuild_index(peer, &canon, true, &[])
+        .await
+        .expect("rebuild_index after an unload must succeed");
+    assert!(result.is_error != Some(true), "{result:?}");
+    assert_options(
+        "load leg after an unload",
+        Some(false),
+        Some(vec!["feature=w4".to_string()]),
+    );
+
+    // A wrong type is refused, never coerced or dropped; a macro argument
+    // beside force=false over an existing index reaches no build and is
+    // refused instead of being dropped. Neither writes anything.
+    let index_before = w4_index_bytes(&canon);
+    let refused = w4_rebuild_index(peer, &canon, true, &[("cfg_flags", json!("test"))]).await;
+    assert!(
+        refused.is_err(),
+        "a string cfg_flags must be refused: {refused:?}"
+    );
+    let err = w4_mcp_error(
+        "reset without force",
+        w4_rebuild_index(peer, &canon, false, &[("reset_macro_options", json!(true))]).await,
+    );
+    assert_eq!(err.message, w4_need_force_message(&canon));
+    assert_eq!(
+        w4_index_bytes(&canon),
+        index_before,
+        "the refusals write nothing"
+    );
+
+    // Reset builds without any options and drops the record.
+    let result = w4_rebuild_index(peer, &canon, true, &[("reset_macro_options", json!(true))])
+        .await
+        .expect("rebuild_index with reset must succeed");
+    assert!(result.is_error != Some(true), "{result:?}");
+    assert_options("reset", None, None);
+
+    // A plain `daemon/rebuild` after the reset records nothing again.
+    let resp = w4_ipc_rebuild(&mut client, &canon, &[]).await;
+    expect_success(&resp);
+    assert_options("plain daemon/rebuild after the reset", None, None);
+
+    drop(running);
+    drop(client);
+    server.stop().await;
+}
+
+/// T13 (schema, daemon host): `tools/list` on the daemon host advertises
+/// the three arguments on `rebuild_index`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_host_tools_list_advertises_the_rebuild_index_macro_arguments() {
+    let server = TestServer::new().await;
+    let (rh, wh) = connect_mcp_shim(&server).await;
+    let running = rmcp::serve_client((), (rh, wh))
+        .await
+        .expect("rmcp initialize");
+    let list_result = running
+        .peer()
+        .list_tools(None)
+        .await
+        .expect("list_tools must succeed");
+    let tool = list_result
+        .tools
+        .iter()
+        .find(|t| t.name.as_ref() == "rebuild_index")
+        .expect("rebuild_index advertised");
+    let properties = tool.input_schema["properties"]
+        .as_object()
+        .expect("rebuild_index schema has properties");
+    let mut names: Vec<&String> = properties.keys().collect();
+    names.sort();
+    println!("rebuild_index schema properties (daemon host): {names:?}");
+    for name in [
+        "cfg_flags",
+        "expand_cache",
+        "reset_macro_options",
+        "path",
+        "force",
+    ] {
+        assert!(
+            properties.contains_key(name),
+            "rebuild_index schema must advertise {name}: {names:?}"
+        );
+    }
+    assert_eq!(properties.len(), 5, "exactly the five arguments: {names:?}");
+
+    drop(running);
+    server.stop().await;
+}
+
+/// T14 (daemon-hosted `rebuild_index` leg): a recorded expand cache
+/// directory that no longer exists is refused with the standalone server's
+/// envelope (S10, round 7: the `-32022` kind, the directory, its origin and
+/// the `rebuild_index` arguments that drop the record); nothing on disk
+/// changes; `reset_macro_options` is the way out.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_host_rebuild_index_refuses_a_missing_recorded_expand_cache() {
+    let server = w4_real_builder_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let canon = canonicalize_path(dir.path()).unwrap();
+    let cache = canon.join("expand-cache");
+    std::fs::create_dir_all(&cache).unwrap();
+    w4_index_with_macro_options(
+        &canon,
+        sqry_core::graph::unified::build::MacroBuildOptions {
+            cfg_flags: vec!["test".to_string()],
+            expand_cache_dir: Some(cache.clone()),
+        },
+    );
+    let recorded_dir = w4_recorded_macro_options(&canon)
+        .and_then(|record| record.expand_cache_dir)
+        .expect("the manifest names the expand cache directory");
+    assert_eq!(std::path::Path::new(&recorded_dir), cache.as_path());
+    std::fs::remove_dir_all(&cache).unwrap();
+    let index_before = w4_index_bytes(&canon);
+    let path_arg = json!(canon.to_string_lossy().as_ref());
+
+    let (rh, wh) = connect_mcp_shim(&server).await;
+    let running = rmcp::serve_client((), (rh, wh))
+        .await
+        .expect("rmcp initialize");
+
+    let refused = running
+        .peer()
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
+                ("path".to_string(), path_arg.clone()),
+                ("force".to_string(), json!(true)),
+            ]),
+        ))
+        .await;
+    let err = match refused {
+        Err(err) => err,
+        Ok(result) => panic!("a missing recorded expand cache must be refused: {result:?}"),
+    };
+    let rendered = format!("{err:?}");
+    println!("refusal: {rendered}");
+    let rmcp::ServiceError::McpError(err) = err else {
+        panic!("expected a JSON-RPC error: {rendered}");
+    };
+    // The standalone server's envelope, its remedy echoing the request's
+    // own `path` so it can be sent back as it stands.
+    let shared = sqry_mcp::error::rpc_error_to_mcp(
+        sqry_mcp::error::RpcError::rebuild_macro_options_unavailable(
+            &canon,
+            &cache,
+            sqry_mcp::error::ExpandCacheOrigin::Recorded,
+        )
+        .with_reset_path(path_arg.as_str().expect("a string path")),
+    );
+    assert_eq!(
+        (err.code, err.message.as_ref(), &err.data),
+        (shared.code, shared.message.as_ref(), &shared.data),
+        "the standalone server's envelope"
+    );
+    let reset = &err.data.as_ref().expect("data")["details"]["reset_arguments"];
+    assert_eq!(
+        reset,
+        &json!({ "path": path_arg, "force": true, "reset_macro_options": true }),
+        "the remedy's arguments are the request's own path, force and the reset"
+    );
+    assert!(
+        err.message.contains(&recorded_dir) && err.message.contains("reset_macro_options"),
+        "the message names the directory and the way out: {}",
+        err.message
+    );
+    assert_eq!(
+        w4_index_bytes(&canon),
+        index_before,
+        "the index bytes are untouched"
+    );
+
+    // The way out on the same surface.
+    let result = running
+        .peer()
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
+                ("path".to_string(), path_arg),
+                ("force".to_string(), json!(true)),
+                ("reset_macro_options".to_string(), json!(true)),
+            ]),
+        ))
+        .await
+        .expect("rebuild_index with reset must succeed");
+    assert!(result.is_error != Some(true), "{result:?}");
+    assert_eq!(w4_resident_cfg_test_activation(&server, &canon), None);
+
+    // The in-place route answers the same refusal: the workspace is
+    // resident now, so a forced rebuild runs through the dispatcher, whose
+    // refusal of a recorded directory that is gone echoes the request's own
+    // `path` as it was sent (here not the canonical root).
+    let second = canon.join("expand-cache-2");
+    std::fs::create_dir_all(&second).unwrap();
+    let recorded = running
+        .peer()
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
+                ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
+                ("force".to_string(), json!(true)),
+                (
+                    "expand_cache".to_string(),
+                    json!(second.to_string_lossy().as_ref()),
+                ),
+            ]),
+        ))
+        .await
+        .expect("an in-place rebuild recording a second expand cache");
+    assert!(recorded.is_error != Some(true), "{recorded:?}");
+    assert_eq!(
+        w4_recorded_macro_options(&canon)
+            .and_then(|record| record.expand_cache_dir)
+            .map(std::path::PathBuf::from),
+        Some(second.clone()),
+        "the in-place rebuild recorded the second directory"
+    );
+    std::fs::remove_dir_all(&second).unwrap();
+    let as_sent = format!("{}/.", canon.to_string_lossy());
+    let refused = running
+        .peer()
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
+                ("path".to_string(), json!(as_sent)),
+                ("force".to_string(), json!(true)),
+            ]),
+        ))
+        .await;
+    let Err(rmcp::ServiceError::McpError(err)) = refused else {
+        panic!("the in-place route must refuse a recorded directory that is gone: {refused:?}");
+    };
+    let details = &err.data.as_ref().expect("data")["details"];
+    assert_eq!(details["origin"], json!("recorded"), "{details}");
+    assert_eq!(
+        details["reset_arguments"],
+        json!({ "path": as_sent, "force": true, "reset_macro_options": true }),
+        "the in-place route's remedy echoes the path as sent"
+    );
+    assert!(
+        server
+            .manager
+            .lookup(&WorkspaceKey::new(
+                canon.clone(),
+                ProjectRootMode::default(),
+                0
+            ))
+            .is_some(),
+        "the refused rebuild leaves the workspace resident"
+    );
+
+    drop(running);
+    server.stop().await;
+}
+
+/// Integration of W1 and W4: daemon-hosted `rebuild_index` with an empty
+/// `expand_cache` is refused and writes nothing; an empty directory joined to
+/// the workspace root named the root itself.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_host_rebuild_index_refuses_an_empty_expand_cache() {
+    let server = w4_real_builder_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let canon = canonicalize_path(dir.path()).unwrap();
+    w4_index_with_macro_options(
+        &canon,
+        sqry_core::graph::unified::build::MacroBuildOptions::default(),
+    );
+    let index_before = w4_index_bytes(&canon);
+
+    let (rh, wh) = connect_mcp_shim(&server).await;
+    let running = rmcp::serve_client((), (rh, wh))
+        .await
+        .expect("rmcp initialize");
+    let refused = running
+        .peer()
+        .call_tool(call_tool_request(
+            "rebuild_index",
+            serde_json::Map::from_iter([
+                ("path".to_string(), json!(canon.to_string_lossy().as_ref())),
+                ("force".to_string(), json!(true)),
+                ("expand_cache".to_string(), json!("")),
+            ]),
+        ))
+        .await;
+    let err = match refused {
+        Err(err) => err,
+        Ok(result) => panic!("an empty expand cache must be refused: {result:?}"),
+    };
+    let rendered = format!("{err:?}");
+    println!("refusal: {rendered}");
+    assert!(
+        rendered.contains("expand cache directory is empty"),
+        "the MCP error says why: {rendered}"
+    );
+    assert_eq!(
+        w4_index_bytes(&canon),
+        index_before,
+        "the index bytes are untouched"
+    );
+    assert!(
+        w4_recorded_macro_options(&canon).is_none(),
+        "no expand cache was recorded"
+    );
+
+    drop(running);
+    server.stop().await;
+}
+
+/// The semantic_search arguments the refusal tests query the resident
+/// workspace with.
+fn w4_query_args(root: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
+    serde_json::Map::from_iter([
+        ("query".to_string(), json!("always_present")),
+        ("path".to_string(), json!(root.to_string_lossy().as_ref())),
+        ("max_results".to_string(), json!(5)),
+        ("context_lines".to_string(), json!(0)),
+        ("include_classpath".to_string(), json!(false)),
+    ])
+}
+
+/// Assert a refused rebuild left the workspace at `key` as it was: `Loaded`,
+/// the same graph, still watched, no recorded failure (no backoff), and,
+/// when `query` is set, a query still served. A query classifies the
+/// manifest on its own, so after a roster refusal (the manifest itself is
+/// what is refused) the caller passes `false`.
+async fn w4_assert_kept(
+    label: &str,
+    server: &TestServer,
+    client: &mut TestIpcClient,
+    peer: &rmcp::Peer<rmcp::RoleClient>,
+    key: &WorkspaceKey,
+    graph_before: &Arc<sqry_core::graph::CodeGraph>,
+    query: bool,
+) {
+    let ws = server
+        .manager
+        .lookup(key)
+        .unwrap_or_else(|| panic!("{label}: the workspace must stay resident"));
+    assert_eq!(
+        ws.load_state(),
+        WorkspaceState::Loaded,
+        "{label}: the workspace must stay Loaded"
+    );
+    assert!(
+        Arc::ptr_eq(graph_before, &ws.graph()),
+        "{label}: the resident graph must be the one published before"
+    );
+    let row = w4_status_row(client, &key.source_root).await;
+    assert_eq!(row["state"], json!("Loaded"), "{label}: {row}");
+    assert_eq!(
+        row["watching"],
+        json!(true),
+        "{label}: still watched: {row}"
+    );
+    assert!(
+        row["last_error"].is_null(),
+        "{label}: no recorded failure: {row}"
+    );
+    assert_eq!(row["retry_count"], json!(0), "{label}: no backoff: {row}");
+    if !query {
+        return;
+    }
+    let query = peer
+        .call_tool(call_tool_request(
+            "semantic_search",
+            w4_query_args(&key.source_root),
+        ))
+        .await
+        .unwrap_or_else(|err| panic!("{label}: a query after the refusal fails: {err:?}"));
+    assert!(query.is_error != Some(true), "{label}: {query:?}");
+}
+
+/// Send the same refused rebuild to `daemon/rebuild` and to the
+/// daemon-hosted `rebuild_index`, assert both refuse it with the same
+/// message and the expected codes, and that each refusal kept the
+/// workspace. Returns the shared message.
+#[allow(clippy::too_many_arguments)]
+async fn w4_refused_on_both_surfaces(
+    label: &str,
+    server: &TestServer,
+    client: &mut TestIpcClient,
+    peer: &rmcp::Peer<rmcp::RoleClient>,
+    key: &WorkspaceKey,
+    graph_before: &Arc<sqry_core::graph::CodeGraph>,
+    extra: &[(&str, serde_json::Value)],
+    ipc_code: i32,
+    mcp_code: i32,
+    query: bool,
+) -> String {
+    let resp = w4_ipc_rebuild(client, &key.source_root, extra).await;
+    let ipc_err = expect_error(&resp).clone();
+    assert_eq!(
+        ipc_err.code, ipc_code,
+        "{label}: daemon/rebuild: {ipc_err:?}"
+    );
+    w4_assert_kept(
+        &format!("{label} (daemon/rebuild)"),
+        server,
+        client,
+        peer,
+        key,
+        graph_before,
+        query,
+    )
+    .await;
+
+    let mcp_err = w4_mcp_error(
+        label,
+        w4_rebuild_index(peer, &key.source_root, true, extra).await,
+    );
+    assert_eq!(
+        mcp_err.code.0, mcp_code,
+        "{label}: rebuild_index: {mcp_err:?}"
+    );
+    w4_assert_kept(
+        &format!("{label} (rebuild_index)"),
+        server,
+        client,
+        peer,
+        key,
+        graph_before,
+        query,
+    )
+    .await;
+    // The same refusal on both surfaces. An unusable expand cache (`-32022`
+    // on IPC) is the one whose remedy differs by audience (S10, round 7):
+    // IPC names the CLI flags beside the wire fields, the daemon-hosted MCP
+    // sends the standalone server's text. Both state the same reason.
+    if ipc_code == -32022 {
+        let reason = |message: &str| message.split("; ").next().unwrap_or_default().to_string();
+        assert_eq!(
+            reason(&mcp_err.message),
+            reason(&ipc_err.message),
+            "{label}: both surfaces give the same reason"
+        );
+    } else {
+        assert_eq!(
+            mcp_err.message, ipc_err.message,
+            "{label}: both surfaces give the same refusal"
+        );
+    }
+    println!("{label}: ipc: {}", ipc_err.message);
+    println!("{label}: mcp: {}", mcp_err.message);
+    ipc_err.message
+}
+
+/// Integration of W1 and W4, F2 and F6: a refused rebuild of a resident
+/// workspace leaves it as it was, and `daemon/rebuild` and the
+/// daemon-hosted `rebuild_index` give the same refusal. Both rebuild a
+/// resident workspace in place through the rebuild dispatcher, which
+/// resolves every input it refuses before it reserves memory, and nothing
+/// unloads the workspace. Covers the three macro-option refusals (an
+/// empty, a missing and an unrecordable expand cache, the last a UTF-8
+/// symlink whose canonical target is not valid UTF-8), a valid control,
+/// and the two roster refusals: a readable manifest naming a plugin id
+/// this binary did not compile, which only the roster resolution refuses,
+/// and an unreadable manifest, which `daemon/rebuild` refuses and the
+/// forced `rebuild_index` repairs (D-i7-8). After each
+/// refusal on each surface the workspace is `Loaded` with the same graph,
+/// still watched, with no recorded failure, and serves a query. The
+/// narrowing and memory budget refusals need their own fixtures
+/// (`rebuild_index_in_place.rs`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_host_rebuild_index_refusals_keep_the_resident_workspace() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let server = w4_real_builder_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let canon = canonicalize_path(dir.path()).unwrap();
+    // A git repository, which the file watcher requires.
+    support::init_git_repo(&canon);
+    w4_index_with_macro_options(
+        &canon,
+        sqry_core::graph::unified::build::MacroBuildOptions::default(),
+    );
+    let key = WorkspaceKey::new(canon.clone(), ProjectRootMode::default(), 0);
+    // The expand cache fixtures live outside the workspace, so creating
+    // them does not wake the watcher.
+    let outside = tempfile::tempdir().unwrap();
+    let outside = canonicalize_path(outside.path()).unwrap();
+    let missing = outside.join("no-such-expand-cache");
+    let mut name = b"expand-".to_vec();
+    name.push(0xff);
+    let not_utf8 = outside.join(std::ffi::OsString::from_vec(name));
+    std::fs::create_dir_all(&not_utf8).expect("a non-UTF-8 directory");
+    let link = outside.join("expand-link");
+    std::os::unix::fs::symlink(&not_utf8, &link).expect("a UTF-8 link to it");
+
+    let mut client = w4_ipc_client(&server).await;
+    let (rh, wh) = connect_mcp_shim(&server).await;
+    let running = rmcp::serve_client((), (rh, wh))
+        .await
+        .expect("rmcp initialize");
+    let peer = running.peer();
+
+    // `daemon/load` makes the workspace resident and watched.
+    let resp = client
+        .request(
+            "daemon/load",
+            json!({ "index_root": canon.to_string_lossy().as_ref() }),
+        )
+        .await;
+    expect_success(&resp);
+    let graph_before = server
+        .manager
+        .lookup(&key)
+        .expect("resident after daemon/load")
+        .graph();
+    w4_assert_kept(
+        "loaded",
+        &server,
+        &mut client,
+        peer,
+        &key,
+        &graph_before,
+        true,
+    )
+    .await;
+
+    let message = w4_refused_on_both_surfaces(
+        "empty",
+        &server,
+        &mut client,
+        peer,
+        &key,
+        &graph_before,
+        &[("expand_cache", json!(""))],
+        -32602,
+        -32602,
+        true,
+    )
+    .await;
+    assert!(
+        message.contains("expand cache directory is empty"),
+        "{message}"
+    );
+    let message = w4_refused_on_both_surfaces(
+        "missing",
+        &server,
+        &mut client,
+        peer,
+        &key,
+        &graph_before,
+        &[("expand_cache", json!(missing.to_string_lossy().as_ref()))],
+        -32022,
+        -32602,
+        true,
+    )
+    .await;
+    // The request named the directory, so the way out is to name one that
+    // exists: the wire field beside the CLI flag. Dropping the record would
+    // not help, so it is not offered (S10, round 7).
+    assert!(
+        message.contains(missing.to_string_lossy().as_ref())
+            && message.contains("expand_cache (--expand-cache)")
+            && !message.contains("--no-macro-options"),
+        "{message}"
+    );
+    let message = w4_refused_on_both_surfaces(
+        "unrecordable",
+        &server,
+        &mut client,
+        peer,
+        &key,
+        &graph_before,
+        &[("expand_cache", json!(link.to_string_lossy().as_ref()))],
+        -32602,
+        -32602,
+        true,
+    )
+    .await;
+    assert!(message.contains("not valid UTF-8"), "{message}");
+
+    // The valid control: a rebuild without the refused input rebuilds.
+    let rebuilt = w4_rebuild_index(peer, &canon, true, &[])
+        .await
+        .expect("the valid control succeeds");
+    assert!(rebuilt.is_error != Some(true), "{rebuilt:?}");
+    let graph_after_control = server
+        .manager
+        .lookup(&key)
+        .expect("resident after the control")
+        .graph();
+    assert!(
+        !Arc::ptr_eq(&graph_before, &graph_after_control),
+        "the valid control publishes a new graph"
+    );
+    w4_assert_kept(
+        "control",
+        &server,
+        &mut client,
+        peer,
+        &key,
+        &graph_after_control,
+        true,
+    )
+    .await;
+
+    // The roster refusals. First a readable manifest naming a plugin id
+    // this binary did not compile, which only the roster resolution
+    // refuses (the macro options resolution reads the same manifest and
+    // accepts it); then an unreadable manifest, which both refuse.
+    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(&canon);
+    let mut manifest = storage.load_manifest().expect("manifest");
+    manifest
+        .plugin_selection
+        .as_mut()
+        .expect("selection recorded")
+        .active_plugin_ids
+        .push("integration-w1w4-planted-plugin".to_string());
+    manifest
+        .save(storage.manifest_path())
+        .expect("manifest rewritten");
+    let message = w4_refused_on_both_surfaces(
+        "uncompiled id",
+        &server,
+        &mut client,
+        peer,
+        &key,
+        &graph_after_control,
+        &[],
+        -32005,
+        -32603,
+        false,
+    )
+    .await;
+    assert!(
+        message.contains("integration-w1w4-planted-plugin"),
+        "{message}"
+    );
+
+    // An unreadable manifest: `daemon/rebuild` refuses it (D9's daemon
+    // row), the workspace kept; the daemon-hosted `rebuild_index` with
+    // `force` falls back over it and records the fallback, as the
+    // standalone `rebuild_index` does (decision D-i7-8).
+    std::fs::write(storage.manifest_path(), b"{ not json").expect("corrupt the manifest");
+    let resp = w4_ipc_rebuild(&mut client, &canon, &[]).await;
+    let ipc_err = expect_error(&resp).clone();
+    assert_eq!(ipc_err.code, -32001, "{ipc_err:?}");
+    assert!(
+        ipc_err
+            .message
+            .contains(storage.manifest_path().to_string_lossy().as_ref()),
+        "{}",
+        ipc_err.message
+    );
+    w4_assert_kept(
+        "unreadable manifest (daemon/rebuild)",
+        &server,
+        &mut client,
+        peer,
+        &key,
+        &graph_after_control,
+        false,
+    )
+    .await;
+    let repaired = w4_rebuild_index(peer, &canon, true, &[])
+        .await
+        .expect("rebuild_index falls back over the unreadable manifest");
+    assert!(repaired.is_error != Some(true), "{repaired:?}");
+    assert!(
+        storage.load_manifest().is_ok(),
+        "the manifest is readable again"
+    );
+
+    drop(running);
+    drop(client);
+    server.stop().await;
+}
+
+/// F3: a workspace `daemon/load` built in memory has no index on disk, and
+/// `rebuild_index` with `force=false` over it builds nothing, so macro
+/// options beside it are refused with the message the on-disk cache-hit
+/// leg gives, whichever of the three arguments carries them (an existing,
+/// an empty and a missing expand cache alike). Without the options it
+/// answers "Index already exists" with the resident generation's build
+/// time. Before this repair it answered "Index built successfully." with
+/// the same graph and the options dropped. The forced rebuild that follows
+/// persists the index, after which the on-disk leg refuses the same way.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_host_rebuild_index_without_force_refuses_macro_options_over_a_resident_graph() {
+    let server = w4_real_builder_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let canon = canonicalize_path(dir.path()).unwrap();
+    w4_write_source(&canon);
+    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(&canon);
+    let key = WorkspaceKey::new(canon.clone(), ProjectRootMode::default(), 0);
+    let outside = tempfile::tempdir().unwrap();
+    let existing = canonicalize_path(outside.path()).unwrap();
+    let missing = existing.join("no-such-expand-cache");
+
+    let mut client = w4_ipc_client(&server).await;
+    let (rh, wh) = connect_mcp_shim(&server).await;
+    let running = rmcp::serve_client((), (rh, wh))
+        .await
+        .expect("rmcp initialize");
+    let peer = running.peer();
+
+    let resp = client
+        .request(
+            "daemon/load",
+            json!({ "index_root": canon.to_string_lossy().as_ref() }),
+        )
+        .await;
+    expect_success(&resp);
+    assert!(
+        !storage.exists(),
+        "fixture precondition: daemon/load writes no index"
+    );
+    let ws = server.manager.lookup(&key).expect("resident");
+    let graph_before = ws.graph();
+    assert_eq!(w4_cfg_test_activation(&graph_before), None);
+
+    let need_force = w4_need_force_message(&canon);
+    for (label, extra) in [
+        ("cfg_flags", ("cfg_flags", json!(["test"]))),
+        (
+            "existing expand_cache",
+            ("expand_cache", json!(existing.to_string_lossy().as_ref())),
+        ),
+        ("empty expand_cache", ("expand_cache", json!(""))),
+        (
+            "missing expand_cache",
+            ("expand_cache", json!(missing.to_string_lossy().as_ref())),
+        ),
+        ("reset_macro_options", ("reset_macro_options", json!(true))),
+    ] {
+        let err = w4_mcp_error(label, w4_rebuild_index(peer, &canon, false, &[extra]).await);
+        assert_eq!(err.code.0, -32602, "{label}: {err:?}");
+        assert_eq!(err.message, need_force, "{label}");
+        assert!(
+            Arc::ptr_eq(&graph_before, &ws.graph()),
+            "{label}: nothing was built"
+        );
+        assert!(!storage.exists(), "{label}: nothing was written");
+    }
+
+    // Without the options: the existing graph is reported, nothing built.
+    let result = w4_rebuild_index(peer, &canon, false, &[])
+        .await
+        .expect("rebuild_index without force reports the resident graph");
+    let structured = result.structured_content.clone().expect("structured");
+    assert_eq!(
+        structured["data"]["message"],
+        json!("Index already exists. Use force=true to rebuild.")
+    );
+    let last_good_at = (*ws.last_good_at.read()).expect("a load sets last_good_at");
+    assert_eq!(
+        structured["data"]["builtAt"],
+        json!(chrono::DateTime::<chrono::Utc>::from(last_good_at).to_rfc3339()),
+        "the build time is the resident generation's"
+    );
+    assert_eq!(
+        structured["data"]["nodeCount"],
+        json!(graph_before.node_count())
+    );
+    assert!(Arc::ptr_eq(&graph_before, &ws.graph()));
+    assert!(!storage.exists());
+
+    // The forced rebuild builds with the options and persists the index;
+    // the on-disk leg then refuses the same way.
+    let result = w4_rebuild_index(peer, &canon, true, &[("cfg_flags", json!(["test"]))])
+        .await
+        .expect("a forced rebuild with options succeeds");
+    assert!(result.is_error != Some(true), "{result:?}");
+    assert!(storage.exists(), "the forced rebuild persisted the index");
+    assert_eq!(w4_resident_cfg_test_activation(&server, &canon), Some(true));
+    assert_eq!(
+        w4_recorded_cfg_flags(&canon),
+        Some(vec!["test".to_string()])
+    );
+    let err = w4_mcp_error(
+        "on-disk leg",
+        w4_rebuild_index(peer, &canon, false, &[("cfg_flags", json!(["test"]))]).await,
+    );
+    assert_eq!(err.message, need_force, "the on-disk leg");
+
+    drop(running);
+    drop(client);
+    server.stop().await;
+}
+
+/// F3, the other branch: with no graph anywhere (no index on disk, nothing
+/// resident) `rebuild_index` with `force=false` builds, so its macro
+/// options are honoured and recorded, and validated as on a forced build:
+/// an empty and a missing expand cache are refused and write nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_host_rebuild_index_without_force_builds_a_fresh_index_with_the_options() {
+    let server = w4_real_builder_server().await;
+    let (rh, wh) = connect_mcp_shim(&server).await;
+    let running = rmcp::serve_client((), (rh, wh))
+        .await
+        .expect("rmcp initialize");
+    let peer = running.peer();
+
+    let refused_dir = tempfile::tempdir().unwrap();
+    let refused_root = canonicalize_path(refused_dir.path()).unwrap();
+    w4_write_source(&refused_root);
+    let storage = sqry_core::graph::unified::persistence::GraphStorage::new(&refused_root);
+    let missing = refused_root.join("no-such-expand-cache");
+    let err = w4_mcp_error(
+        "empty",
+        w4_rebuild_index(peer, &refused_root, false, &[("expand_cache", json!(""))]).await,
+    );
+    assert!(
+        err.message.contains("expand cache directory is empty"),
+        "{err:?}"
+    );
+    let err = w4_mcp_error(
+        "missing",
+        w4_rebuild_index(
+            peer,
+            &refused_root,
+            false,
+            &[("expand_cache", json!(missing.to_string_lossy().as_ref()))],
+        )
+        .await,
+    );
+    assert_eq!(
+        err.data.as_ref().map(|data| data["kind"].clone()),
+        Some(json!("rebuild_macro_options_unavailable")),
+        "{err:?}"
+    );
+    assert!(!storage.exists(), "the refusals wrote nothing");
+
+    let dir = tempfile::tempdir().unwrap();
+    let canon = canonicalize_path(dir.path()).unwrap();
+    w4_write_source(&canon);
+    let result = w4_rebuild_index(peer, &canon, false, &[("cfg_flags", json!(["test"]))])
+        .await
+        .expect("a fresh build with options succeeds");
+    let structured = result.structured_content.clone().expect("structured");
+    assert_eq!(
+        structured["data"]["message"],
+        json!("Index built successfully.")
+    );
+    assert_eq!(w4_resident_cfg_test_activation(&server, &canon), Some(true));
+    assert_eq!(w4_snapshot_cfg_test_activation(&canon), Some(true));
+    assert_eq!(
+        w4_recorded_cfg_flags(&canon),
+        Some(vec!["test".to_string()])
+    );
+
+    drop(running);
+    server.stop().await;
+}
+
+/// F6: a forced `rebuild_index` of a resident, watched workspace rebuilds
+/// it in place, so the file watcher keeps watching: `daemon/status` reports
+/// `watching: true` afterwards, and a source edit then reaches a
+/// watcher-driven rebuild that publishes the edited source. Before this
+/// repair the force path unloaded the workspace, which stopped the watcher,
+/// and nothing restarted it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn mcp_host_rebuild_index_in_place_keeps_the_workspace_watched() {
+    let server = w4_real_builder_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let canon = canonicalize_path(dir.path()).unwrap();
+    // A git repository, which the file watcher requires.
+    support::init_git_repo(&canon);
+    w4_index_with_macro_options(
+        &canon,
+        sqry_core::graph::unified::build::MacroBuildOptions::default(),
+    );
+    let key = WorkspaceKey::new(canon.clone(), ProjectRootMode::default(), 0);
+    let mut client = w4_ipc_client(&server).await;
+    let (rh, wh) = connect_mcp_shim(&server).await;
+    let running = rmcp::serve_client((), (rh, wh))
+        .await
+        .expect("rmcp initialize");
+    let peer = running.peer();
+
+    let resp = client
+        .request(
+            "daemon/load",
+            json!({ "index_root": canon.to_string_lossy().as_ref() }),
+        )
+        .await;
+    expect_success(&resp);
+    let row = w4_status_row(&mut client, &canon).await;
+    assert_eq!(row["watching"], json!(true), "after daemon/load: {row}");
+
+    let result = w4_rebuild_index(peer, &canon, true, &[])
+        .await
+        .expect("a forced rebuild succeeds");
+    assert!(result.is_error != Some(true), "{result:?}");
+    let row = w4_status_row(&mut client, &canon).await;
+    println!("after the forced rebuild: {row}");
+    assert_eq!(row["state"], json!("Loaded"), "{row}");
+    assert_eq!(row["watching"], json!(true), "after rebuild_index: {row}");
+
+    // The watcher still drives rebuilds: an edit publishes a graph that
+    // holds the new function.
+    std::fs::write(
+        canon.join("src").join("lib.rs"),
+        format!("{W4_CFG_LIB_RS}\npub fn added_after_the_rebuild() -> u32 {{ 3 }}\n"),
+    )
+    .expect("edit the source");
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let graph = server.manager.lookup(&key).expect("resident").graph();
+        let found = graph
+            .strings()
+            .iter()
+            .any(|(_, name)| name.contains("added_after_the_rebuild"));
+        if found {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the watcher did not rebuild the edited source within 60 s"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    drop(running);
+    drop(client);
     server.stop().await;
 }

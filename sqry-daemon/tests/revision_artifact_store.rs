@@ -1,5 +1,9 @@
 //! RWS12 artifact identity, query default, and source-mode validation tests.
 
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
+
 mod support;
 
 use std::{path::Path, sync::Arc};

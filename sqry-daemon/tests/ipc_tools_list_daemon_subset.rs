@@ -12,6 +12,9 @@
 //! contract through the wire.
 
 #![allow(clippy::too_many_lines)]
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
 
 mod support;
 

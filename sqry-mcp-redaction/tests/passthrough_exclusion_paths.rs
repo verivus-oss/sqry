@@ -172,3 +172,81 @@ fn none_preset_without_logical_workspace_remains_passthrough() {
         "plain none preset must leave path verbatim"
     );
 }
+
+/// Round 7, surfaces round four, finding 2: under `none` with a bound
+/// workspace and an exclusion, as sqry-mcp builds it (workspace root set,
+/// logical workspace bound), only a value that names a place is checked
+/// against the exclusions. A contextual value that is not a path (a name
+/// that starts with the excluded directory's name), or that holds a path but
+/// names no place (a relative path, prose), passes unchanged, and so does a
+/// path outside the exclusion. One absolute path under a contextual key, in
+/// any form, and any path under a key that always names a path, is
+/// rewritten when it lies under the exclusion.
+#[test]
+fn none_preset_checks_only_values_that_name_a_place_against_exclusions() {
+    let root = PathBuf::from("/ws/proj");
+    let view = make_view_with_exclusion(
+        root.clone(),
+        PathBuf::from("/ws/proj/vendor"),
+        ws_id_short(),
+    );
+    let mut config = RedactionConfig::none();
+    config.workspace_root = Some(root);
+    let redactor = Redactor::with_logical_workspace(config, view).expect("none redactor");
+
+    let unchanged = serde_json::json!({
+        "source": "vendor",
+        "target": "vendor::dep::f",
+        "url": "vendor/x",
+        "uri": "alpha",
+        "dst": "read from /ws/proj/vendor/z.rs",
+        "src": "/ws/proj/src/lib.rs",
+        "fileUri": "file:///ws/proj/src/main.rs",
+        "path": "src/lib.rs",
+        "root": null
+    });
+    let mut response = unchanged.clone();
+    let stats = redactor.redact(&mut response);
+    assert_eq!(
+        response, unchanged,
+        "none changed a value that names no excluded place"
+    );
+    assert!(
+        !stats.any_redacted(),
+        "none recorded a redaction: {stats:?}"
+    );
+
+    let mut response = serde_json::json!({
+        "a": { "source": "/ws/proj/vendor/a.rs" },
+        "b": { "src": "  /ws/proj/vendor/b.rs " },
+        "c": { "uri": "FILE:///ws/proj/vendor/c.rs" },
+        "d": { "url": "file:/ws/proj/vendor/d.rs" },
+        "e": { "path": "vendor/e.rs" },
+        "f": { "fileUri": "file://localhost/ws/proj/vendor/f.rs" },
+        "g": { "target": ["vendor", "vendor/x", ["/ws/proj/vendor/g.rs"]] }
+    });
+    redactor.redact(&mut response);
+    for (outer, inner) in [
+        ("a", "source"),
+        ("b", "src"),
+        ("c", "uri"),
+        ("d", "url"),
+        ("e", "path"),
+        ("f", "fileUri"),
+    ] {
+        let rendered = response[outer][inner].as_str().expect("string");
+        assert!(
+            rendered.starts_with("<excluded>/[") && !rendered.contains("vendor"),
+            "{outer}.{inner} -> {rendered}"
+        );
+    }
+    // A list under the key holds values of the key: only the item that is
+    // one absolute path under the exclusion is rewritten.
+    assert_eq!(response["g"]["target"][0], "vendor");
+    assert_eq!(response["g"]["target"][1], "vendor/x");
+    let listed = response["g"]["target"][2][0].as_str().expect("string");
+    assert!(
+        listed.starts_with("<excluded>/["),
+        "g.target[2][0] -> {listed}"
+    );
+}

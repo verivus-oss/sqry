@@ -2,19 +2,23 @@
 //!
 //! Cancels any in-flight rebuild for a loaded workspace by setting the
 //! per-workspace [`crate::workspace::LoadedWorkspace::rebuild_cancelled`]
-//! atomic flag. The flag is polled at every pass boundary inside the
-//! sqry-core build pipeline via the `CancellationToken` mechanism wired
-//! up in Phase 7c, so the pipeline aborts at the next safe check-point
-//! after the signal is dispatched.
+//! atomic flag through
+//! [`crate::rebuild::RebuildDispatcher::cancel_rebuild`]. The flag is polled
+//! at every pass boundary inside the sqry-core build pipeline via the
+//! `CancellationToken` mechanism wired up in Phase 7c, so the pipeline
+//! aborts at the next safe check-point after the signal is dispatched, and
+//! again at the publish recheck. The runner consumes the flag at its
+//! cancellation gate: the cancelled iteration leaves the workspace
+//! `Unloaded` (the next `daemon/load` brings it back), parked requests are
+//! answered `-32004`, and the file watcher keeps watching.
 //!
 //! # Idempotency
 //!
-//! If no rebuild is currently in flight the flag is NOT set —
-//! `rebuild_cancelled` is only stored when `rebuild_in_flight` is
-//! true at the moment the handler runs. This prevents a cancel-while-
-//! idle from poisoning the next rebuild (the drain loop's top-of-loop
-//! eviction gate would interpret a leftover `true` as an eviction
-//! signal and abort the subsequent build).
+//! If no rebuild is currently in flight the flag is NOT set:
+//! `rebuild_cancelled` is only stored when `rebuild_in_flight` is true,
+//! read under the rebuild lane, where every runner-role transition happens.
+//! This prevents a cancel-while-idle (or one that races the runner's
+//! release) from poisoning the next rebuild or the next load.
 //!
 //! [`CancelRebuildResult::cancelled`] reports `true` when the
 //! `rebuild_in_flight` atomic was `true` at the moment the signal was
@@ -28,8 +32,6 @@
 //! - Returns a [`CancelRebuildResult`] on success — the rebuild may
 //!   still be in progress when the response is sent; cancellation is
 //!   asynchronous.
-
-use std::sync::atomic::Ordering;
 
 use serde::Deserialize;
 use serde_json::Value;
@@ -53,10 +55,11 @@ pub struct CancelRebuildParams {
 ///
 /// 1. Canonicalize `path`.
 /// 2. Find the matching workspace in the manager.
-/// 3. Set `ws.rebuild_cancelled = true` (the per-workspace
+/// 3. Through the dispatcher, under the rebuild lane: when a rebuild is in
+///    flight, set `ws.rebuild_cancelled = true` (the per-workspace
 ///    cancellation signal polled by the rebuild pipeline).
 /// 4. Return `CancelRebuildResult { cancelled: rebuild_was_in_flight }`.
-pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
+pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, MethodError> {
     let params: CancelRebuildParams =
         serde_json::from_value(params).map_err(MethodError::InvalidParams)?;
 
@@ -73,24 +76,17 @@ pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, Metho
             })
         })?;
 
-    // Step 3: record whether a rebuild is in flight before signalling
-    // cancellation. `rebuild_in_flight` is an AtomicBool on
-    // `LoadedWorkspace`; an Acquire load captures the current state.
-    let rebuild_was_in_flight = ws.rebuild_in_flight.load(Ordering::Acquire);
-
-    // Only set the cancellation flag when a rebuild is actually running.
-    // Setting it while idle would poison the NEXT rebuild: the drain
-    // loop's top-of-loop eviction gate observes `rebuild_cancelled ==
-    // true` and aborts immediately with `WorkspaceEvicted`.
-    //
-    // When in-flight, the `spawn_cancellation_forwarder` task in
-    // `RebuildDispatcher::execute_rebuild` polls `rebuild_cancelled`
-    // at ~50ms intervals and calls `token.cancel()` on the next
-    // observation, which propagates the cancel signal to the sqry-core
-    // build pipeline at its next pass boundary.
-    if rebuild_was_in_flight {
-        ws.rebuild_cancelled.store(true, Ordering::Release);
-    }
+    // Step 3: cancel under the rebuild lane. Setting the flag while idle
+    // would poison the NEXT rebuild (its cancellation gate would abort it)
+    // and the next load; reading `rebuild_in_flight` under the lane means the
+    // runner either has released the role (nothing is set) or will see the
+    // flag at its gate before it does. When in flight, the
+    // `spawn_cancellation_forwarder` task in
+    // `RebuildDispatcher::execute_rebuild` polls `rebuild_cancelled` at
+    // ~50ms intervals and calls `token.cancel()` on the next observation,
+    // which propagates the cancel signal to the sqry-core build pipeline at
+    // its next pass boundary.
+    let rebuild_was_in_flight = ctx.dispatcher.cancel_rebuild(&ws).await;
 
     let envelope = ResponseEnvelope {
         result: CancelRebuildResult {
@@ -141,12 +137,18 @@ mod tests {
         use crate::ipc::methods::HandlerContext;
         use crate::ipc::shim_registry::ShimRegistry;
         use crate::workspace::{EmptyGraphBuilder, WorkspaceManager};
-        use sqry_core::plugin::PluginManager;
 
-        let config = Arc::new(DaemonConfig::default());
+        // The environment is read while the configuration is built; the
+        // lock is released before the handler is awaited.
+        let config = {
+            let _env = crate::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::new(DaemonConfig::default())
+        };
         let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
-        let plugins = Arc::new(PluginManager::default());
-        let dispatcher = RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&config), plugins);
+        let roster = Arc::new(crate::workspace::WorkspaceRosterResolver::new());
+        let dispatcher = RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&config), roster);
         let executor = Arc::new(sqry_core::query::executor::QueryExecutor::default());
         let ctx = HandlerContext {
             manager,
@@ -158,13 +160,14 @@ mod tests {
             shutdown: CancellationToken::new(),
             config,
             daemon_version: "test",
+            mcp_redaction: std::sync::Arc::new(crate::mcp_host::redaction::McpRedaction::disabled()),
         };
 
         // A non-existent path either fails at resolve_index_root (if the dir
         // doesn't exist) or at find_key_and_workspace_by_path. Both are
         // acceptable rejections.
         let params = json!({ "path": "/nonexistent/workspace" });
-        let result = daemon_cancel_rebuild::handle(&ctx, params);
+        let result = daemon_cancel_rebuild::handle(&ctx, params).await;
 
         match result {
             Err(MethodError::Daemon(DaemonError::WorkspaceNotLoaded { .. })) => {}
@@ -179,7 +182,6 @@ mod tests {
         use std::sync::atomic::Ordering;
         use tokio_util::sync::CancellationToken;
 
-        use sqry_core::plugin::PluginManager;
         use sqry_core::project::ProjectRootMode;
 
         use crate::RebuildDispatcher;
@@ -192,15 +194,22 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = tmp.path().canonicalize().unwrap();
 
-        let config = Arc::new(DaemonConfig::default());
+        // The environment is read while the configuration is built; the
+        // lock is released before the handler is awaited.
+        let config = {
+            let _env = crate::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            Arc::new(DaemonConfig::default())
+        };
         let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
 
         // Register a Loaded workspace (no rebuild in flight).
         let key = WorkspaceKey::new(canonical.clone(), ProjectRootMode::GitRoot, 0x1);
         manager.insert_workspace_in_state_for_test(key, WorkspaceState::Loaded);
 
-        let plugins = Arc::new(PluginManager::default());
-        let dispatcher = RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&config), plugins);
+        let roster = Arc::new(crate::workspace::WorkspaceRosterResolver::new());
+        let dispatcher = RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&config), roster);
         let executor = Arc::new(sqry_core::query::executor::QueryExecutor::default());
         let ctx = HandlerContext {
             manager: Arc::clone(&manager),
@@ -212,10 +221,11 @@ mod tests {
             shutdown: CancellationToken::new(),
             config,
             daemon_version: "test",
+            mcp_redaction: std::sync::Arc::new(crate::mcp_host::redaction::McpRedaction::disabled()),
         };
 
         let params = json!({ "path": canonical.to_string_lossy().as_ref() });
-        let result = daemon_cancel_rebuild::handle(&ctx, params).unwrap();
+        let result = daemon_cancel_rebuild::handle(&ctx, params).await.unwrap();
 
         // `cancelled` must be false — no rebuild was in flight.
         let envelope: serde_json::Value = result;

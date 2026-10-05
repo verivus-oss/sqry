@@ -27,18 +27,22 @@
 //!    `daemon/load`): a builder whose `build()` returns
 //!    `DaemonError::WorkspaceIncompatibleGraph` must surface as JSON-RPC
 //!    `-32005`. The acceptance criterion is verified on the load path,
-//!    not via post-eviction `daemon/search`, because
-//!    `DaemonGraphProvider::handle_classify_error` deliberately
-//!    collapses every reload failure into `-32004` per the SGA04
-//!    bounded-one-shot-reload contract — the `-32005` wire envelope is
-//!    only reachable through the load path. The detailed rationale
-//!    lives in the docstring on the test function itself.
+//!    not via post-eviction `daemon/search`: a failed reload of a
+//!    workspace that was resident is answered `-32004`
+//!    `WorkspaceReloadFailed` carrying the reload's own error (which may
+//!    be the incompatible-graph refusal) under `reload_failure`, so the
+//!    `-32005` code itself is reached through a load, or a reload of a
+//!    root that was never resident. The detailed rationale lives in the
+//!    docstring on the test function itself.
 //!
 //! No fixture used here lives outside `test-fixtures/cli-basic/`; the
 //! suite does NOT depend on `/srv/repos/public/benchmark-repos/linux/`
 //! or any other heavy fixture.
 
 #![allow(clippy::too_many_lines)]
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
 
 mod support;
 
@@ -52,7 +56,8 @@ use sqry_core::graph::unified::build::BuildConfig;
 use sqry_core::graph::unified::node::{NodeId, NodeKind};
 use sqry_core::graph::unified::persistence::{GraphStorage, save_to_path};
 use sqry_daemon::DaemonError;
-use sqry_daemon::workspace::WorkspaceBuilder;
+use sqry_daemon::workspace::{BuiltGraph, WorkspaceBuilder};
+use sqry_plugin_registry::RosterSource;
 // `SearchMode` / `SearchRequest` / `expect_error` are only consumed by
 // the `test-hooks`-gated tests further down; allow `unused_imports` so
 // the default build (without that feature) does not warn.
@@ -145,7 +150,7 @@ impl std::fmt::Debug for PersistingBuilder {
 }
 
 impl WorkspaceBuilder for PersistingBuilder {
-    fn build(&self, root: &Path) -> Result<CodeGraph, DaemonError> {
+    fn build(&self, root: &Path) -> Result<BuiltGraph, DaemonError> {
         let g =
             sqry_core::graph::unified::build::build_unified_graph(root, &self.plugins, &self.cfg)
                 .map_err(|e| DaemonError::WorkspaceBuildFailed {
@@ -163,10 +168,14 @@ impl WorkspaceBuilder for PersistingBuilder {
                 reason: format!("persist snapshot: {e}"),
             }
         })?;
-        Ok(g)
+        Ok(BuiltGraph::with_manager(
+            g,
+            &self.plugins,
+            RosterSource::Fallback,
+        ))
     }
 
-    fn load_persisted(&self, root: &Path) -> Result<CodeGraph, DaemonError> {
+    fn load_persisted(&self, root: &Path) -> Result<BuiltGraph, DaemonError> {
         let storage = GraphStorage::new(root);
         if !storage.snapshot_exists() {
             return Err(DaemonError::WorkspaceBuildFailed {
@@ -178,6 +187,7 @@ impl WorkspaceBuilder for PersistingBuilder {
             storage.snapshot_path(),
             Some(&self.plugins),
         )
+        .map(|g| BuiltGraph::with_manager(g, &self.plugins, RosterSource::Fallback))
         .map_err(|e| DaemonError::WorkspaceBuildFailed {
             root: root.to_path_buf(),
             reason: format!("load_persisted: {e}"),
@@ -576,13 +586,13 @@ async fn daemon_search_workspace_evicted_reload_on_read() {
 // real plugin-mismatch path that `RealWorkspaceBuilder::load_persisted`
 // would otherwise take when it sees `PersistenceError::IncompatibleVersion`).
 //
-// We do NOT test this through the post-eviction reload path because
-// `DaemonGraphProvider::handle_classify_error` deliberately collapses
-// every reload failure into `GraphAcquisitionError::Evicted` (-32004),
-// per the SGA04 contract — preserving the bounded one-shot reload
-// promise that callers see at most one transient -32004 across the
-// eviction window. A reload-time incompatible-graph error therefore
-// surfaces as -32004 + reload-failure diagnostic context, not -32005.
+// We do NOT test this through the post-eviction reload path: a failed
+// reload of a workspace that was resident is answered -32004
+// (`WorkspaceReloadFailed`, the reload's own error under
+// `reload_failure`), per the SGA04 bounded one-shot reload contract, so
+// a reload-time incompatible-graph error of an evicted workspace surfaces
+// as -32004 carrying it, not -32005. (A reload of a root that was never
+// resident answers the reload's own error, -32005 included.)
 // The -32005 wire envelope is reachable through `daemon/load` (or any
 // other path that propagates `DaemonError::WorkspaceIncompatibleGraph`
 // directly), and that is what this test pins.
@@ -607,7 +617,7 @@ async fn daemon_load_workspace_incompatible_graph_returns_32005() {
         }
     }
     impl WorkspaceBuilder for IncompatibleBuilder {
-        fn build(&self, root: &Path) -> Result<CodeGraph, DaemonError> {
+        fn build(&self, root: &Path) -> Result<BuiltGraph, DaemonError> {
             Err(DaemonError::WorkspaceIncompatibleGraph {
                 root: root.to_path_buf(),
                 reason: "test fixture: snapshot built with plugin selection \

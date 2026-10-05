@@ -138,13 +138,15 @@ mod path_guard_tests {
     use crate::ipc::methods::{HandlerContext, MethodError};
     use crate::ipc::shim_registry::ShimRegistry;
     use crate::workspace::{EmptyGraphBuilder, WorkspaceManager};
-    use sqry_core::plugin::PluginManager;
 
     fn make_ctx() -> HandlerContext {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let config = Arc::new(DaemonConfig::default());
         let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
-        let plugins = Arc::new(PluginManager::default());
-        let dispatcher = RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&config), plugins);
+        let roster = Arc::new(crate::workspace::WorkspaceRosterResolver::new());
+        let dispatcher = RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&config), roster);
         let executor = Arc::new(sqry_core::query::executor::QueryExecutor::default());
         HandlerContext {
             manager,
@@ -156,6 +158,7 @@ mod path_guard_tests {
             shutdown: CancellationToken::new(),
             config,
             daemon_version: "test",
+            mcp_redaction: std::sync::Arc::new(crate::mcp_host::redaction::McpRedaction::disabled()),
         }
     }
 

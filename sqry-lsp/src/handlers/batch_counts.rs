@@ -43,20 +43,11 @@ pub fn batch_caller_callee_count(
 
     // SGA06 — acquire the graph once through the shared
     // `FilesystemGraphProvider` pipeline and reuse it for every symbol.
-    // If no snapshot is available, every symbol gets zero counts (mirrors
-    // the previous swallow-error behaviour without re-entering the
-    // executor's own `get_or_load_graph`).
-    let graph = match session.graph_for_path(&root) {
-        Ok(Some(g)) => Some(g),
-        Ok(None) => None,
-        Err(err) => {
-            log::warn!(
-                "batch_caller_callee_count: failed to acquire graph for '{}': {err}",
-                root.display()
-            );
-            None
-        }
-    };
+    // If no snapshot is available, every symbol gets zero counts. A graph
+    // that cannot be acquired fails the request instead (S4, round 7): a
+    // refusal is LSP `RequestFailed` with its kind, as on every handler,
+    // because zero counts would read as "nothing calls this".
+    let graph = session.graph_for_path(&root)?;
 
     for sym_ref in &params.symbols {
         let (callers_count, callees_count) = if let Some(ref graph) = graph {

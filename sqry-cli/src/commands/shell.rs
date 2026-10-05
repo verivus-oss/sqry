@@ -115,7 +115,7 @@ fn handle_command(
         }
         ShellControl::Refresh => {
             if let Err(err) = refresh_session(session, workspace) {
-                eprintln!("Error: {err}");
+                eprintln!("Error: {err:#}");
             }
             false
         }
@@ -134,7 +134,7 @@ fn handle_command(
                     let _ = rl.add_history_entry(query);
                 }
                 Err(err) => {
-                    eprintln!("Error: {err}");
+                    eprintln!("Error: {err:#}");
                 }
             }
             false

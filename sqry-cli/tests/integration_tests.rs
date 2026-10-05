@@ -235,7 +235,6 @@ fn test_debug_cache_flag_prints_stats() {
 
     let output = sqry_cmd()
         .arg("--debug-cache")
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function")
         .current_dir(project.path())
@@ -263,7 +262,6 @@ fn test_debug_cache_env_prints_stats() {
 
     let output = sqry_cmd()
         .env("SQRY_CACHE_DEBUG", "1")
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function")
         .current_dir(project.path())
@@ -431,9 +429,7 @@ fn test_query_invalid_syntax() {
         .assert()
         .success();
 
-    // NOTE: Must use --semantic flag because hybrid mode falls back to text search
     sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:") // Incomplete predicate should trigger syntax error
         .current_dir(project.path())
@@ -1135,10 +1131,12 @@ fn test_update_help_taxonomy_headings() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
 
-    // Phase 2.2+ update headings
+    // Phase 2.2+ update headings. "Update Configuration" held one flag,
+    // `--no-incremental`, which nothing read; surface parity W4 (W4-D4)
+    // removed the flag and with it the heading.
     assert!(
-        stdout.contains("Update Configuration"),
-        "Expected 'Update Configuration' heading in update help"
+        !stdout.contains("Update Configuration"),
+        "the 'Update Configuration' heading left with update --no-incremental"
     );
     assert!(
         stdout.contains("Advanced Configuration"),
@@ -1815,7 +1813,6 @@ fn test_boolean_and_query() {
     log::debug!("CLI 'index' completed");
 
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND async:true")
         .arg("--json")
@@ -1877,7 +1874,6 @@ fn test_metadata_visibility_filter() {
 
     // In Rust, the visibility modifier is "pub", not "public"
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("visibility:pub")
         .arg("--json")
@@ -1909,7 +1905,6 @@ fn test_metadata_in_json_output() {
         .success();
 
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND async:true")
         .arg("--json")
@@ -1941,7 +1936,6 @@ fn test_complex_boolean_query() {
         .success();
 
     let output = sqry_cmd()
-        .arg("--semantic")
         .arg("query")
         .arg("kind:function AND async:true AND visibility:pub")
         .arg("--json")

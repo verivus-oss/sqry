@@ -128,15 +128,34 @@ fn run_search(cli: &Cli, pattern: &str, limit: usize) -> Result<()> {
 
 /// Clear history entries
 fn run_clear(cli: &Cli, older: Option<&str>, confirm: bool) -> Result<()> {
+    let mut streams = OutputStreams::with_pager(cli.pager_config());
+
+    // Every argument is checked before the history store is opened, which
+    // creates the global config directory when it is missing: a malformed
+    // `--older` and a missing `--confirm` write nothing.
+    let older = older
+        .map(|duration_str| {
+            parse_duration(duration_str)
+                .map(|duration| (duration_str, duration))
+                .map_err(|e| anyhow::anyhow!("Invalid duration format '{duration_str}': {e}"))
+        })
+        .transpose()?;
+    if older.is_none() && !confirm && !cli.json {
+        // Clear all - requires confirmation
+        streams.write_result("Clear ALL history entries? This cannot be undone.\n")?;
+        streams.write_result(
+            "Use --confirm to confirm, or --older <duration> to clear selectively.\n",
+        )?;
+        streams.finish_checked()?;
+        bail!("Confirmation required to clear all history");
+    }
+
     let config = PersistenceConfig::from_env();
     let index = open_shared_index(Some(Path::new(cli.search_path())), config)?;
     let manager = HistoryManager::new(index);
-    let mut streams = OutputStreams::with_pager(cli.pager_config());
 
-    if let Some(duration_str) = older {
+    if let Some((duration_str, duration)) = older {
         // Clear entries older than the specified duration
-        let duration = parse_duration(duration_str)
-            .map_err(|e| anyhow::anyhow!("Invalid duration format '{duration_str}': {e}"))?;
         let cutoff = Utc::now() - duration;
 
         let cleared = manager.clear_older_than(cutoff)?;
@@ -153,16 +172,6 @@ fn run_clear(cli: &Cli, older: Option<&str>, confirm: bool) -> Result<()> {
             ))?;
         }
     } else {
-        // Clear all - requires confirmation
-        if !confirm && !cli.json {
-            streams.write_result("Clear ALL history entries? This cannot be undone.\n")?;
-            streams.write_result(
-                "Use --confirm to confirm, or --older <duration> to clear selectively.\n",
-            )?;
-            streams.finish_checked()?;
-            bail!("Confirmation required to clear all history");
-        }
-
         let cleared = manager.clear()?;
 
         if cli.json {

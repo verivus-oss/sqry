@@ -49,12 +49,12 @@ Authoritative syntax is `sqry <command> --help`. This table tracks `sqry-cli/src
 |---------|-------------|
 | `sqry index` | Build/rebuild the index |
 | `sqry index --status` | Show index status and statistics |
-| `sqry update` | Incrementally update the index |
-| `sqry watch` | Watch for file changes and update index in real-time |
+| `sqry update` | Rebuild the existing index (every file is parsed again) |
+| `sqry watch` | Watch for file changes and rebuild the index on each change (every file is parsed again) |
 | `sqry repair` | Repair corrupted index files |
 
 Indexing behavior highlights:
-- `sqry index` / `sqry update` support `--include-high-cost`, `--exclude-high-cost`, `--enable-plugin`, `--disable-plugin`
+- `sqry index` / `sqry update` support `--include-high-cost`, `--exclude-high-cost`, `--enable-plugin`, `--disable-plugin`; `sqry index --force` and `--no-incremental` reuse the selection the manifest records unless a flag or `SQRY_*` variable changes it
 - active plugin ids are persisted in the unified graph manifest
 - read-only indexed commands reuse manifest-backed plugin selection by default
 - pathological single-file C++ graph builds are bounded for large repositories

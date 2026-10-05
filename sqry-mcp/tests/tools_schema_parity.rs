@@ -89,3 +89,38 @@ fn daemon_supported_tool_names_matches_standalone_subset() {
         returned_names
     );
 }
+
+/// T13 (schema, standalone host, surface parity W4 design W4-D8): the
+/// standalone inventory advertises `cfg_flags`, `expand_cache` and
+/// `reset_macro_options` on `rebuild_index`. `daemon_supported_tools()`
+/// is the standalone `get_filtered_tools()` inventory filtered by name, so
+/// the schema object it returns for `rebuild_index` is the standalone
+/// host's; the daemon host's `tools/list` is pinned in
+/// `sqry-daemon/tests/ipc_shim_mcp_host.rs`.
+#[test]
+fn rebuild_index_schema_advertises_the_macro_option_arguments() {
+    let tools = daemon_supported_tools();
+    let tool = tools
+        .iter()
+        .find(|t| t.name.as_ref() == "rebuild_index")
+        .expect("rebuild_index advertised");
+    let properties = tool.input_schema["properties"]
+        .as_object()
+        .expect("rebuild_index schema has properties");
+    let mut names: Vec<&String> = properties.keys().collect();
+    names.sort();
+    println!("rebuild_index schema properties (standalone host): {names:?}");
+    for name in [
+        "cfg_flags",
+        "expand_cache",
+        "reset_macro_options",
+        "path",
+        "force",
+    ] {
+        assert!(
+            properties.contains_key(name),
+            "rebuild_index schema must advertise {name}: {names:?}"
+        );
+    }
+    assert_eq!(properties.len(), 5, "exactly the five arguments: {names:?}");
+}

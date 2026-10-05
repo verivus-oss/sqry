@@ -68,6 +68,18 @@ fn fixture_source_root() -> PathBuf {
     common::fixture_path("sqry-lsp/tests/fixtures/graph-analysis-workspace")
 }
 
+/// A temp directory that is its own project: an empty `.git` marker at
+/// its root stops every ancestor walk there (the provider's index
+/// discovery, `sqry index`'s nested-index check and gitRoot project
+/// resolution), so an index, project marker or repository above `TMPDIR`
+/// can neither be read nor refuse the fixture (decision D-i8-60, the
+/// pattern of `dfdb87944`).
+fn project_tempdir() -> Result<TempDir> {
+    let temp_dir = tempfile::tempdir()?;
+    fs::create_dir(temp_dir.path().join(".git"))?;
+    Ok(temp_dir)
+}
+
 fn copy_fixture_to_temp() -> Result<TempDir> {
     fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
         fs::create_dir_all(dst)?;
@@ -830,7 +842,7 @@ async fn lsp_list_circular_deps_limit_wrong_type() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn lsp_list_circular_deps_empty_graph() -> Result<()> {
-    let temp_dir = tempfile::tempdir()?;
+    let temp_dir = project_tempdir()?;
     fs::create_dir_all(temp_dir.path().join("src"))?;
     fs::write(temp_dir.path().join("src/main.rs"), "fn main() {}\n")?;
     let mut server = manual_test_server(temp_dir.path());
@@ -1022,7 +1034,7 @@ async fn lsp_list_unused_limit_wrong_type() -> Result<()> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn lsp_list_unused_empty_graph() -> Result<()> {
-    let temp_dir = tempfile::tempdir()?;
+    let temp_dir = project_tempdir()?;
     fs::create_dir_all(temp_dir.path().join("src"))?;
     fs::write(temp_dir.path().join("src/main.rs"), "fn main() {}\n")?;
     let mut server = manual_test_server(temp_dir.path());

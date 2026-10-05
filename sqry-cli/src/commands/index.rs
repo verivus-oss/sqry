@@ -5,9 +5,12 @@ use crate::plugin_defaults::{self, PluginSelectionMode};
 use crate::progress::{CliProgressReporter, CliStepProgressReporter, StepRunner};
 use anyhow::{Context, Result};
 use sqry_core::graph::unified::analysis::ReachabilityStrategy;
-use sqry_core::graph::unified::build::BuildResult;
 use sqry_core::graph::unified::build::entrypoint::{AnalysisStrategySummary, get_git_head_commit};
-use sqry_core::graph::unified::persistence::{GraphStorage, load_header_from_path};
+use sqry_core::graph::unified::build::{
+    BuildConfig, BuildResult, MacroOptionsRequest, ResolvedMacroOptions, UnreadableManifestRule,
+    expand_cache_missing_reason, resolve_macro_options,
+};
+use sqry_core::graph::unified::persistence::{GraphStorage, IndexWriteLock, load_header_from_path};
 use sqry_core::json_response::IndexStatus;
 use sqry_core::progress::{SharedReporter, no_op_reporter};
 use std::fs;
@@ -491,17 +494,155 @@ fn canonicalish_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
-#[allow(unused_variables, unused_mut, clippy::too_many_arguments)]
+/// What `sqry index` says about the inputs a build used: the selection's
+/// mode and source, the unreadable-manifest warning, and the macro options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuiltInputsReport {
+    warning: Option<String>,
+    selection: String,
+    macro_options: String,
+}
+
+impl BuiltInputsReport {
+    fn of(
+        plugins: &plugin_defaults::ResolvedPluginManager,
+        macro_options: &ResolvedMacroOptions,
+    ) -> Self {
+        let mode = plugins
+            .persisted_selection
+            .as_ref()
+            .and_then(|selection| selection.high_cost_mode.as_deref())
+            .unwrap_or("unknown");
+        Self {
+            warning: plugins
+                .selection_source
+                .unreadable_manifest_warning()
+                .map(|warning| warning.to_string()),
+            selection: format!("{mode}, {}", plugins.selection_source.describe()),
+            macro_options: macro_options.describe(),
+        }
+    }
+
+    fn print(&self) {
+        println!("  Plugin selection: {}", self.selection);
+        println!("  Macro options: {}", self.macro_options);
+    }
+}
+
+/// Re-resolves the inputs a CLI build takes from the manifest's record and
+/// its flags: the plugin roster and the build configuration carrying the
+/// macro options. Called under the index's persist lock (decision D-i8-4).
+pub(crate) type CliInputResolver<'a> =
+    dyn Fn() -> Result<(plugin_defaults::ResolvedPluginManager, BuildConfig)> + 'a;
+
+/// Build and persist `root` with the recorded inputs current at its
+/// publication (decision D-i8-4), as the registry helper does for the
+/// standalone MCP and the LSP (D-i8-2).
+///
+/// `first` is the caller's lock-free resolution, which already refused
+/// whatever the request or the record refuses, so a refusal wrote nothing.
+/// When the index directory exists, the index's persist lock is held from
+/// here to the commit and the inputs are resolved again under it with
+/// `resolve`, so no other writer can move the manifest aside or publish
+/// between the resolution and the publication. A root with no index
+/// directory has no record: it is built with `first` without creating the
+/// directory, then the lock is taken; if a manifest appeared during the
+/// build, the inputs are resolved and the graph built again under the lock.
+///
+/// # Errors
+///
+/// The resolver's, the build's or the persist's error.
+pub(crate) fn publish_with_current_inputs<G, R>(
+    root: &Path,
+    first: (&plugin_defaults::ResolvedPluginManager, &BuildConfig),
+    resolve: &CliInputResolver<'_>,
+    build: &mut dyn FnMut(&plugin_defaults::ResolvedPluginManager, &BuildConfig) -> Result<G>,
+    persist: &mut dyn FnMut(&plugin_defaults::ResolvedPluginManager, &BuildConfig, G) -> Result<R>,
+) -> Result<R> {
+    let storage = GraphStorage::new(root);
+    let graph_dir = storage.graph_dir();
+    if let Some(_held) = IndexWriteLock::acquire_if_present(graph_dir)? {
+        let (plugins, config) = resolve()?;
+        let built = build(&plugins, &config)?;
+        return persist(&plugins, &config, built);
+    }
+    let built = build(first.0, first.1)?;
+    let _held = IndexWriteLock::acquire(graph_dir)?;
+    if storage.exists() {
+        drop(built);
+        let (plugins, config) = resolve()?;
+        let built = build(&plugins, &config)?;
+        return persist(&plugins, &config, built);
+    }
+    persist(first.0, first.1, built)
+}
+
+/// Build the graph at `root_path` (with the classpath pipeline when it is
+/// enabled), write the `--cache-dir` hash index, and persist it durably,
+/// with the recorded inputs current at publication
+/// ([`publish_with_current_inputs`], decision D-i8-4): `resolved_plugins`
+/// and `build_config` are the caller's lock-free resolution, `resolve`
+/// resolves them again under the index's persist lock.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_and_persist_with_optional_classpath(
     root_path: &Path,
     resolved_plugins: &plugin_defaults::ResolvedPluginManager,
-    build_config: &sqry_core::graph::unified::build::BuildConfig,
+    build_config: &BuildConfig,
+    resolve: &CliInputResolver<'_>,
     build_command: &str,
     progress: SharedReporter,
     classpath_opts: Option<&ClasspathCliOptions<'_>>,
     cache_dir: Option<&Path>,
     json_output: bool,
 ) -> Result<BuildResult> {
+    let build_progress = progress.clone();
+    publish_with_current_inputs(
+        root_path,
+        (resolved_plugins, build_config),
+        resolve,
+        &mut |plugins, config| {
+            build_with_optional_classpath(
+                root_path,
+                plugins,
+                config,
+                build_progress.clone(),
+                classpath_opts,
+                cache_dir,
+                json_output,
+            )
+        },
+        &mut |plugins, config, (graph, effective_threads)| {
+            let (_graph, build_result) =
+                sqry_core::graph::unified::build::persist_durable_graph_transaction(
+                    graph,
+                    sqry_core::graph::unified::build::DurableGraphPersistenceRequest {
+                        root: root_path,
+                        plugins: &plugins.plugin_manager,
+                        config,
+                        build_command,
+                        plugin_selection: plugins.persisted_selection.clone(),
+                        progress: progress.clone(),
+                        effective_threads,
+                    },
+                )?;
+            Ok(build_result)
+        },
+    )
+}
+
+/// The build half of [`build_and_persist_with_optional_classpath`]: the
+/// classpath pipeline (when enabled), the graph build, the classpath
+/// injection, and the `--cache-dir` hash index.
+#[allow(unused_variables, unused_mut)]
+fn build_with_optional_classpath(
+    root_path: &Path,
+    resolved_plugins: &plugin_defaults::ResolvedPluginManager,
+    build_config: &BuildConfig,
+    progress: SharedReporter,
+    classpath_opts: Option<&ClasspathCliOptions<'_>>,
+    cache_dir: Option<&Path>,
+    json_output: bool,
+) -> Result<(sqry_core::graph::unified::CodeGraph, usize)> {
     #[cfg(feature = "jvm-classpath")]
     let classpath_result = if let Some(classpath_opts) = classpath_opts.filter(|opts| opts.enabled)
     {
@@ -528,7 +669,7 @@ pub(crate) fn build_and_persist_with_optional_classpath(
             root_path,
             &resolved_plugins.plugin_manager,
             build_config,
-            progress.clone(),
+            progress,
         )?;
 
     #[cfg(feature = "jvm-classpath")]
@@ -536,41 +677,28 @@ pub(crate) fn build_and_persist_with_optional_classpath(
         inject_classpath_into_graph(&mut graph, classpath_result, json_output)?;
     }
 
-    // C001b-core: when `--cache-dir <DIR>` is supplied, persist a hash-index
-    // snapshot covering every file the freshly built graph references. The
-    // graph build itself is NOT short-circuited (the unified builder does not
-    // yet support merging cached file segments), so the new graph is always
-    // complete; this side-channel snapshot is what `sqry update` and the
-    // forthcoming incremental-merge API will pick up next time.
-    if let Some(dir) = cache_dir
-        && let Err(err) = persist_hash_index_snapshot(&graph, dir)
-    {
-        log::warn!(
-            "failed to persist hash index to {} ({err}); cache snapshot skipped",
-            dir.display()
-        );
+    // C001b-core: when `--cache-dir <DIR>` is supplied, write a hash-index
+    // snapshot covering every file the freshly built graph references.
+    // Nothing reads it: `sqry update` and `sqry index` parse every file, as
+    // the flag's help says. The directory was checked before anything was
+    // written (`check_cache_dir`); a write that still fails here fails the
+    // command before the graph is persisted, instead of being logged at a
+    // level the CLI does not show while the command exits 0.
+    if let Some(dir) = cache_dir {
+        persist_hash_index_snapshot(&graph, dir).with_context(|| {
+            format!(
+                "--cache-dir {}: the hash index could not be written; the index was not written",
+                dir.display()
+            )
+        })?;
     }
 
-    let (_graph, build_result) =
-        sqry_core::graph::unified::build::persist_durable_graph_transaction(
-            graph,
-            sqry_core::graph::unified::build::DurableGraphPersistenceRequest {
-                root: root_path,
-                plugins: &resolved_plugins.plugin_manager,
-                config: build_config,
-                build_command,
-                plugin_selection: resolved_plugins.persisted_selection.clone(),
-                progress,
-                effective_threads,
-            },
-        )?;
-
-    Ok(build_result)
+    Ok((graph, effective_threads))
 }
 
 /// Persist a fresh `HashIndex` capturing every parsed file from `graph` to
-/// `cache_dir`. Read-side load + short-circuit is deferred (audit row
-/// C001b-core); this is the save half of the pair.
+/// `cache_dir`. No sqry command reads it back: every build parses every
+/// file (audit row C001b-core).
 fn persist_hash_index_snapshot(
     graph: &sqry_core::graph::unified::CodeGraph,
     cache_dir: &Path,
@@ -709,15 +837,13 @@ pub fn run_index(
     no_incremental: bool,
     cache_dir: Option<&str>,
     classpath: bool,
-    _no_classpath: bool,
     classpath_depth: crate::args::ClasspathDepthArg,
     classpath_file: Option<&Path>,
     build_system: Option<&str>,
     force_classpath: bool,
     no_build_tool: bool,
     allow_nested: bool,
-    cfg_flags: &[String],
-    expand_cache: Option<&Path>,
+    macro_request: &MacroOptionsRequest,
 ) -> Result<()> {
     if let Some(0) = threads {
         anyhow::bail!("--threads must be >= 1");
@@ -725,15 +851,45 @@ pub fn run_index(
 
     let root_path = Path::new(path);
 
-    handle_gitignore(root_path, add_to_gitignore);
+    // Every input is checked before anything is written. The root must be a
+    // directory that exists, with no non-directory `.sqry` in it: the build
+    // refuses either, but only after the classpath step has created the root
+    // (`.sqry/classpath`) and the `.gitignore` entry has been added. Each
+    // leg then writes the `.gitignore` entry where it always stood in the
+    // output, after its own inputs are accepted: the early exit before it
+    // reports the index, the build before its banner. A refused input
+    // leaves nothing behind; a build that fails after every input was
+    // accepted keeps the entry, as it always did.
+    check_index_root(root_path)?;
+    if let Some(dir) = cache_dir {
+        check_cache_dir(Path::new(dir))?;
+    }
 
     // Check if graph already exists
     let storage = GraphStorage::new(root_path);
     // C001a: `--no-incremental` forces a full rebuild even when a snapshot
     // exists, so the early-exit gate honours it alongside `--force`.
     if storage.exists() && !force && !no_incremental {
+        // Surface parity W4 (W4-D8): this leg builds nothing, so a macro
+        // build option given here would be dropped without a word. It is
+        // refused, as both MCP hosts refuse it beside `force=false`.
+        if !macro_request.is_empty() {
+            anyhow::bail!(
+                "--cfg, --expand-cache and --no-macro-options need --force (or \
+                 --no-incremental) when an index already exists at {}; nothing was built",
+                storage.graph_dir().display()
+            );
+        }
+        // Surface parity W1 round 3 (design D17): classify the recorded
+        // selection before reporting the index, so an uncompiled id is
+        // refused by name and an unreadable manifest by file (naming
+        // `--force`), with a non-zero exit and nothing written. Explicit
+        // selection flags were ignored on this leg before and still are:
+        // nothing is built here.
+        plugin_defaults::classify_recorded_selection(root_path)?;
+        handle_gitignore(root_path, add_to_gitignore);
         println!("Index already exists at {}", storage.graph_dir().display());
-        println!("Use --force to rebuild, or run 'sqry update' to update incrementally");
+        println!("Use --force or run 'sqry update' to rebuild it");
         return Ok(());
     }
 
@@ -747,17 +903,51 @@ pub fn run_index(
         anyhow::bail!("{e}");
     }
 
+    // Build unified graph using the consolidated pipeline. The roster is
+    // resolved first because it owns the unreadable-manifest policy (W1,
+    // D9); the macro options follow that decision (W4, W4-D7).
+    let resolved_plugins =
+        plugin_defaults::resolve_plugin_selection(cli, root_path, PluginSelectionMode::FreshWrite)?;
+    let (build_config, macro_options) = create_build_config(
+        cli,
+        root_path,
+        threads,
+        macro_request,
+        UnreadableManifestRule::TreatAsNoRecord,
+    )?;
+    // The classpath file is read the way the classpath pipeline reads it,
+    // so a file that is missing, unreadable, or not text is refused here,
+    // in the pipeline's own words, instead of after `.sqry/classpath` and
+    // the `.gitignore` entry were written. Without the `jvm-classpath`
+    // feature the pipeline is compiled out and the flags only warn, so the
+    // file is never read.
+    #[cfg(feature = "jvm-classpath")]
+    if classpath && let Some(file) = classpath_file {
+        check_classpath_file(file)?;
+    }
+
+    // Every input of the build is accepted: the entry is written (or its
+    // absence warned about) where it always stood, before the banner.
+    handle_gitignore(root_path, add_to_gitignore);
     print_index_build_banner(root_path, threads);
 
     let start = Instant::now();
     let mut step_runner = StepRunner::new(!std::io::stderr().is_terminal() && !cli.json);
 
     let (progress_bar, progress) = create_progress_reporter(cli);
-
-    // Build unified graph using the consolidated pipeline
-    let build_config = create_build_config(cli, root_path, threads, cfg_flags, expand_cache)?;
-    let resolved_plugins =
-        plugin_defaults::resolve_plugin_selection(cli, root_path, PluginSelectionMode::FreshWrite)?;
+    // Surface parity W1 round 2 (D11): say where the selection came from,
+    // so a user who ran `sqry index --force` sees why `json` is on; and
+    // never fall back over an unreadable manifest silently. The warning
+    // goes to stderr regardless of `--json`; the source line is human
+    // output only, so the `--json` stdout shape is unchanged.
+    let first_report = BuiltInputsReport::of(&resolved_plugins, &macro_options);
+    if let Some(warning) = &first_report.warning {
+        eprintln!("warning: {warning}");
+    }
+    // The inputs resolved again under the persist lock, when they were
+    // (decision D-i8-4): those are the ones built and recorded, so they are
+    // the ones reported (audit item F).
+    let relocked: std::cell::RefCell<Option<BuiltInputsReport>> = std::cell::RefCell::new(None);
     let classpath_opts = ClasspathCliOptions {
         enabled: classpath,
         depth: classpath_depth,
@@ -774,15 +964,50 @@ pub fn run_index(
             root_path,
             &resolved_plugins,
             &build_config,
+            &|| {
+                let plugins = plugin_defaults::resolve_plugin_selection(
+                    cli,
+                    root_path,
+                    PluginSelectionMode::FreshWrite,
+                )?;
+                let (config, macro_options) = create_build_config(
+                    cli,
+                    root_path,
+                    threads,
+                    macro_request,
+                    UnreadableManifestRule::TreatAsNoRecord,
+                )?;
+                *relocked.borrow_mut() = Some(BuiltInputsReport::of(&plugins, &macro_options));
+                Ok((plugins, config))
+            },
             "cli:index",
             progress.clone(),
             Some(&classpath_opts),
             cache_dir_path,
             cli.json,
         )
-    })?;
+    });
 
     finish_progress_bar(progress_bar.as_ref());
+
+    // Surface parity W1 round 2 (D11) and W4 (W4-D7): say where the
+    // selection and the macro options came from, so a user who ran `sqry
+    // index --force` sees why `json` or `--cfg test` is on. Said once the
+    // build is done, about the inputs it was built with; for a build that
+    // failed, about the inputs it attempted (the last resolution it made),
+    // before the error. Human output only; the `--json` stdout shape is
+    // unchanged.
+    let built_report = relocked.into_inner();
+    if let Some(report) = &built_report
+        && report.warning != first_report.warning
+        && let Some(warning) = &report.warning
+    {
+        eprintln!("warning: {warning}");
+    }
+    if !cli.json {
+        built_report.as_ref().unwrap_or(&first_report).print();
+    }
+    let build_result = build_result?;
 
     let elapsed = start.elapsed();
 
@@ -812,6 +1037,111 @@ pub fn run_index(
     }
 
     Ok(())
+}
+
+/// Refuse a root `sqry index` cannot build, before anything is written: a
+/// path that does not exist (the classpath step would create it), a path
+/// that cannot be read, a path that is not a directory (the index lives
+/// in `<root>/.sqry`, so a file root fails only after the build), and a root
+/// whose `.sqry` exists but is not a directory (the persist cannot create
+/// `.sqry/graph` under it, and failed only after the build).
+fn check_index_root(root_path: &Path) -> Result<()> {
+    match fs::metadata(root_path) {
+        Ok(metadata) if metadata.is_dir() => check_index_dir(root_path),
+        Ok(_) => anyhow::bail!(
+            "Path {} is not a directory; sqry index builds the index of a directory; nothing \
+             was written",
+            root_path.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+            "Path {} does not exist; nothing was written",
+            root_path.display()
+        ),
+        Err(err) => anyhow::bail!(
+            "Path {} cannot be read ({err}); nothing was written",
+            root_path.display()
+        ),
+    }
+}
+
+/// The index directory `<root>/.sqry` of a root that is a directory: absent,
+/// or a directory (a link to one included). A file or a dangling link is
+/// refused by name, and so is one that cannot be read, before anything is
+/// written.
+fn check_index_dir(root_path: &Path) -> Result<()> {
+    let index_dir = root_path.join(".sqry");
+    let entry_exists = fs::symlink_metadata(&index_dir).is_ok();
+    match fs::metadata(&index_dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && !entry_exists => Ok(()),
+        Ok(_) => anyhow::bail!(
+            "Path {} is not a directory; sqry index writes the index there; nothing was written",
+            index_dir.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+            "Path {} is a link to nothing; sqry index writes the index there; nothing was written",
+            index_dir.display()
+        ),
+        Err(err) => anyhow::bail!(
+            "Path {} cannot be read ({err}); nothing was written",
+            index_dir.display()
+        ),
+    }
+}
+
+/// The `--cache-dir` directory the hash index is written to: absent (the
+/// write creates it) or a directory (a link to one included). A file, a link
+/// to nothing, and a path that cannot be read (one under a file included)
+/// are refused by name before anything is written. Before, the write failed
+/// only after the build, was logged at a level the CLI does not show, and
+/// the command exited 0 with no hash index written.
+fn check_cache_dir(cache_dir: &Path) -> Result<()> {
+    let entry_exists = fs::symlink_metadata(cache_dir).is_ok();
+    match fs::metadata(cache_dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound && !entry_exists => Ok(()),
+        Ok(_) => anyhow::bail!(
+            "--cache-dir {} is not a directory; the hash index is written into a directory; \
+             nothing was written",
+            cache_dir.display()
+        ),
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => anyhow::bail!(
+            "--cache-dir {} is a link to nothing; the hash index is written into a directory; \
+             nothing was written",
+            cache_dir.display()
+        ),
+        Err(err) => anyhow::bail!(
+            "--cache-dir {} cannot be read ({err}); nothing was written",
+            cache_dir.display()
+        ),
+    }
+}
+
+/// Read a manual classpath file the way the classpath pipeline reads it
+/// (`sqry_classpath::pipeline`, `resolve_from_manual_file`): opened, then
+/// read line by line as UTF-8. A failure is refused with the pipeline's own
+/// words, before anything is written; the pipeline reads the file again
+/// when it runs.
+#[cfg(feature = "jvm-classpath")]
+fn check_classpath_file(file: &Path) -> Result<()> {
+    let handle = fs::File::open(file).map_err(|e| {
+        anyhow::anyhow!(
+            "classpath resolution failed: Cannot open classpath file {}: {e}",
+            file.display()
+        )
+    });
+    let lines = handle.and_then(|handle| {
+        BufReader::new(handle)
+            .lines()
+            .try_for_each(|line| line.map(drop))
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "classpath resolution failed: Error reading classpath file {}: {e}",
+                    file.display()
+                )
+            })
+    });
+    lines.context("Classpath pipeline failed")
 }
 
 fn emit_graph_summary(
@@ -920,7 +1250,10 @@ fn finish_progress_bar(progress_bar: Option<&Arc<CliProgressReporter>>) {
 
 fn build_graph_status(storage: &GraphStorage) -> Result<IndexStatus> {
     let snapshot_exists = storage.snapshot_path().exists();
-    let manifest_exists = storage.manifest_path().exists();
+    // `exists()` waits out a live persist's set-aside window, so the status
+    // never reports a manifest that is only moved aside as missing
+    // (decision D-i8-1).
+    let manifest_exists = storage.exists();
 
     match (snapshot_exists, manifest_exists) {
         (false, false) => return Ok(IndexStatus::not_found()),
@@ -1119,15 +1452,66 @@ fn format_analysis_strategy_highlights(analysis_strategies: &[AnalysisStrategySu
     groups.join(" | ")
 }
 
-/// Create a `BuildConfig` from CLI flags.
+/// Create a `BuildConfig` from CLI flags, with the macro options resolved
+/// from the manifest's record overlaid by `macro_request` (surface parity
+/// W4, design W4-D7). Callers resolve the plugin roster first, because the
+/// roster owns the unreadable-manifest policy; `rule` is that decision.
+///
+/// Returns the config and the resolved options with their source, so the
+/// caller can say where they came from.
+///
+/// A relative directory in `macro_request` resolves against `root_path`;
+/// the CLI's own flags arrive absolute ([`MacroOptionsRequest::from_flags`]
+/// makes them so against the caller's working directory), so only a
+/// relative directory recorded in a hand-edited manifest reaches that rule.
+///
+/// # Errors
+///
+/// Returns an error when the label budget cannot be resolved, or when the
+/// macro options are refused ([`sqry_core::graph::unified::build::MacroOptionsError`]):
+/// the requested expand cache directory is empty; the recorded or requested
+/// directory does not exist, is not a directory, or cannot be anchored to
+/// the root (the message gives the core's reason for the directory's
+/// shape, [`expand_cache_missing_reason`]; for a requested one the remedy
+/// is a directory that exists, for a recorded one also
+/// `--no-macro-options`); its canonical path is not valid UTF-8; or the
+/// manifest is unreadable under [`UnreadableManifestRule::Refuse`].
 pub(crate) fn create_build_config(
     cli: &Cli,
     root_path: &Path,
     threads: Option<usize>,
-    cfg_flags: &[String],
-    expand_cache: Option<&Path>,
-) -> Result<sqry_core::graph::unified::build::BuildConfig> {
-    Ok(sqry_core::graph::unified::build::BuildConfig {
+    macro_request: &MacroOptionsRequest,
+    rule: UnreadableManifestRule,
+) -> Result<(
+    sqry_core::graph::unified::build::BuildConfig,
+    ResolvedMacroOptions,
+)> {
+    let macro_options = resolve_macro_options(root_path, macro_request, rule)
+        .map_err(|err| match err {
+            // The reason is the core's, chosen by the directory's shape;
+            // the remedy is the CLI's. A directory from `--expand-cache`
+            // (an explicit component replaces the record) needs a directory
+            // that exists, and dropping the record would not help; a
+            // recorded one can also be dropped with `--no-macro-options`.
+            sqry_core::graph::unified::build::MacroOptionsError::ExpandCacheMissing { dir } => {
+                let reason = expand_cache_missing_reason(&dir);
+                if macro_request.expand_cache_dir.is_some() {
+                    anyhow::anyhow!(
+                        "{reason} (from --expand-cache); pass a directory that exists, or \
+                         omit --expand-cache"
+                    )
+                } else {
+                    anyhow::anyhow!(
+                        "{reason} (recorded in the index manifest); pass --expand-cache <DIR> \
+                         naming a directory that exists, or drop the record with \
+                         --no-macro-options"
+                    )
+                }
+            }
+            other => anyhow::Error::new(other),
+        })
+        .with_context(|| format!("macro build options for {}", root_path.display()))?;
+    let config = sqry_core::graph::unified::build::BuildConfig {
         max_depth: if cli.max_depth == 0 {
             None
         } else {
@@ -1139,15 +1523,10 @@ pub(crate) fn create_build_config(
         label_budget: sqry_core::graph::unified::analysis::resolve_label_budget_config(
             root_path, None, None, None, false,
         )?,
-        // Phase 1a/1b: thread `--cfg` predicate strings and the `--expand-cache`
-        // directory into the Rust plugin's macro-boundary analysis. Empty/None
-        // (the `sqry update` path) leaves today's behaviour unchanged.
-        macro_options: sqry_core::graph::unified::build::MacroBuildOptions {
-            cfg_flags: cfg_flags.to_vec(),
-            expand_cache_dir: expand_cache.map(std::path::Path::to_path_buf),
-        },
+        macro_options: macro_options.options.clone(),
         ..sqry_core::graph::unified::build::BuildConfig::default()
-    })
+    };
+    Ok((config, macro_options))
 }
 
 /// Run index update command
@@ -1167,10 +1546,8 @@ pub fn run_update(
     path: &str,
     threads: Option<usize>,
     show_stats: bool,
-    _no_incremental: bool,
     cache_dir: Option<&str>,
     classpath: bool,
-    _no_classpath: bool,
     classpath_depth: crate::args::ClasspathDepthArg,
     classpath_file: Option<&Path>,
     build_system: Option<&str>,
@@ -1187,6 +1564,9 @@ pub fn run_update(
             "No index found at {}. Run 'sqry index' first.",
             storage.graph_dir().display()
         );
+    }
+    if let Some(dir) = cache_dir {
+        check_cache_dir(Path::new(dir))?;
     }
 
     // Capture the pre-update graph counts so `--stats` can report real deltas
@@ -1225,13 +1605,21 @@ pub fn run_update(
 
     let (progress_bar, progress) = create_progress_reporter(cli);
 
-    // Update graph using consolidated pipeline. Phase 1c: `sqry update` does not
-    // yet carry `--cfg` / `--expand-cache`, so it rebuilds with defaults.
-    let build_config = create_build_config(cli, root_path, threads, &[], None)?;
+    // Update graph using the consolidated pipeline. `sqry update` carries no
+    // macro flags of its own, so it reuses the options the manifest records
+    // (surface parity W4, W4-D7); the roster is resolved first because it
+    // owns the unreadable-manifest policy (an existing-index write refuses).
     let resolved_plugins = plugin_defaults::resolve_plugin_selection(
         cli,
         root_path,
         PluginSelectionMode::ExistingWrite,
+    )?;
+    let (build_config, _macro_options) = create_build_config(
+        cli,
+        root_path,
+        threads,
+        &MacroOptionsRequest::empty(),
+        UnreadableManifestRule::Refuse,
     )?;
     let classpath_opts = ClasspathCliOptions {
         enabled: classpath,
@@ -1247,6 +1635,23 @@ pub fn run_update(
             root_path,
             &resolved_plugins,
             &build_config,
+            &|| {
+                Ok((
+                    plugin_defaults::resolve_plugin_selection(
+                        cli,
+                        root_path,
+                        PluginSelectionMode::ExistingWrite,
+                    )?,
+                    create_build_config(
+                        cli,
+                        root_path,
+                        threads,
+                        &MacroOptionsRequest::empty(),
+                        UnreadableManifestRule::Refuse,
+                    )?
+                    .0,
+                ))
+            },
             "cli:update",
             progress.clone(),
             Some(&classpath_opts),
@@ -1339,27 +1744,29 @@ fn fmt_delta(delta: Option<i64>) -> String {
 ///   files. It is reported as an absolute; it deliberately carries NO delta,
 ///   because a correct workspace-only pre-update count is not available from
 ///   the header (the header only stores the registered total).
-struct UpdateStatsReport {
-    using_git_mode: bool,
-    nodes: usize,
-    nodes_delta: Option<i64>,
-    canonical_edges: usize,
-    canonical_edges_delta: Option<i64>,
-    raw_edges: usize,
-    workspace_files_indexed: usize,
-    registered_files: Option<usize>,
-    registered_files_delta: Option<i64>,
+pub(crate) struct UpdateStatsReport {
+    pub(crate) using_git_mode: bool,
+    pub(crate) nodes: usize,
+    pub(crate) nodes_delta: Option<i64>,
+    pub(crate) canonical_edges: usize,
+    pub(crate) canonical_edges_delta: Option<i64>,
+    pub(crate) raw_edges: usize,
+    pub(crate) workspace_files_indexed: usize,
+    pub(crate) registered_files: Option<usize>,
+    pub(crate) registered_files_delta: Option<i64>,
     /// Workspace (non-external) files per language, sorted count-desc then name.
-    files_by_language: Vec<(String, usize)>,
-    threads_used: usize,
-    active_plugins: Vec<String>,
-    built_at: String,
-    elapsed_seconds: f64,
+    pub(crate) files_by_language: Vec<(String, usize)>,
+    pub(crate) threads_used: usize,
+    pub(crate) active_plugins: Vec<String>,
+    pub(crate) built_at: String,
+    pub(crate) elapsed_seconds: f64,
 }
 
 /// Derive the `--stats` figures from the build result and the pre/post snapshot
-/// headers. See [`UpdateStatsReport`] for the file-count semantics.
-fn compute_update_stats(
+/// headers. See [`UpdateStatsReport`] for the file-count semantics. Shared
+/// with `sqry watch --stats` (surface parity W4, W4-D4), which computes one
+/// report per iteration and prints it through [`print_update_stats`].
+pub(crate) fn compute_update_stats(
     build_result: &BuildResult,
     pre_update_header: Option<&sqry_core::graph::unified::persistence::GraphHeader>,
     post_update_header: Option<&sqry_core::graph::unified::persistence::GraphHeader>,
@@ -1413,8 +1820,9 @@ fn compute_update_stats(
 /// canonical-edge, and registered-file deltas are reported against the
 /// pre-update header. Honours `--json`: emits a single structured object for
 /// programmatic consumers (stdout stays a single JSON document), otherwise a
-/// human-readable block.
-fn emit_update_stats(
+/// human-readable block. Shared with `sqry watch --stats`, which renders
+/// every iteration's [`BuildResult`] through it (surface parity W4, W4-D4).
+pub(crate) fn emit_update_stats(
     cli: &Cli,
     build_result: &BuildResult,
     pre_update_header: Option<&sqry_core::graph::unified::persistence::GraphHeader>,
@@ -1429,7 +1837,12 @@ fn emit_update_stats(
         elapsed,
         using_git_mode,
     );
+    print_update_stats(cli, &report);
+}
 
+/// Print one [`UpdateStatsReport`]: the `update_stats` JSON document under
+/// `--json`, the human-readable block otherwise.
+pub(crate) fn print_update_stats(cli: &Cli, report: &UpdateStatsReport) {
     if cli.json {
         let files_by_language: serde_json::Map<String, serde_json::Value> = report
             .files_by_language
@@ -1666,11 +2079,239 @@ fn print_gitignore_warning() {
 mod tests {
     use super::*;
     use crate::large_stack_test;
+    use crate::plugin_defaults::with_cleared_plugin_env;
+    use serial_test::serial;
     use sqry_core::graph::unified::persistence::GraphHeader;
     use std::collections::HashMap;
     use std::fs;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    /// A temp directory that is its own project: an empty `.git` marker at
+    /// its root stops the ancestor walk there, so an index or project
+    /// marker above `TMPDIR` cannot make `sqry index` refuse the fixture
+    /// as a nested index.
+    fn project_tempdir() -> TempDir {
+        let tmp = TempDir::new().expect("tempdir");
+        fs::create_dir(tmp.path().join(".git")).expect("project marker");
+        tmp
+    }
+
+    // -----------------------------------------------------------------
+    // Surface parity W1 round 2 (D11): `sqry index --force` keeps the
+    // recorded selection. T19, T19b (control), T25 (outcome leg, control)
+    // and the CLI ADD-form control. Each drives `run_index` in-process with
+    // a cleared `SQRY_*` environment.
+    // -----------------------------------------------------------------
+
+    /// One Rust file and one JSON file, so the fast path and `include_all`
+    /// build different graphs.
+    fn write_mixed_fixture(root: &Path) {
+        fs::create_dir_all(root.join("src")).expect("src dir");
+        fs::write(
+            root.join("src").join("lib.rs"),
+            "pub fn alpha() -> u32 { beta() }\npub fn beta() -> u32 { 2 }\n",
+        )
+        .expect("write lib.rs");
+        fs::write(
+            root.join("config.json"),
+            r#"{"name": "fixture", "nested": {"enabled": true, "count": 3}, "items": [1, 2]}"#,
+        )
+        .expect("write config.json");
+    }
+
+    /// `run_index` with every flag that is not under test at its default.
+    fn run_index_plain(cli: &crate::args::Cli, root: &Path, force: bool) -> Result<()> {
+        run_index(
+            cli,
+            root.to_str().expect("utf-8 path"),
+            force,
+            None,
+            false,
+            false,
+            None,
+            false,
+            crate::args::ClasspathDepthArg::Full,
+            None,
+            None,
+            false,
+            false, // no_build_tool
+            false, // allow_nested
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
+        )
+    }
+
+    fn recorded_selection(
+        root: &Path,
+    ) -> sqry_core::graph::unified::persistence::PluginSelectionManifest {
+        GraphStorage::new(root)
+            .load_manifest()
+            .expect("manifest readable")
+            .plugin_selection
+            .expect("plugin_selection recorded")
+    }
+
+    /// Index the fixture the way `sqry index --include-high-cost` does and
+    /// return the recorded selection, asserting the precondition that it
+    /// names `json` with `high_cost_mode: include_all`.
+    fn index_include_all(
+        root: &Path,
+    ) -> sqry_core::graph::unified::persistence::PluginSelectionManifest {
+        use clap::Parser;
+        let cli = crate::args::Cli::parse_from(["sqry", "index", "--include-high-cost"]);
+        run_index_plain(&cli, root, false).expect("include_all index builds");
+        let recorded = recorded_selection(root);
+        assert!(
+            recorded.active_plugin_ids.iter().any(|id| id == "json"),
+            "fixture precondition: include_all must record json, got {:?}",
+            recorded.active_plugin_ids
+        );
+        assert_eq!(recorded.high_cost_mode.as_deref(), Some("include_all"));
+        recorded
+    }
+
+    // T19: a forced `sqry index` with no selection flags over an
+    // `include_all` index leaves the recorded selection exactly as it was.
+    // On `abefdd8e3` the forced index dropped `json` and recorded
+    // `fast_path_default`.
+    large_stack_test! {
+    #[test]
+    #[serial]
+    fn index_force_without_flags_keeps_the_recorded_selection() {
+        with_cleared_plugin_env(|| {
+            use clap::Parser;
+            let tmp = project_tempdir();
+            let root = tmp.path().canonicalize().expect("canonical root");
+            write_mixed_fixture(&root);
+            let before = index_include_all(&root);
+
+            let plain = crate::args::Cli::parse_from(["sqry", "index"]);
+            run_index_plain(&plain, &root, true).expect("forced index rebuilds");
+
+            let after = recorded_selection(&root);
+            assert_eq!(
+                after, before,
+                "a forced index with no flags must record exactly the prior selection"
+            );
+            assert!(after.active_plugin_ids.iter().any(|id| id == "json"));
+            assert_eq!(after.high_cost_mode.as_deref(), Some("include_all"));
+        });
+    }
+    }
+
+    // T19b (control, green on both heads): an explicit narrowing flag is
+    // the caller changing the selection, so it narrows.
+    large_stack_test! {
+    #[test]
+    #[serial]
+    fn index_force_with_explicit_narrowing_flag_narrows_control() {
+        with_cleared_plugin_env(|| {
+            use clap::Parser;
+            let tmp = project_tempdir();
+            let root = tmp.path().canonicalize().expect("canonical root");
+            write_mixed_fixture(&root);
+            let before = index_include_all(&root);
+
+            let narrowing = crate::args::Cli::parse_from(["sqry", "index", "--exclude-high-cost"]);
+            run_index_plain(&narrowing, &root, true).expect("forced narrowing index rebuilds");
+
+            let after = recorded_selection(&root);
+            assert_ne!(after, before, "an explicit flag must change the selection");
+            assert!(
+                !after.active_plugin_ids.iter().any(|id| id == "json"),
+                "--exclude-high-cost must drop json, got {:?}",
+                after.active_plugin_ids
+            );
+            assert_eq!(after.high_cost_mode.as_deref(), Some("exclude_all"));
+        });
+    }
+    }
+
+    // T25, outcome leg (control, green on both heads): a forced index
+    // over a manifest that cannot be read rebuilds with the fast path and
+    // records that fallback. The stderr leg (the warning naming the file)
+    // is `sqry-cli/tests/index_force_selection.rs`, which drives the
+    // binary and captures stderr.
+    large_stack_test! {
+    #[test]
+    #[serial]
+    fn index_force_over_unreadable_manifest_records_the_fallback_control() {
+        with_cleared_plugin_env(|| {
+            use clap::Parser;
+            let tmp = project_tempdir();
+            let root = tmp.path().canonicalize().expect("canonical root");
+            write_mixed_fixture(&root);
+            index_include_all(&root);
+            let storage = GraphStorage::new(&root);
+            fs::write(storage.manifest_path(), b"{}").expect("unparseable manifest");
+
+            let plain = crate::args::Cli::parse_from(["sqry", "index"]);
+            run_index_plain(&plain, &root, true)
+                .expect("a forced index over an unreadable manifest rebuilds");
+
+            let after = recorded_selection(&root);
+            assert_eq!(
+                after.high_cost_mode.as_deref(),
+                Some("fast_path_default"),
+                "the fallback selection must be recorded, not None"
+            );
+            assert!(!after.active_plugin_ids.iter().any(|id| id == "json"));
+        });
+    }
+    }
+
+    // CLI ADD-form control (round 2): with D11 the recorded selection
+    // reaches `create_manager_from_selection`, so a manifest naming an id
+    // this binary did not compile is refused by name and the manifest
+    // bytes are unchanged. On `abefdd8e3` the planted id was never read
+    // and the forced index succeeded with the fast path.
+    large_stack_test! {
+    #[test]
+    #[serial]
+    fn index_force_refuses_a_recorded_selection_naming_an_uncompiled_plugin() {
+        with_cleared_plugin_env(|| {
+            use clap::Parser;
+            const PLANTED_ID: &str = "w1-r2-planted-plugin";
+            assert!(
+                sqry_plugin_registry::create_plugin_manager_all()
+                    .plugin_by_id(PLANTED_ID)
+                    .is_none(),
+                "the control needs an id no build compiles"
+            );
+            let tmp = project_tempdir();
+            let root = tmp.path().canonicalize().expect("canonical root");
+            write_mixed_fixture(&root);
+            let plain = crate::args::Cli::parse_from(["sqry", "index"]);
+            run_index_plain(&plain, &root, false).expect("initial index builds");
+
+            let storage = GraphStorage::new(&root);
+            let mut manifest = storage.load_manifest().expect("manifest readable");
+            manifest
+                .plugin_selection
+                .as_mut()
+                .expect("selection recorded")
+                .active_plugin_ids
+                .push(PLANTED_ID.to_string());
+            manifest
+                .save(storage.manifest_path())
+                .expect("manifest rewritten");
+            let bytes_before = fs::read(storage.manifest_path()).expect("manifest bytes");
+
+            let err = run_index_plain(&plain, &root, true)
+                .expect_err("a forced index must refuse a recorded selection naming an uncompiled plugin");
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains(PLANTED_ID),
+                "the refusal must name the id: {rendered}"
+            );
+            assert_eq!(
+                fs::read(storage.manifest_path()).expect("manifest bytes"),
+                bytes_before,
+                "the refusal must leave the manifest bytes unchanged"
+            );
+        });
+    }
+    }
 
     /// Build a synthetic `BuildResult` with the given workspace (non-external)
     /// file total so the delta semantics can be unit-tested in isolation.
@@ -1772,7 +2413,7 @@ mod tests {
     #[cfg(feature = "jvm-classpath")]
     #[test]
     fn classpath_auto_detection_miss_skips_pipeline() {
-        let tmp_cli_workspace = TempDir::new().unwrap();
+        let tmp_cli_workspace = project_tempdir();
         let classpath_opts = ClasspathCliOptions {
             enabled: true,
             depth: crate::args::ClasspathDepthArg::Full,
@@ -1793,7 +2434,7 @@ mod tests {
         use crate::args::Cli;
         use clap::Parser;
 
-        let tmp_cli_workspace = TempDir::new().unwrap();
+        let tmp_cli_workspace = project_tempdir();
         let file_path = tmp_cli_workspace.path().join("test.rs");
         fs::write(&file_path, "fn hello() {}").unwrap();
 
@@ -1807,15 +2448,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         );
         assert!(result.is_ok());
 
@@ -1831,7 +2470,7 @@ mod tests {
         use crate::args::Cli;
         use clap::Parser;
 
-        let tmp_cli_workspace = TempDir::new().unwrap();
+        let tmp_cli_workspace = project_tempdir();
         let file_path = tmp_cli_workspace.path().join("test.rs");
         fs::write(&file_path, "fn hello() {}").unwrap();
 
@@ -1847,15 +2486,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         )
         .unwrap();
 
@@ -1869,15 +2506,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         );
         assert!(result.is_ok());
 
@@ -1891,15 +2526,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         );
         assert!(result.is_ok());
     }
@@ -1911,7 +2544,7 @@ mod tests {
         use crate::args::Cli;
         use clap::Parser;
 
-        let tmp_cli_workspace = TempDir::new().unwrap();
+        let tmp_cli_workspace = project_tempdir();
         let cli = Cli::parse_from(["sqry", "update"]);
 
         let result = run_update(
@@ -1919,9 +2552,7 @@ mod tests {
             tmp_cli_workspace.path().to_str().unwrap(),
             None,
             false,
-            false,
             None,
-            false,
             false,
             crate::args::ClasspathDepthArg::Full,
             None,
@@ -1940,7 +2571,7 @@ mod tests {
         use crate::args::Cli;
         use clap::Parser;
 
-        let tmp_cli_workspace = TempDir::new().unwrap();
+        let tmp_cli_workspace = project_tempdir();
 
         // Create CLI with JSON flag
         let cli = Cli::parse_from(["sqry", "--json"]);
@@ -1967,7 +2598,7 @@ mod tests {
         use crate::args::Cli;
         use clap::Parser;
 
-        let tmp_cli_workspace = TempDir::new().unwrap();
+        let tmp_cli_workspace = project_tempdir();
         let file_path = tmp_cli_workspace.path().join("test.rs");
         fs::write(&file_path, "fn test_func() {}").unwrap();
 
@@ -1983,15 +2614,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         )
         .unwrap();
 
@@ -2178,7 +2807,7 @@ mod tests {
         use crate::args::Cli;
         use clap::Parser;
 
-        let tmp = TempDir::new().unwrap();
+        let tmp = project_tempdir();
         // A multi-language corpus (all Fast-tier plugins, included by default).
         fs::write(tmp.path().join("lib.rs"), "pub fn r() {}\n").unwrap();
         fs::write(tmp.path().join("app.py"), "def p():\n    pass\n").unwrap();
@@ -2194,15 +2823,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false,
-            &[],
-            None,
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         )
         .unwrap();
 
@@ -2260,7 +2887,7 @@ mod tests {
         use crate::args::Cli;
         use clap::Parser;
 
-        let tmp_cli_workspace = TempDir::new().unwrap();
+        let tmp_cli_workspace = project_tempdir();
         let file_path = tmp_cli_workspace.path().join("test.rs");
         fs::write(&file_path, "fn hello() {}").unwrap();
 
@@ -2276,15 +2903,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         )
         .unwrap();
 
@@ -2294,9 +2919,7 @@ mod tests {
             tmp_cli_workspace.path().to_str().unwrap(),
             None,
             true,
-            false,
             None,
-            false,
             false,
             crate::args::ClasspathDepthArg::Full,
             None,
@@ -2316,7 +2939,7 @@ mod tests {
         use crate::args::Cli;
         use clap::Parser;
 
-        let tmp = TempDir::new().unwrap();
+        let tmp = project_tempdir();
         let file_path = tmp.path().join("rebuild.rs");
         fs::write(&file_path, "fn original() {}").unwrap();
 
@@ -2332,15 +2955,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         )
         .expect("initial build should succeed");
 
@@ -2362,15 +2983,13 @@ mod tests {
             true,  // no_incremental = true ← drives the full-rebuild path
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         )
         .expect("--no-incremental must rebuild even when snapshot exists");
 
@@ -2419,7 +3038,7 @@ mod tests {
         use crate::args::{Cli, MetricsFormat};
         use clap::Parser;
 
-        let tmp = TempDir::new().unwrap();
+        let tmp = project_tempdir();
         let file_path = tmp.path().join("metrics.rs");
         fs::write(&file_path, "fn metric_target() {}").unwrap();
 
@@ -2433,15 +3052,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         )
         .expect("initial build for prometheus test must succeed");
 
@@ -2468,7 +3085,7 @@ mod tests {
         use crate::args::Cli;
         use clap::Parser;
 
-        let tmp = TempDir::new().unwrap();
+        let tmp = project_tempdir();
         // Outer project: Cargo.toml + .sqry/graph already in place.
         let proj = tmp.path().join("proj");
         fs::create_dir_all(proj.join(".sqry").join("graph")).unwrap();
@@ -2487,15 +3104,13 @@ mod tests {
             false,
             None,
             false,
-            false,
             crate::args::ClasspathDepthArg::Full,
             None,
             None,
             false,
             false, // no_build_tool
             false, // allow_nested = false → guard fires
-            &[],   // cfg_flags
-            None,  // expand_cache
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
         );
         let err = result.expect_err("nested creation must error without --allow-nested");
         let msg = err.to_string();
@@ -2512,7 +3127,7 @@ mod tests {
 
     #[test]
     fn plugin_manager_registers_elixir_extensions() {
-        let pm = crate::plugin_defaults::create_plugin_manager();
+        let pm = sqry_plugin_registry::create_plugin_manager();
         assert!(
             pm.plugin_for_extension("ex").is_some(),
             "Elixir .ex extension missing"

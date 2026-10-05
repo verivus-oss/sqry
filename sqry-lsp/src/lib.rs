@@ -702,6 +702,20 @@ pub fn build_test_service(session: &SessionManager) -> LspService<SqryLanguageSe
     service
 }
 
+/// Build an in-process LSP service and keep its client socket, for tests
+/// that drive a handler which talks back to the client (`sqry.index`
+/// creates a work-done progress token and reports its end). The test
+/// answers the server's requests on the socket and reads its
+/// notifications; [`build_test_service`] drops the socket, so such a
+/// handler fails before it runs.
+#[doc(hidden)]
+#[must_use]
+pub fn build_test_service_with_client(
+    session: &SessionManager,
+) -> (LspService<SqryLanguageServer>, ClientSocket) {
+    build_sqry_service(session.clone())
+}
+
 /// Serve the LSP protocol over TCP.
 ///
 /// # Errors

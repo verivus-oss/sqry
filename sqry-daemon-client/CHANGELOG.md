@@ -6,6 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+## [33.0.0](https://github.com/verivus-oss/sqry/compare/v32.0.1...v33.0.0) - 2026-10-05
+
+### Added
+
+- [**breaking**] release batch, surface parity W1 ([#842](https://github.com/verivus-oss/sqry/pull/842)) and W4, agent-skills, pinned actions ([#900](https://github.com/verivus-oss/sqry/pull/900))
 ## [28.0.0](https://github.com/verivus-oss/sqry/compare/v27.0.8...v28.0.0) - 2026-07-07
 
 ### Documentation

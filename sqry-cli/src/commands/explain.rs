@@ -11,10 +11,10 @@ use crate::index_discovery::find_nearest_index;
 use crate::output::OutputStreams;
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
-use sqry_core::graph::unified::FileScope;
 use sqry_core::graph::unified::concurrent::GraphSnapshot;
 use sqry_core::graph::unified::resolution::SymbolResolveError;
 use sqry_core::graph::unified::storage::{FileRegistry, NodeEntry};
+use sqry_core::graph::unified::{FileScope, NodeId};
 
 /// Symbol explanation output
 #[derive(Debug, Serialize)]
@@ -38,6 +38,37 @@ struct ExplainOutput {
     /// Context (surrounding code)
     #[serde(skip_serializing_if = "Option::is_none")]
     context: Option<SymbolContext>,
+    /// Callers and callees (absent under `--no-relations`), shaped as the
+    /// MCP `explain_code` response shapes them (surface parity W4, W4-D4).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    relations: Option<ExplainRelations>,
+}
+
+/// The direct callers and callees of the explained symbol; a side with no
+/// entries is omitted, as the MCP `explain_code` response omits it.
+#[derive(Debug, Serialize)]
+struct ExplainRelations {
+    /// Symbols with a `Calls` edge into the explained one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callers: Option<Vec<RelatedSymbol>>,
+    /// Symbols the explained one has a `Calls` edge to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    callees: Option<Vec<RelatedSymbol>>,
+}
+
+/// One related symbol, the fields the MCP `explain_code` tool reports.
+#[derive(Debug, Serialize)]
+struct RelatedSymbol {
+    /// Symbol name.
+    name: String,
+    /// Qualified name.
+    qualified_name: String,
+    /// Symbol kind.
+    kind: String,
+    /// File path as the graph registers it.
+    file: String,
+    /// One-based line of the definition.
+    line: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -102,6 +133,57 @@ fn build_symbol_context(
     }
 }
 
+/// Collect the direct callers and callees of `node_id` the way the MCP
+/// `explain_code` tool collects them (surface parity W4, W4-D4): the
+/// `Calls` edges into and out of the resolved node on the snapshot
+/// (`GraphSnapshot::get_callers` and `get_callees`, the NodeId-anchored
+/// primitives the MCP twin uses), each node once, rendered as a
+/// [`RelatedSymbol`] and sorted by file, line and name so the output is
+/// stable. `None` when the node has neither, as the MCP omits the key.
+fn collect_relations(snapshot: &GraphSnapshot, node_id: NodeId) -> Option<ExplainRelations> {
+    let render = |ids: Vec<NodeId>| -> Option<Vec<RelatedSymbol>> {
+        let strings = snapshot.strings();
+        let files = snapshot.files();
+        let unique: std::collections::BTreeSet<NodeId> = ids.into_iter().collect();
+        let mut out: Vec<RelatedSymbol> = unique
+            .into_iter()
+            .filter_map(|id| snapshot.get_node(id))
+            .map(|entry| {
+                let name = strings
+                    .resolve(entry.name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                RelatedSymbol {
+                    qualified_name: entry
+                        .qualified_name
+                        .and_then(|id| strings.resolve(id))
+                        .map_or_else(|| name.clone(), |s| s.to_string()),
+                    name,
+                    kind: format!("{:?}", entry.kind),
+                    file: files
+                        .resolve(entry.file)
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    line: entry.start_line,
+                }
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a.file
+                .cmp(&b.file)
+                .then(a.line.cmp(&b.line))
+                .then(a.name.cmp(&b.name))
+        });
+        (!out.is_empty()).then_some(out)
+    };
+    let callers = render(snapshot.get_callers(node_id));
+    let callees = render(snapshot.get_callees(node_id));
+    if callers.is_none() && callees.is_none() {
+        return None;
+    }
+    Some(ExplainRelations { callers, callees })
+}
+
 /// Run the explain command.
 ///
 /// `file_path` is the required `<FILE>` positional that scopes resolution to
@@ -121,7 +203,7 @@ pub fn run_explain(
     in_file: Option<&str>,
     line: Option<u32>,
     include_context: bool,
-    _include_relations: bool,
+    include_relations: bool,
 ) -> Result<()> {
     let mut streams = OutputStreams::new();
 
@@ -219,6 +301,15 @@ pub fn run_explain(
         None
     };
 
+    // Relations unless `--no-relations` (surface parity W4, W4-D4): the
+    // MCP `explain_code` honours `include_relations`, so the CLI answers
+    // the same question the same way.
+    let relations = if include_relations {
+        collect_relations(&snapshot, node_id)
+    } else {
+        None
+    };
+
     let output = ExplainOutput {
         name,
         qualified_name,
@@ -229,6 +320,7 @@ pub fn run_explain(
         visibility,
         documentation,
         context,
+        relations,
     };
 
     // Output
@@ -264,6 +356,23 @@ fn format_explain_text(output: &ExplainOutput) -> String {
         lines.push(format!("Code (lines {}-{}):", ctx.start_line, ctx.end_line));
         for (i, line) in ctx.code.lines().enumerate() {
             lines.push(format!("{:4} | {}", ctx.start_line as usize + i, line));
+        }
+    }
+
+    if let Some(ref relations) = output.relations {
+        lines.push(String::new());
+        for (label, side) in [
+            ("Callers", &relations.callers),
+            ("Callees", &relations.callees),
+        ] {
+            let entries = side.as_deref().unwrap_or_default();
+            lines.push(format!("{label} ({}):", entries.len()));
+            for related in entries {
+                lines.push(format!(
+                    "  {} [{}] {}:{}",
+                    related.qualified_name, related.kind, related.file, related.line
+                ));
+            }
         }
     }
 

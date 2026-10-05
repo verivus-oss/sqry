@@ -15,6 +15,16 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use tempfile::tempdir;
 
+/// A temp directory that is its own project: an empty `.git` marker at
+/// its root stops the ancestor walk there, so an index or project marker
+/// above `TMPDIR` cannot make `sqry index` refuse the fixture as a nested
+/// index or hand the test an unrelated outer graph.
+fn project_tempdir() -> tempfile::TempDir {
+    let dir = tempdir().expect("tempdir");
+    std::fs::create_dir(dir.path().join(".git")).expect("project marker");
+    dir
+}
+
 /// Help text for the root command lists `plan-query` alongside the legacy
 /// `query` subcommand.
 #[test]
@@ -48,7 +58,7 @@ fn plan_query_help_shows_predicate_examples() {
 /// not crash.
 #[test]
 fn plan_query_without_index_emits_diagnostic_and_exits_zero() {
-    let temp = tempdir().expect("tempdir");
+    let temp = project_tempdir();
     let mut cmd = Command::new(sqry_bin());
     cmd.args(["plan-query", "kind:function"])
         .current_dir(temp.path())
@@ -62,7 +72,7 @@ fn plan_query_without_index_emits_diagnostic_and_exits_zero() {
 /// No index is needed because parsing happens before graph load.
 #[test]
 fn plan_query_malformed_query_is_a_parse_error() {
-    let temp = tempdir().expect("tempdir");
+    let temp = project_tempdir();
 
     // Write a tiny fake index directory so `find_nearest_index` succeeds and
     // we reach the parser. If creating one is too heavy, the parser error
@@ -95,7 +105,7 @@ fn plan_query_malformed_query_is_a_parse_error() {
 /// The `--limit` flag is accepted and parses to a usize.
 #[test]
 fn plan_query_limit_flag_accepts_integer() {
-    let temp = tempdir().expect("tempdir");
+    let temp = project_tempdir();
     let mut cmd = Command::new(sqry_bin());
     cmd.args(["plan-query", "kind:function", "--limit", "50"])
         .current_dir(temp.path())
@@ -108,7 +118,7 @@ fn plan_query_limit_flag_accepts_integer() {
 /// != 0 with a usage message on stderr).
 #[test]
 fn plan_query_limit_flag_rejects_non_integer() {
-    let temp = tempdir().expect("tempdir");
+    let temp = project_tempdir();
     let mut cmd = Command::new(sqry_bin());
     cmd.args(["plan-query", "kind:function", "--limit", "not_a_number"])
         .current_dir(temp.path())
@@ -123,7 +133,7 @@ fn plan_query_limit_flag_rejects_non_integer() {
 /// Providing three positionals is a clap usage error.
 #[test]
 fn plan_query_too_many_positionals_errors() {
-    let temp = tempdir().expect("tempdir");
+    let temp = project_tempdir();
     let mut cmd = Command::new(sqry_bin());
     cmd.args([
         "plan-query",

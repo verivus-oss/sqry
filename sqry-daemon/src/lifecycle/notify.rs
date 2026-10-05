@@ -159,11 +159,30 @@ mod tests {
         );
     }
 
+    /// Takes the crate lock itself for the whole body, so the lock gate sees
+    /// the read `is_under_systemd` makes covered (decision D-i7-envlock-1: a holder's
+    /// guard covers only its `drop`).
     #[test]
     fn is_under_systemd_returns_false_without_notify_socket() {
-        let _guard = NotifySocketGuard::unset();
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("NOTIFY_SOCKET");
+        // SAFETY: the crate lock serialises every environment access of the
+        // crate's tests.
+        unsafe { std::env::remove_var("NOTIFY_SOCKET") };
+        let under_systemd = is_under_systemd();
+        // Restored before the assertion can panic, so a failure leaves the
+        // variable as it found it.
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("NOTIFY_SOCKET", value),
+                None => std::env::remove_var("NOTIFY_SOCKET"),
+            }
+        }
         assert!(
-            !is_under_systemd(),
+            !under_systemd,
             "is_under_systemd must return false when NOTIFY_SOCKET is absent"
         );
     }
@@ -176,9 +195,25 @@ mod tests {
         // We explicitly set NOTIFY_SOCKET to prove the guard is stronger
         // than env-var presence: the platform dispatch (`#[cfg(not(target_os
         // = "linux"))]`) must win, not the env-var check.
-        let _guard = NotifySocketGuard::set("/run/systemd/notify");
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("NOTIFY_SOCKET");
+        // SAFETY: the crate lock serialises every environment access of the
+        // crate's tests.
+        unsafe { std::env::set_var("NOTIFY_SOCKET", "/run/systemd/notify") };
+        let under_systemd = is_under_systemd();
+        // Restored before the assertion can panic, so a failure leaves the
+        // variable as it found it.
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("NOTIFY_SOCKET", value),
+                None => std::env::remove_var("NOTIFY_SOCKET"),
+            }
+        }
         assert!(
-            !is_under_systemd(),
+            !under_systemd,
             "is_under_systemd must always be false on non-Linux platforms \
              even when NOTIFY_SOCKET is set"
         );
@@ -190,12 +225,25 @@ mod tests {
     #[test]
     #[cfg(target_os = "linux")]
     fn is_under_systemd_returns_true_when_notify_socket_set() {
-        // SAFETY: test-only env mutation; wrapped in a guard that restores
-        // the previous value.  Test suite must NOT run with `cargo test
-        // --test-threads=1` suppressed; see guard implementation below.
-        let _guard = NotifySocketGuard::set("/run/systemd/notify");
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("NOTIFY_SOCKET");
+        // SAFETY: the crate lock serialises every environment access of the
+        // crate's tests.
+        unsafe { std::env::set_var("NOTIFY_SOCKET", "/run/systemd/notify") };
+        let under_systemd = is_under_systemd();
+        // Restored before the assertion can panic, so a failure leaves the
+        // variable as it found it.
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("NOTIFY_SOCKET", value),
+                None => std::env::remove_var("NOTIFY_SOCKET"),
+            }
+        }
         assert!(
-            is_under_systemd(),
+            under_systemd,
             "is_under_systemd must return true when NOTIFY_SOCKET is set"
         );
     }

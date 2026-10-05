@@ -46,10 +46,50 @@ pub mod workspace_symbol;
 
 static TEST_DELAY_MS: AtomicU64 = AtomicU64::new(0);
 
+/// LSP `RequestFailed`: "a request failed but it was syntactically correct,
+/// e.g the method name was known and the parameters were valid" (LSP 3.17).
+pub const LSP_REQUEST_FAILED: i64 = -32803;
+
 #[derive(Debug, thiserror::Error)]
 pub enum LspHandlerError {
     #[error("invalid parameter: {0}")]
     InvalidParams(String),
+    /// A valid request refused because of the workspace's state: a rebuild
+    /// the plugin roster or the macro options refuse, or a graph the
+    /// session could not rebuild. Sent as [`LSP_REQUEST_FAILED`] with the
+    /// refusal's own text (the whole error chain) and `data` naming its
+    /// kind.
+    #[error("{message}")]
+    RequestFailed {
+        /// The refusal, naming what was refused and why.
+        message: String,
+        /// `{"kind": ..., "root": ...}` for a client that dispatches on it.
+        data: Option<serde_json::Value>,
+    },
+}
+
+/// Render `err` and every cause in its chain on one line, as `{:#}` does,
+/// skipping a cause whose text the line already carries (an error whose
+/// `Display` names its source would otherwise print it twice).
+///
+/// Every place that turns an `anyhow::Error` into client-visible text (an
+/// error response, a progress line, a message, a telemetry event) uses
+/// this, so a context added on the way up can never hide the refusal it
+/// wraps behind its own outer message.
+#[must_use]
+pub fn render_error_chain(err: &anyhow::Error) -> String {
+    let mut rendered = String::new();
+    for cause in err.chain() {
+        let text = cause.to_string();
+        if text.is_empty() || rendered.contains(&text) {
+            continue;
+        }
+        if !rendered.is_empty() {
+            rendered.push_str(": ");
+        }
+        rendered.push_str(&text);
+    }
+    rendered
 }
 
 /// Configure an artificial delay (in milliseconds) that handler execution will respect.
@@ -276,5 +316,26 @@ mod tests {
         let pos = byte_position_to_lsp(&snap, 1, 3).unwrap();
         assert_eq!(pos.line, 0);
         assert_eq!(pos.character, 2);
+    }
+
+    /// An error whose `Display` names its source.
+    #[derive(Debug, thiserror::Error)]
+    #[error("refused: {0}")]
+    struct NamesItsSource(#[source] Cause);
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("the cause")]
+    struct Cause;
+
+    /// S9 (round 7): the whole chain on one line, a cause the line already
+    /// carries skipped (an error whose `Display` names its source would
+    /// print it twice), and an empty cause skipped; the other side, a cause
+    /// the line does not carry, is kept.
+    #[test]
+    fn render_error_chain_renders_each_cause_once() {
+        let err = anyhow::Error::new(NamesItsSource(Cause)).context("outer");
+        assert_eq!(render_error_chain(&err), "outer: refused: the cause");
+        let plain = anyhow::Error::new(Cause).context("outer").context("");
+        assert_eq!(render_error_chain(&plain), "outer: the cause");
     }
 }

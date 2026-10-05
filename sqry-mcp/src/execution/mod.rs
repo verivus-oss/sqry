@@ -70,8 +70,8 @@ pub use tools::{
 // avoids dead re-exports flagged by `clippy -D warnings`.
 #[allow(unused_imports)]
 pub use types::{
-    CodeContext, DiffSummary, NodeChange, NodeRefData, PositionData, RangeData, RebuildIndexData,
-    StructuralNeighborData, StructuralSimilarData, ToolExecution,
+    CodeContext, DiffSummary, GraphMetadata, NodeChange, NodeRefData, PositionData, RangeData,
+    RebuildIndexData, StructuralNeighborData, StructuralSimilarData, ToolExecution,
 };
 
 // Phase 8b Task 4: surface the per-tool `*_inner` re-exports at

@@ -139,7 +139,12 @@ pub struct McpConfig {
     ///
     /// Controls what sensitive data is redacted from MCP tool responses
     /// before they are sent to clients. Presets: `none` (passthrough),
-    /// `minimal` (paths only), `standard` (paths + code), `strict` (all).
+    /// `minimal` (paths only), `relative` (paths, with the clean
+    /// workspace-relative layout), `standard` (paths + code), `strict`
+    /// (all). A name is read trimmed and in any letter case
+    /// ([`sqry_mcp_redaction::RedactionPreset::parse`]); any other value
+    /// is refused by [`Self::load_or_default`] and [`Self::new`], never
+    /// read as no redaction (decision D-i8-20).
     ///
     /// # Environment Override
     /// Can be overridden with `SQRY_REDACTION_PRESET` environment variable.
@@ -339,10 +344,17 @@ impl McpConfig {
                 Self::parse_env_var(&index_timeout_str, "SQRY_MCP_INDEX_TIMEOUT_MS")?;
         }
 
-        // Store preset for logging; fine-grained overrides (SQRY_REDACT_PATHS, etc.)
-        // are handled by RedactionConfig::from_env() when the Redactor is created
+        // The preset, read as every surface reads it (trimmed, any letter
+        // case) and stored by its canonical name; an unknown value is
+        // refused here, as an unparseable number is, never read as no
+        // redaction (D-i8-20). The fine-grained overrides
+        // (`SQRY_REDACT_PATHS`, ...) are applied by
+        // `RedactionConfig::from_preset_with_env` when the redactor is built.
         if let Ok(preset_str) = env::var("SQRY_REDACTION_PRESET") {
-            config.redaction_preset = preset_str;
+            config.redaction_preset =
+                Self::parse_redaction_preset(&preset_str, "SQRY_REDACTION_PRESET")?
+                    .name()
+                    .to_string();
         }
 
         config.validate()?;
@@ -654,6 +666,7 @@ impl McpConfig {
     /// Validate the configuration
     fn validate(&self) -> Result<()> {
         // Validation happens in effective_* methods
+        self.effective_redaction_preset()?;
         self.effective_timeout_ms()?;
         self.effective_retry_delay_ms()?;
         self.effective_index_timeout_ms()?;
@@ -663,6 +676,33 @@ impl McpConfig {
         self.effective_engine_cache_capacity()?;
         self.effective_discovery_cache_capacity()?;
         Ok(())
+    }
+
+    /// The redaction preset this configuration names.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `redaction_preset` is not one of the preset
+    /// names (trimmed, any letter case), naming the value and the accepted
+    /// names. An unknown preset is refused, never read as no redaction
+    /// (decision D-i8-20).
+    pub fn effective_redaction_preset(&self) -> Result<sqry_mcp_redaction::RedactionPreset> {
+        Self::parse_redaction_preset(&self.redaction_preset, "mcp.redaction_preset")
+    }
+
+    /// Read a redaction preset name, refusing an unknown one with an error
+    /// that names `var_name`, the value and the accepted names.
+    fn parse_redaction_preset(
+        value: &str,
+        var_name: &str,
+    ) -> Result<sqry_mcp_redaction::RedactionPreset> {
+        sqry_mcp_redaction::RedactionPreset::parse(value).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Invalid value for {var_name}: {value:?}. Expected one of {} (any letter case); \
+                 an unknown preset is refused rather than served unredacted",
+                sqry_mcp_redaction::RedactionPreset::NAMES.join(", ")
+            )
+        })
     }
 
     /// Parse environment variable with strict error handling
@@ -696,6 +736,52 @@ impl McpConfig {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+
+    /// Round 8 (D-i8-20): the preset is read trimmed and in any letter case
+    /// and stored by its canonical name; any other value is refused by
+    /// validation with an error naming the value and the accepted names,
+    /// never read as no redaction. `validate()` checked no preset before,
+    /// so `Strict` and `bogus` both loaded and turned redaction off.
+    #[test]
+    fn the_redaction_preset_is_read_in_any_case_and_an_unknown_one_is_refused() {
+        for (value, name) in [
+            ("Strict", "strict"),
+            (" minimal ", "minimal"),
+            ("NONE", "none"),
+            ("relative\n", "relative"),
+            ("standard", "standard"),
+        ] {
+            let preset = McpConfig::parse_redaction_preset(value, "SQRY_REDACTION_PRESET")
+                .unwrap_or_else(|err| panic!("{value:?}: {err}"));
+            assert_eq!(preset.name(), name, "{value:?}");
+            let config = McpConfig {
+                redaction_preset: value.to_string(),
+                ..McpConfig::default()
+            };
+            assert!(config.validate().is_ok(), "{value:?}");
+        }
+        for value in ["bogus", "", "   ", "strictest"] {
+            let err = McpConfig::parse_redaction_preset(value, "SQRY_REDACTION_PRESET")
+                .expect_err("an unknown preset is refused")
+                .to_string();
+            assert!(
+                err.contains("SQRY_REDACTION_PRESET")
+                    && err.contains(&format!("{value:?}"))
+                    && err.contains("none, minimal, relative, standard, strict"),
+                "{value:?}: {err}"
+            );
+            let config = McpConfig {
+                redaction_preset: value.to_string(),
+                ..McpConfig::default()
+            };
+            let err = config
+                .validate()
+                .expect_err("validate refuses it")
+                .to_string();
+            assert!(err.contains("mcp.redaction_preset"), "{value:?}: {err}");
+        }
+        assert!(McpConfig::default().validate().is_ok());
+    }
 
     #[test]
     fn test_default_config() {

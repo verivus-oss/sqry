@@ -13,6 +13,10 @@
 //!    the `ShimRegister` object lacks `jsonrpc` and `method` fields →
 //!    `-32600 Invalid Request`.
 
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
+
 mod support;
 
 use serde_json::Value;

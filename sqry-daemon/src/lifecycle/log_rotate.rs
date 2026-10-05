@@ -694,7 +694,6 @@ pub fn install_tracing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lifecycle::test_support::NotifySocketGuard;
     use std::sync::{Arc, Barrier};
     use std::thread;
     use tempfile::TempDir;
@@ -1126,44 +1125,64 @@ mod tests {
     /// Design reference: §G.1 m4 fix + DAG U5 spec.
     #[test]
     fn notify_socket_set_skips_rolling_appender() {
+        // The crate lock is taken here, by the test itself, and held for the
+        // whole body (decision D-i7-envlock-1: the lock gate accepts a guard bound at
+        // the top of the body, and a holder's guard covers only its `drop`).
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let dir = TempDir::new().unwrap();
         let log_path = dir.path().join("sqryd.log");
-        let _guard = NotifySocketGuard::set("/run/systemd/notify.sock");
+        let previous = std::env::var_os("NOTIFY_SOCKET");
+        // SAFETY: the crate lock serialises every environment access of the
+        // crate's tests.
+        unsafe { std::env::set_var("NOTIFY_SOCKET", "/run/systemd/notify.sock") };
+
+        let under_systemd = crate::lifecycle::notify::is_under_systemd();
+        let existed_before = log_path.exists();
+        let cfg = crate::config::DaemonConfig {
+            log_file: crate::config::LogFileSetting::Path(log_path.clone()),
+            ..crate::config::DaemonConfig::default()
+        };
+        let result = install_tracing(&cfg, None);
+        let resolved = cfg.log_file.resolve();
+
+        // Restored before any assertion can panic, so a failure leaves the
+        // variable as it found it.
+        // SAFETY: as above.
+        unsafe {
+            match previous {
+                Some(value) => std::env::set_var("NOTIFY_SOCKET", value),
+                None => std::env::remove_var("NOTIFY_SOCKET"),
+            }
+        }
 
         // 1. Gate function must indicate systemd supervision.
         assert!(
-            crate::lifecycle::notify::is_under_systemd(),
+            under_systemd,
             "is_under_systemd must return true when NOTIFY_SOCKET is set (gate for \
              RollingSizeAppender skip in install_tracing)"
         );
 
         // Pre-condition: log file must not exist before the call.
         assert!(
-            !log_path.exists(),
+            !existed_before,
             "pre-condition: log file must not exist before install_tracing is called"
         );
 
-        let cfg = crate::config::DaemonConfig {
-            log_file: crate::config::LogFileSetting::Path(log_path.clone()),
-            ..crate::config::DaemonConfig::default()
-        };
-
-        let result = install_tracing(&cfg, None);
-
-        // 2. install_tracing must NOT return Ok(Some(WorkerGuard)) — that would
+        // 2. install_tracing must NOT return Ok(Some(WorkerGuard)): that would
         //    mean the rolling appender was activated despite the systemd gate.
         assert!(
             !matches!(result, Ok(Some(_))),
-            "install_tracing must not return Ok(Some(WorkerGuard)) under systemd — \
+            "install_tracing must not return Ok(Some(WorkerGuard)) under systemd: \
              rolling appender must be skipped when NOTIFY_SOCKET is set; \
-             log_file was {:?}",
-            cfg.log_file.resolve()
+             log_file was {resolved:?}"
         );
 
-        // 3. The log file must NOT have been created — unconditional, regardless
-        //    of whether try_init() succeeded or failed.  Under systemd the code
-        //    always takes the stderr-fallback path, so RollingSizeAppender::new()
-        //    (which opens the file eagerly) is never reached.
+        // 3. The log file must NOT have been created, unconditionally, whether
+        //    try_init() succeeded or failed. Under systemd the code always takes
+        //    the stderr-fallback path, so RollingSizeAppender::new() (which
+        //    opens the file eagerly) is never reached.
         assert!(
             !log_path.exists(),
             "log file must NOT be created when install_tracing goes through the \

@@ -50,7 +50,9 @@ use sqry_core::graph::unified::{EdgeKind, NodeKind};
 use sqry_core::json_response::IndexStatus;
 use sqry_core::progress::{IndexProgress, ProgressReporter, SharedReporter};
 use sqry_core::workspace::Classification;
-use sqry_plugin_registry::create_plugin_manager;
+use sqry_plugin_registry::{
+    BuildWithRosterError, PluginSelectionConfig, PluginSelectionError, UnreadableManifestPolicy,
+};
 
 use crate::handlers::LspHandlerError;
 use crate::protocol::{
@@ -299,7 +301,7 @@ fn load_status_graph(
     // integrity checks, and the caller-side self-heal preserves the
     // historic LSP behaviour: a corrupt snapshot is auto-rebuilt and
     // the session caches are cleared.
-    match crate::session::acquire_session_graph(target, "lsp:index_status") {
+    match crate::session::acquire_session_graph(target, "lsp:index_status", "lsp:auto_rebuild") {
         Ok(graph) => Ok(graph),
         Err(err) => {
             // The acquisition path returns `BuildFailed` when the auto-build
@@ -307,7 +309,7 @@ fn load_status_graph(
             // Otherwise we treat the error as a hard failure surfaced to
             // the LSP client.
             if matches!(
-                err,
+                err.error,
                 sqry_core::graph::acquisition::GraphAcquisitionError::BuildFailed { .. }
             ) {
                 // Make sure stale caches are cleared so the next request
@@ -469,54 +471,268 @@ pub fn index_status(session: &SessionManager, path: Option<&str>) -> Result<Inde
 pub struct RebuildSummary {
     pub total_symbols: usize,
     pub duration: Duration,
+    /// `true` when this call built and persisted a graph; `false` when
+    /// `force` was off and an index already existed, so the persisted graph
+    /// was loaded instead (surface parity W4, design W4-D5). The load is the
+    /// session's, so a snapshot that is missing or cannot be loaded is
+    /// rebuilt and rewritten by its self-heal, as on any read; `false` then
+    /// still means this call asked for no build.
+    pub built: bool,
 }
 
-/// Rebuild the sqry unified graph on disk.
+/// The `kind` of a refused build, the one the MCP hosts give the same
+/// refusal, or `None` for a build or persistence failure, which is not a
+/// refusal: a manifest naming a plugin id this binary did not compile is
+/// `workspace_incompatible_graph`; a manifest that cannot be read, or any
+/// other roster failure, `workspace_not_ready`; an expand cache directory
+/// that is not one the build can use `rebuild_macro_options_unavailable`;
+/// a request the check refuses, or an empty or unrecordable directory,
+/// `validation_error`. The self-heal reports the same kinds
+/// (`crate::session::SessionAcquisitionError`).
+pub(crate) fn refusal_kind(err: &BuildWithRosterError) -> Option<&'static str> {
+    use sqry_core::graph::unified::build::MacroOptionsError;
+    #[allow(deprecated)]
+    let kind = match err {
+        // An index removed after the persist took its lock is a refusal
+        // (decision D-i8-6): nothing was written, and a retry would only
+        // recreate it.
+        BuildWithRosterError::Build(err)
+            if err.chain().any(|cause| {
+                cause.is::<sqry_core::graph::unified::persistence::IndexRemovedDuringPersist>()
+            }) =>
+        {
+            "workspace_not_ready"
+        }
+        BuildWithRosterError::Build(_) => return None,
+        BuildWithRosterError::Selection(
+            PluginSelectionError::UnknownPluginIdsCtx { .. }
+            | PluginSelectionError::UnknownPluginIds { .. },
+        ) => "workspace_incompatible_graph",
+        BuildWithRosterError::Selection(_)
+        | BuildWithRosterError::MacroOptions(MacroOptionsError::ManifestUnreadable { .. }) => {
+            "workspace_not_ready"
+        }
+        BuildWithRosterError::MacroOptions(MacroOptionsError::ExpandCacheMissing { .. }) => {
+            "rebuild_macro_options_unavailable"
+        }
+        BuildWithRosterError::MacroRequest(_)
+        | BuildWithRosterError::MacroOptions(
+            MacroOptionsError::ExpandCachePathNotUtf8 { .. }
+            | MacroOptionsError::ExpandCacheEmpty
+            | MacroOptionsError::RecordedCfgFlagInvalid { .. },
+        ) => "validation_error",
+    };
+    Some(kind)
+}
+
+/// Whether dropping the macro options the manifest records removes the
+/// refusal `err`: an expand cache directory the record names that is gone
+/// or cannot be recorded, or a recorded cfg flag that names no predicate.
+/// The LSP sends no macro option of its own, so every such refusal it
+/// meets comes from the record, and the `sqry.index` command's third
+/// argument drops it ([`rebuild_index_with_reset`]). No other refusal is
+/// removed by the reset: a roster refusal or an unreadable manifest is
+/// not about the macro options.
+pub(crate) fn reset_drops_refusal(err: &BuildWithRosterError) -> bool {
+    use sqry_core::graph::unified::build::MacroOptionsError;
+    matches!(
+        err,
+        BuildWithRosterError::MacroOptions(
+            MacroOptionsError::ExpandCacheMissing { .. }
+                | MacroOptionsError::ExpandCachePathNotUtf8 { .. }
+                | MacroOptionsError::RecordedCfgFlagInvalid { .. }
+        )
+    )
+}
+
+/// The `sqry.index` arguments that drop the macro options recorded for
+/// `root` and rebuild it: the root, `force`, and the reset. A refusal the
+/// reset removes ([`reset_drops_refusal`]) carries them as
+/// `data.resetArguments`, so a client can send them back as they stand.
+pub(crate) fn reset_arguments(root: &Path) -> serde_json::Value {
+    serde_json::json!([root.display().to_string(), true, true])
+}
+
+/// The remedy a refusal the reset removes adds to its message, in the
+/// LSP's own spelling: the core's message names the CLI flag and the MCP
+/// field, neither of which an editor can send.
+pub(crate) fn reset_remedy(root: &Path) -> String {
+    format!(
+        "from the editor, the sqry.index command with the arguments {} drops the recorded macro \
+         options and rebuilds",
+        reset_arguments(root)
+    )
+}
+
+/// The handler error for a build the registry helper did not produce. A
+/// refused request (a manifest naming a plugin id this binary did not
+/// compile, macro options the manifest records that cannot be resolved) is
+/// [`super::LspHandlerError::RequestFailed`], naming the root and carrying
+/// the refusal's own text and its kind ([`refusal_kind`]); a refusal the
+/// reset of the recorded macro options removes also names that remedy and
+/// carries its arguments as `data.resetArguments` ([`reset_arguments`]). A
+/// build or persistence failure keeps its error chain for `InternalError`.
+/// Nothing is hidden behind an outer context.
+fn rebuild_refusal(target: &Path, err: BuildWithRosterError) -> anyhow::Error {
+    let Some(kind) = refusal_kind(&err) else {
+        return anyhow::Error::new(err).context(format!("rebuild of {} failed", target.display()));
+    };
+    let mut data = serde_json::json!({
+        "kind": kind,
+        "root": target.display().to_string(),
+    });
+    let message = if reset_drops_refusal(&err) {
+        data["resetArguments"] = reset_arguments(target);
+        format!(
+            "rebuild of {} refused: {err}; {}",
+            target.display(),
+            reset_remedy(target)
+        )
+    } else {
+        format!("rebuild of {} refused: {err}", target.display())
+    };
+    anyhow::Error::new(super::LspHandlerError::RequestFailed {
+        message,
+        data: Some(data),
+    })
+}
+
+/// The refusal for the reset of the recorded macro options asked without
+/// `force` over an existing index: that leg builds nothing, so the reset
+/// would be dropped on the floor; it is refused instead, as the MCP
+/// `rebuild_index` refuses `reset_macro_options` beside `force=false`.
+fn reset_needs_force(target: &Path) -> anyhow::Error {
+    anyhow::Error::new(super::LspHandlerError::RequestFailed {
+        message: format!(
+            "rebuild of {} refused: dropping the recorded macro options (the sqry.index \
+             command's third argument) needs force (its second argument) when an index already \
+             exists there; nothing was built",
+            target.display()
+        ),
+        data: Some(serde_json::json!({
+            "kind": "validation_error",
+            "root": target.display().to_string(),
+        })),
+    })
+}
+
+/// Rebuild the sqry unified graph on disk, or load it when one exists and
+/// `force` is off.
 ///
-/// This function builds a unified `CodeGraph` from source files and persists it
-/// to `.sqry/graph/snapshot.sqry`. It uses the same build pipeline as the CLI
-/// `sqry index` command.
+/// With `force` (or no index at `target`, or a `target` the session's
+/// logical workspace does not classify as a source root it owns) this
+/// builds a unified `CodeGraph` from source files and persists it to
+/// `.sqry/graph/snapshot.sqry` through the same registry helper as the CLI
+/// `sqry index`, the MCP `rebuild_index`
+/// and the LSP self-heal, reusing the macro options the manifest records
+/// (surface parity W4, W4-D7). Without `force` over an existing index (a
+/// manifest present) it builds nothing itself: it loads the persisted graph
+/// through the session (the shared provider: path policy, SHA-256, manifest
+/// classification; W4-D5); the `sqry.index` command's second argument is
+/// that `force`. That load is the one every read makes, so when the
+/// snapshot is missing or cannot be loaded the session's self-heal rebuilds
+/// the index and rewrites it (manifest and snapshot) before answering; an
+/// intact index is left untouched. That leg first classifies the manifest
+/// through the roster resolver the build runs, so a refusal answers exactly
+/// as it does with `force` (S4, round 7): the same
+/// [`super::LspHandlerError::RequestFailed`], text and kind, where it was an
+/// internal error whose message was the provider's debug rendering. An
+/// unreadable manifest is refused there by file, before the load, so the
+/// self-heal never rebuilds over it on this leg and nothing is written.
 ///
 /// # Errors
 ///
-/// Returns an error when graph building or persistence fails.
+/// Returns an error when graph building or persistence fails, when the
+/// existing index cannot be loaded, and
+/// [`super::LspHandlerError::RequestFailed`] when the rebuild is refused:
+/// the manifest names a plugin id this binary did not compile, or the
+/// macro options it records cannot be resolved (the expand cache directory
+/// does not exist or is not a directory, is empty, cannot be anchored to
+/// the root, or has a canonical path that is not valid UTF-8, or a recorded
+/// cfg flag names no predicate). A refusal of the record names the
+/// `sqry.index` arguments that drop it ([`rebuild_index_with_reset`]).
 pub fn rebuild_index(
     session: &SessionManager,
     target: &Path,
     reporter: &SharedReporter,
-    _force: bool,
+    force: bool,
 ) -> Result<RebuildSummary> {
-    use sqry_core::graph::unified::build::build_and_persist_graph_with_progress;
+    rebuild_index_with_reset(session, target, reporter, force, false)
+}
 
+/// [`rebuild_index`], dropping the macro options the manifest records
+/// first when `reset_macro_options` is set: the `sqry.index` command's third
+/// argument, the LSP's spelling of `sqry index --no-macro-options` and of
+/// the MCP `rebuild_index`'s `reset_macro_options`. It is the remedy for a
+/// refusal the record causes (`reset_drops_refusal`): a recorded expand
+/// cache directory that is gone, which `sqry index --force` alone refuses
+/// too. Without `force` over an existing index nothing is built, so the
+/// reset is refused there rather than dropped (`reset_needs_force`).
+///
+/// # Errors
+///
+/// [`rebuild_index`]'s errors, and the refusal of a reset without `force`
+/// over an existing index.
+pub fn rebuild_index_with_reset(
+    session: &SessionManager,
+    target: &Path,
+    reporter: &SharedReporter,
+    force: bool,
+    reset_macro_options: bool,
+) -> Result<RebuildSummary> {
     let start = Instant::now();
 
-    let plugins = create_plugin_manager();
+    // The existence probe goes through the session's resolved workspace
+    // (surface parity W4 round 2, W4-D16): a path the workspace does not
+    // own as a source root answers `false` and falls through to the build,
+    // exactly as every call built before `force` was honoured.
+    if !force && session.persisted_index_exists(target) {
+        if reset_macro_options {
+            return Err(reset_needs_force(target));
+        }
+        sqry_plugin_registry::resolve_workspace_roster(target, &PluginSelectionConfig::default())
+            .map_err(|err| rebuild_refusal(target, BuildWithRosterError::Selection(err)))?;
+        session.clear_graph_cache();
+        session.clear_project_graph_cache_for_path(target);
+        let graph = session
+            .graph_for_path(target)
+            .with_context(|| format!("load the existing index at {}", target.display()))?
+            .ok_or_else(|| anyhow::anyhow!("no graph for {}", target.display()))?;
+        return Ok(RebuildSummary {
+            total_symbols: graph.node_count(),
+            duration: start.elapsed(),
+            built: false,
+        });
+    }
+
     let build_config = BuildConfig {
         label_budget: sqry_core::graph::unified::analysis::resolve_label_budget_config(
             target, None, None, None, false,
         )?,
         ..BuildConfig::default()
     };
-    let plugin_selection = (!plugins.plugins().is_empty()).then(|| {
-        sqry_core::graph::unified::persistence::PluginSelectionManifest {
-            active_plugin_ids: plugins
-                .plugins()
-                .iter()
-                .map(|plugin| plugin.metadata().id.to_string())
-                .collect(),
-            high_cost_mode: None,
-        }
-    });
 
-    let (graph, _build_result) = build_and_persist_graph_with_progress(
+    // Surface parity W1 round 2 (D8, D9): the roster comes from the
+    // workspace manifest through the one registry helper (fast-path
+    // fallback for a brand-new index), so the recorded selection and its
+    // `high_cost_mode` are carried through. This is an explicit rebuild,
+    // so a manifest that exists but cannot be read falls back, is logged,
+    // and the fallback is recorded.
+    let built = sqry_plugin_registry::build_and_persist_with_workspace_roster(
         target,
-        &plugins,
-        &build_config,
+        &PluginSelectionConfig::default(),
+        UnreadableManifestPolicy::FallBack,
         "lsp:rebuild_index",
-        plugin_selection,
+        &build_config,
+        &sqry_core::graph::unified::build::MacroOptionsRequest {
+            reset: reset_macro_options,
+            ..sqry_core::graph::unified::build::MacroOptionsRequest::empty()
+        },
         reporter.clone(),
     )
-    .context("Failed to build and persist unified graph")?;
+    .map_err(|err| rebuild_refusal(target, err))?;
+    crate::session::warn_if_manifest_was_unreadable(&built.roster, target);
+    let graph = built.graph;
 
     // Clear the graph cache so it reloads the newly built graph
     session.clear_graph_cache();
@@ -527,6 +743,7 @@ pub fn rebuild_index(
     Ok(RebuildSummary {
         total_symbols: node_count,
         duration: start.elapsed(),
+        built: true,
     })
 }
 
@@ -1636,5 +1853,96 @@ mod tests {
             format!("{order:?}", order = SortOrder::ByRelevance),
             "ByRelevance"
         );
+    }
+
+    /// Round 8 (plant O32): the kind of every refused build shape, the one
+    /// the MCP hosts give the same refusal, and none for a build that
+    /// failed. The empty expand cache directory and the unrecordable one
+    /// are invalid arguments, not an unusable directory; the LSP itself
+    /// never sends a requested directory, so no wire reaches the empty one.
+    #[test]
+    fn refusal_kind_names_each_refused_build_by_its_kind() {
+        use sqry_core::graph::unified::build::{MacroOptionsError, MacroRequestError};
+        use std::path::PathBuf;
+
+        let cases: Vec<(BuildWithRosterError, Option<&str>)> = vec![
+            (
+                BuildWithRosterError::Build(anyhow::anyhow!("disk full")),
+                None,
+            ),
+            (
+                BuildWithRosterError::Selection(sqry_plugin_registry::unknown_plugin_ids_error(
+                    &["r8-uncompiled".to_string()],
+                    None,
+                )),
+                Some("workspace_incompatible_graph"),
+            ),
+            (
+                BuildWithRosterError::Selection(PluginSelectionError::ManifestUnreadable {
+                    manifest_path: PathBuf::from("/ws/.sqry/graph/manifest.json"),
+                    reason: "EOF".to_string(),
+                }),
+                Some("workspace_not_ready"),
+            ),
+            (
+                BuildWithRosterError::MacroOptions(MacroOptionsError::ManifestUnreadable {
+                    manifest_path: PathBuf::from("/ws/.sqry/graph/manifest.json"),
+                    reason: "EOF".to_string(),
+                }),
+                Some("workspace_not_ready"),
+            ),
+            (
+                BuildWithRosterError::MacroOptions(MacroOptionsError::ExpandCacheMissing {
+                    dir: PathBuf::from("/ws/gone"),
+                }),
+                Some("rebuild_macro_options_unavailable"),
+            ),
+            (
+                BuildWithRosterError::MacroOptions(MacroOptionsError::ExpandCacheEmpty),
+                Some("validation_error"),
+            ),
+            (
+                BuildWithRosterError::MacroOptions(MacroOptionsError::ExpandCachePathNotUtf8 {
+                    dir: PathBuf::from("/ws/cache"),
+                }),
+                Some("validation_error"),
+            ),
+            (
+                BuildWithRosterError::MacroRequest(MacroRequestError::CfgFlagEmpty),
+                Some("validation_error"),
+            ),
+            // A cfg flag the manifest records that names no predicate (a
+            // hand-edited record): the invalid argument both MCP hosts
+            // answer it with, not an unusable directory.
+            (
+                BuildWithRosterError::MacroOptions(MacroOptionsError::RecordedCfgFlagInvalid {
+                    flag: " test ".to_string(),
+                }),
+                Some("validation_error"),
+            ),
+        ];
+        for (err, kind) in &cases {
+            assert_eq!(refusal_kind(err), *kind, "{err}");
+        }
+    }
+
+    /// Decision D-i8-6 (fifth audit, item 3): a persist the core refused
+    /// because the index directory was removed after it took the lock is a
+    /// refusal of kind `workspace_not_ready`, as the MCP hosts answer it,
+    /// not a build failure (`None`, an internal error). Before, the LSP
+    /// gave `None`.
+    #[test]
+    fn an_index_removed_during_the_persist_is_a_refusal() {
+        let removed = anyhow::Error::new(
+            sqry_core::graph::unified::persistence::IndexRemovedDuringPersist::new(
+                std::path::Path::new("/ws/.sqry/graph"),
+            ),
+        )
+        .context("durable graph persistence transaction failed");
+        let err = BuildWithRosterError::Build(removed);
+        assert_eq!(refusal_kind(&err), Some("workspace_not_ready"), "{err}");
+        // A build failure that is not that refusal stays a failure.
+        let failed = BuildWithRosterError::Build(anyhow::anyhow!("snapshot write failed"));
+        assert_eq!(refusal_kind(&failed), None);
     }
 }

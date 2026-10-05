@@ -383,6 +383,9 @@ mod tests {
     /// assertions. Uses the public `Default` impl so that any new field with a
     /// sensible default does not silently break these tests.
     fn fixture_cfg() -> DaemonConfig {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         DaemonConfig::default()
     }
 
@@ -477,6 +480,8 @@ mod tests {
         let opts = InstallOptions {
             user: Some("NT AUTHORITY\\NetworkService".to_string()),
             exe_path: None,
+            // The Windows generators ignore it (launchd only).
+            home_dir: None,
         };
         let output = generate_sc_create(&cfg, &opts);
 
@@ -586,6 +591,8 @@ mod tests {
         let opts = InstallOptions {
             user: Some("DOMAIN\\alice".to_string()),
             exe_path: None,
+            // The Windows generators ignore it (launchd only).
+            home_dir: None,
         };
         let output = generate_task_xml(&cfg, &opts);
 
@@ -757,6 +764,8 @@ mod tests {
         let opts = InstallOptions {
             user: None,
             exe_path: Some(std::path::PathBuf::from("C:\\Prog&s\\sqry<d>.exe")),
+            // The Windows generators ignore it (launchd only).
+            home_dir: None,
         };
         let output = generate_task_xml(&cfg, &opts);
 
@@ -778,6 +787,8 @@ mod tests {
         let opts = InstallOptions {
             user: Some("DOM&AIN\\ali<ce>".to_string()),
             exe_path: None,
+            // The Windows generators ignore it (launchd only).
+            home_dir: None,
         };
         let output = generate_task_xml(&cfg, &opts);
 

@@ -2103,6 +2103,28 @@ pub struct RebuildIndexArgs {
     pub path: String,
     /// Force rebuild even if index exists
     pub force: bool,
+    /// `Some(flags)`: replace the recorded `--cfg` flags; `None`: keep them
+    /// (surface parity W4, design W4-D8).
+    pub cfg_flags: Option<Vec<String>>,
+    /// `Some(dir)`: replace the recorded expand cache; `None`: keep it. A
+    /// relative directory is passed through as given: the resolver anchors
+    /// it to the directory `path` names, never to the server's working
+    /// directory.
+    pub expand_cache: Option<std::path::PathBuf>,
+    /// Drop the recorded macro options before applying the two above.
+    pub reset_macro_options: bool,
+}
+
+impl RebuildIndexArgs {
+    /// The macro options request these arguments express.
+    #[must_use]
+    pub fn macro_request(&self) -> sqry_core::graph::unified::build::MacroOptionsRequest {
+        sqry_core::graph::unified::build::MacroOptionsRequest {
+            cfg_flags: self.cfg_flags.clone(),
+            expand_cache_dir: self.expand_cache.clone(),
+            reset: self.reset_macro_options,
+        }
+    }
 }
 
 /// Direction for call hierarchy traversal.

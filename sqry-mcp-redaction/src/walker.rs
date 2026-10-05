@@ -9,6 +9,7 @@ use crate::RedactionConfig;
 use crate::jsonpath::{CompiledJsonPath, PathComponent, path_to_string};
 use crate::preview::{RedactionReason, RedactionTarget};
 use crate::redactor::RedactionResult;
+use crate::rules::path::ContextualPath;
 use crate::whitelist;
 
 /// Context for JSON traversal.
@@ -27,6 +28,10 @@ pub struct WalkerContext<'a> {
     pub preview_targets: Vec<RedactionTarget>,
     /// Preserved field paths (for dry-run mode).
     pub preserved_paths: Vec<String>,
+    /// The path or workspace key whose array is being walked: a string
+    /// reached from that key through arrays alone (no object key between)
+    /// is a value of that key ([`walk_keyed_array`]).
+    array_key: Option<String>,
     /// Current recursion depth.
     depth: usize,
     /// Maximum allowed recursion depth.
@@ -48,6 +53,7 @@ impl<'a> WalkerContext<'a> {
             result: RedactionResult::default(),
             preview_targets: Vec::new(),
             preserved_paths: Vec::new(),
+            array_key: None,
             depth: 0,
             max_depth: config.max_depth,
         }
@@ -122,7 +128,10 @@ pub fn walk_and_redact(value: &mut Value, ctx: &mut WalkerContext<'_>) {
     match value {
         Value::Object(map) => walk_object(map, ctx),
         Value::Array(arr) => walk_array(arr, ctx),
-        Value::String(s) => handle_string_patterns(s, ctx),
+        Value::String(s) => match ctx.array_key.clone() {
+            Some(key) => handle_keyed_string(&key, value, ctx),
+            None => handle_string_patterns(s, ctx),
+        },
         // Primitives don't need traversal
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
@@ -130,11 +139,52 @@ pub fn walk_and_redact(value: &mut Value, ctx: &mut WalkerContext<'_>) {
 }
 
 fn walk_object(map: &mut Map<String, Value>, ctx: &mut WalkerContext<'_>) {
+    // An object's own keys decide how its values are read, so a key whose
+    // array holds this object no longer applies inside it.
+    let array_key = ctx.array_key.take();
     let keys = collect_object_keys(map);
     for key in keys {
         ctx.push_field(&key);
         handle_object_field(map, &key, ctx);
         ctx.pop();
+    }
+    ctx.array_key = array_key;
+}
+
+/// Walk the array under the path or workspace key `field_name` so that
+/// each string in it, at any depth of nested arrays, is read as a value of
+/// that key ([`handle_keyed_string`]): a list of paths is redacted as each
+/// of its paths would be. An object in the array is walked by its own keys.
+/// Every item goes through [`walk_and_redact`], so the depth guard applies.
+fn walk_keyed_array(field_name: &str, arr: &mut [Value], ctx: &mut WalkerContext<'_>) {
+    let outer = ctx.array_key.replace(field_name.to_string());
+    for (i, item) in arr.iter_mut().enumerate() {
+        ctx.push_index(i);
+        walk_and_redact(item, ctx);
+        ctx.pop();
+    }
+    ctx.array_key = outer;
+}
+
+/// A string reached from the path or workspace key `field_name` through
+/// arrays alone. Under passthrough it is checked against a bound
+/// workspace's exclusions as the key's own string would be; otherwise it is
+/// redacted as the key's own string would be when it is a path
+/// ([`path_value`]), and scanned like any other string when it is not.
+fn handle_keyed_string(field_name: &str, value: &mut Value, ctx: &mut WalkerContext<'_>) {
+    if is_passthrough(ctx.config) {
+        if passthrough_exclusion_applies(field_name, value, ctx) {
+            redact_excluded_in_passthrough(field_name, value, ctx);
+        }
+        return;
+    }
+    let Value::String(text) = value else {
+        return;
+    };
+    if path_value(field_name, text).is_some() {
+        redact_string_value(field_name, text, ctx);
+    } else {
+        handle_string_patterns(text, ctx);
     }
 }
 
@@ -147,9 +197,9 @@ fn handle_object_field(map: &mut Map<String, Value>, key: &str, ctx: &mut Walker
         return;
     };
 
-    if should_redact_field(key, ctx) {
+    if should_redact_field(key, field_value, ctx) {
         redact_value(key, field_value, ctx);
-    } else if passthrough_exclusion_applies(key, ctx) {
+    } else if passthrough_exclusion_applies(key, field_value, ctx) {
         // Passthrough mode is normally a no-op (`should_redact_field` short-
         // circuits on `is_passthrough`), but `STEP_7` acceptance criterion 6
         // (preset=any + path in exclusions → opaque hash + excluded: true)
@@ -175,9 +225,17 @@ fn handle_object_field(map: &mut Map<String, Value>, key: &str, ctx: &mut Walker
 
 /// `STEP_7` criterion 6 hook: `true` iff we are in passthrough mode but
 /// the operator bound a `LogicalWorkspaceView` AND the current field is
-/// path-bearing. Drives the exclusions-override-passthrough branch in
-/// [`handle_object_field`].
-fn passthrough_exclusion_applies(field_name: &str, ctx: &WalkerContext<'_>) -> bool {
+/// path-bearing and its value can lie under an exclusion. Drives the
+/// exclusions-override-passthrough branch in [`handle_object_field`].
+///
+/// An exclusion names a place in the workspace, so only a value that names
+/// a place can fall under one: an object or an array (walked), or a string
+/// that [`path_value`] reads as [`PathValue::Whole`] (any non-empty string
+/// under a key that always names a path, and exactly one absolute path
+/// under a contextual key). A contextual value that is not a path, or that
+/// holds a path but names no place ([`PathValue::Unplaced`]: a relative
+/// path, prose), is left as it is, as passthrough leaves every other value.
+fn passthrough_exclusion_applies(field_name: &str, value: &Value, ctx: &WalkerContext<'_>) -> bool {
     let config = ctx.config;
     if !is_passthrough(config) {
         return false;
@@ -185,13 +243,84 @@ fn passthrough_exclusion_applies(field_name: &str, ctx: &WalkerContext<'_>) -> b
     if config.logical_workspace.is_none() {
         return false;
     }
-    whitelist::is_path_field(field_name) || whitelist::is_workspace_field(field_name)
+    if !(whitelist::is_path_field(field_name) || whitelist::is_workspace_field(field_name)) {
+        return false;
+    }
+    match value {
+        Value::String(text) => matches!(path_value(field_name, text), Some(PathValue::Whole(_))),
+        Value::Object(_) | Value::Array(_) => true,
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
+
+/// How the string under a path or workspace key is a path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathValue<'a> {
+    /// The text is one path, redacted through the path pipeline as written
+    /// here (relative to the workspace when it lies inside it).
+    Whole(&'a str),
+    /// The value holds a path but names no place: redacted as a path
+    /// outside the workspace ([`crate::rules::path::redact_unanchored_path`]).
+    Unplaced,
+}
+
+/// Whether, and how, the string `text` under the path or workspace key
+/// `field_name` is a path. Redaction changes only paths, so it never
+/// changes a name, an enumerated value or a type:
+///
+/// - under a key that always names a path (`path`, `file_path`, `fileUri`,
+///   `root`, ...) any non-empty string is one whole path, as written; an
+///   empty string names nothing;
+/// - under a contextual key ([`whitelist::CONTEXTUAL_PATH_FIELDS`]:
+///   `source`, `target`, `src`, `dst`, `uri`, `url`) the value is read by
+///   [`crate::rules::path::classify_contextual_value`]: a value with no
+///   path separator, or one URL of a scheme other than `file`, is not a
+///   path; exactly one absolute path is a whole path (its surrounding
+///   whitespace trimmed); any other value with a separator (a relative,
+///   home or drive-relative path, a path after a prefix or with whitespace
+///   in it, prose holding a path) is a path that names no place.
+fn path_value<'a>(field_name: &str, text: &'a str) -> Option<PathValue<'a>> {
+    if !whitelist::is_contextual_path_field(field_name) {
+        return (!text.is_empty()).then_some(PathValue::Whole(text));
+    }
+    match crate::rules::path::classify_contextual_value(text) {
+        ContextualPath::NotAPath => None,
+        ContextualPath::Anchored(trimmed) => Some(PathValue::Whole(trimmed)),
+        ContextualPath::Unanchored => Some(PathValue::Unplaced),
+    }
+}
+
+/// Whether the value of a path or workspace field is a path the redactor
+/// may rewrite:
+///
+/// - a string is a path when [`path_value`] says it is;
+/// - an object or an array is walked: an object by its own keys, and each
+///   string in an array, through nested arrays, as a value of this key
+///   ([`walk_keyed_array`]);
+/// - a null, boolean or number is never a path.
+///
+/// A contextual value that is not a path is walked as an ordinary string,
+/// so in-string detection
+/// ([`crate::rules::pattern::detect_paths_in_string`]) still runs on it: a
+/// value with no separator holds nothing that detection can match, and
+/// detection keeps the own path of a URL of a scheme other than `file`
+/// (it still redacts a host path in the URL's query or parameters).
+fn carries_path(field_name: &str, value: &Value) -> bool {
+    match value {
+        Value::String(text) => path_value(field_name, text).is_some(),
+        Value::Object(_) | Value::Array(_) => true,
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
 }
 
 /// Rewrite a path-bearing string field under passthrough mode when a
 /// bound `LogicalWorkspaceView` flags it as excluded. Non-excluded
 /// values are left untouched (criterion 3). Object/array shaped values
 /// recurse so nested path-bearing fields get the same treatment.
+///
+/// [`passthrough_exclusion_applies`] decides whether a value is checked at
+/// all; this only picks the text to check: the trimmed path of a contextual
+/// value that is exactly one absolute path, otherwise the string as it is.
 fn redact_excluded_in_passthrough(
     field_name: &str,
     value: &mut Value,
@@ -202,8 +331,12 @@ fn redact_excluded_in_passthrough(
             let Some(view) = ctx.config.logical_workspace.as_ref() else {
                 return;
             };
+            let text = match path_value(field_name, s) {
+                Some(PathValue::Whole(text)) => text,
+                Some(PathValue::Unplaced) | None => s.as_str(),
+            };
             let outcome = crate::rules::path::redact_path_with_workspace(
-                s,
+                text,
                 view,
                 &ctx.config.workspace_placeholder,
                 ctx.config.hash_filenames,
@@ -227,14 +360,24 @@ fn redact_excluded_in_passthrough(
                 *value = Value::String(redacted_path.rendered);
             }
         }
-        Value::Object(_) | Value::Array(_) => {
-            // Path-bearing object / array values (e.g. `{ "fileUri": "...",
+        Value::Object(_) => {
+            // Path-bearing object values (e.g. `{ "fileUri": "...",
             // "range": {...} }`) recurse so nested string fields receive
             // the same passthrough-exclusion treatment. We rely on the
             // walker's normal traversal to re-enter `handle_object_field`
             // for descendant string values; no preset escalation occurs.
-            let _ = field_name;
             walk_and_redact(value, ctx);
+        }
+        Value::Array(arr) => {
+            // A list under the key: each string in it is checked as the
+            // key's own string would be.
+            if ctx.depth >= ctx.max_depth {
+                walk_and_redact(value, ctx);
+            } else {
+                ctx.depth += 1;
+                walk_keyed_array(field_name, arr, ctx);
+                ctx.depth -= 1;
+            }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
     }
@@ -273,7 +416,7 @@ fn handle_string_patterns(value: &mut String, ctx: &mut WalkerContext<'_>) {
 }
 
 /// Determine if a field should be redacted.
-fn should_redact_field(field_name: &str, ctx: &WalkerContext<'_>) -> bool {
+fn should_redact_field(field_name: &str, value: &Value, ctx: &WalkerContext<'_>) -> bool {
     let config = ctx.config;
 
     // Step 1: Security mode check - passthrough mode skips everything
@@ -288,7 +431,7 @@ fn should_redact_field(field_name: &str, ctx: &WalkerContext<'_>) -> bool {
 
     // Step 3: Check specific field types that are always redacted when their toggle is on
     // These are checked BEFORE whitelist because the intent is to redact sensitive field types
-    if should_redact_by_field_type(field_name, config) {
+    if should_redact_by_field_type(field_name, value, config) {
         return true;
     }
 
@@ -314,12 +457,18 @@ fn is_passthrough(config: &RedactionConfig) -> bool {
     matches!(config.security_mode, crate::SecurityMode::Passthrough)
 }
 
-fn should_redact_by_field_type(field_name: &str, config: &RedactionConfig) -> bool {
-    if config.redact_workspace_path && whitelist::is_workspace_field(field_name) {
+fn should_redact_by_field_type(field_name: &str, value: &Value, config: &RedactionConfig) -> bool {
+    if config.redact_workspace_path
+        && whitelist::is_workspace_field(field_name)
+        && carries_path(field_name, value)
+    {
         return true;
     }
 
-    if config.redact_absolute_paths && whitelist::is_path_field(field_name) {
+    if config.redact_absolute_paths
+        && whitelist::is_path_field(field_name)
+        && carries_path(field_name, value)
+    {
         return true;
     }
 
@@ -346,11 +495,17 @@ fn redact_value(field_name: &str, value: &mut Value, ctx: &mut WalkerContext<'_>
             redact_object_value(field_name, value, ctx);
         }
         Value::Array(arr) => {
-            // Route through walk_and_redact to ensure the depth guard is applied.
-            for (i, item) in arr.iter_mut().enumerate() {
-                ctx.push_index(i);
-                walk_and_redact(item, ctx);
-                ctx.pop();
+            // Each item goes through walk_and_redact, so the depth guard
+            // applies; a string in the list under a path or workspace key is
+            // read as a value of that key.
+            if whitelist::is_path_field(field_name) || whitelist::is_workspace_field(field_name) {
+                walk_keyed_array(field_name, arr, ctx);
+            } else {
+                for (i, item) in arr.iter_mut().enumerate() {
+                    ctx.push_index(i);
+                    walk_and_redact(item, ctx);
+                    ctx.pop();
+                }
             }
         }
         // Null, bool, number - replace with placeholder string
@@ -455,9 +610,22 @@ fn redact_path_field(
         return None;
     }
 
-    let result = redact_path_for_config(content, config);
+    let (result, path) = match path_value(field_name, content) {
+        Some(PathValue::Whole(path)) => (redact_path_for_config(path, config), path),
+        Some(PathValue::Unplaced) => (
+            crate::rules::path::redact_unanchored_path(
+                content,
+                config.hash_filenames,
+                config.normalized_salt(),
+            ),
+            content,
+        ),
+        // Not a path, yet redacted: a custom field list or a JSONPath named
+        // this field, so the whole value goes through the path pipeline.
+        None => (redact_path_for_config(content, config), content),
+    };
 
-    let reason = if crate::rules::uri::is_file_uri(content) {
+    let reason = if crate::rules::uri::is_file_uri(path) {
         RedactionReason::FileUri
     } else {
         RedactionReason::AbsolutePath

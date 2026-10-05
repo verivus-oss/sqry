@@ -76,6 +76,80 @@ pub const DEFAULT_HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// Each [`DaemonClient`] instance owns exactly one connection; operations
 /// are serialised through [`DaemonClient::send_request`]. For concurrent
 /// access, create separate `DaemonClient` instances.
+/// The `daemon/rebuild` request fields beyond `path` (surface parity W4,
+/// design W4-D8). `Default` is a plain `force = false` rebuild that reuses
+/// the macro options the workspace manifest records.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RebuildOptions {
+    /// Force a full rebuild from scratch.
+    pub force: bool,
+    /// `Some(flags)`: replace the recorded `--cfg` flags; `None`: keep them.
+    pub cfg_flags: Option<Vec<String>>,
+    /// `Some(dir)`: replace the recorded expand cache; `None`: keep it.
+    pub expand_cache: Option<std::path::PathBuf>,
+    /// Drop the recorded macro options before applying the two above.
+    pub reset_macro_options: bool,
+}
+
+/// Encode one request parameter as JSON, refusing what JSON text cannot
+/// carry (a path that is not valid UTF-8) instead of panicking the way
+/// `serde_json::json!` does on that refusal.
+fn encode_param<T: serde::Serialize + ?Sized>(
+    method: &'static str,
+    field: &'static str,
+    value: &T,
+) -> Result<serde_json::Value, ClientError> {
+    serde_json::to_value(value).map_err(|source| ClientError::RequestEncoding {
+        method,
+        field,
+        path: None,
+        source,
+    })
+}
+
+/// [`encode_param`] for a path, naming the path in the refusal.
+fn encode_path_param(
+    method: &'static str,
+    field: &'static str,
+    path: &Path,
+) -> Result<serde_json::Value, ClientError> {
+    serde_json::to_value(path).map_err(|source| ClientError::RequestEncoding {
+        method,
+        field,
+        path: Some(path.to_path_buf()),
+        source,
+    })
+}
+
+/// The `daemon/rebuild` parameters for `path` and `options`: only the
+/// fields the caller set, so a default [`RebuildOptions`] is byte-identical
+/// to the plain `{path, force}` request.
+fn rebuild_params(path: &Path, options: &RebuildOptions) -> Result<serde_json::Value, ClientError> {
+    const METHOD: &str = "daemon/rebuild";
+    let mut params = serde_json::Map::new();
+    params.insert("path".to_string(), encode_path_param(METHOD, "path", path)?);
+    params.insert("force".to_string(), serde_json::Value::Bool(options.force));
+    if let Some(cfg_flags) = &options.cfg_flags {
+        params.insert(
+            "cfg_flags".to_string(),
+            encode_param(METHOD, "cfg_flags", cfg_flags)?,
+        );
+    }
+    if let Some(expand_cache) = &options.expand_cache {
+        params.insert(
+            "expand_cache".to_string(),
+            encode_path_param(METHOD, "expand_cache", expand_cache)?,
+        );
+    }
+    if options.reset_macro_options {
+        params.insert(
+            "reset_macro_options".to_string(),
+            serde_json::Value::Bool(true),
+        );
+    }
+    Ok(serde_json::Value::Object(params))
+}
+
 pub struct DaemonClient {
     stream: Pin<Box<dyn AsyncReadWrite + Send>>,
     daemon_version: String,
@@ -193,18 +267,7 @@ impl DaemonClient {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, ClientError> {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-
-        let expected_id = JsonRpcId::I64(id);
-        let request = JsonRpcRequest {
-            jsonrpc: JsonRpcVersion,
-            id: Some(expected_id.clone()),
-            method: method.to_owned(),
-            params,
-        };
-
-        framing::write_frame_json(&mut self.stream, &request).await?;
+        let expected_id = self.write_request(method, params).await?;
 
         let response: JsonRpcResponse = match framing::read_frame_json(&mut self.stream).await? {
             Some(r) => r,
@@ -239,6 +302,28 @@ impl DaemonClient {
                 data: error.data,
             }),
         }
+    }
+
+    /// Write one JSON-RPC 2.0 request frame (flushed) and return its id,
+    /// without reading the response.
+    async fn write_request(
+        &mut self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<JsonRpcId, ClientError> {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1);
+
+        let request_id = JsonRpcId::I64(id);
+        let request = JsonRpcRequest {
+            jsonrpc: JsonRpcVersion,
+            id: Some(request_id.clone()),
+            method: method.to_owned(),
+            params,
+        };
+
+        framing::write_frame_json(&mut self.stream, &request).await?;
+        Ok(request_id)
     }
 
     // -----------------------------------------------------------------------
@@ -288,6 +373,8 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
+    /// - [`ClientError::RequestEncoding`] if `path` is not valid UTF-8;
+    ///   nothing is sent.
     /// - [`ClientError::RpcError`] with code `-32004` if the workspace
     ///   is not loaded.
     /// - [`ClientError::RpcError`] with code `-32008` if the workspace
@@ -303,6 +390,7 @@ impl DaemonClient {
         path: &Path,
         force: bool,
     ) -> Result<serde_json::Value, ClientError> {
+        let path = encode_path_param("daemon/reset", "path", path)?;
         self.send_request(
             "daemon/reset",
             serde_json::json!({ "path": path, "force": force }),
@@ -368,6 +456,8 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
+    /// - [`ClientError::RequestEncoding`] if `path` is not valid UTF-8;
+    ///   nothing is sent.
     /// - [`ClientError::RpcError`] with code `-32004` if the workspace
     ///   is not loaded.
     /// - [`ClientError::RpcError`] with code `-32001` if the rebuild fails.
@@ -377,6 +467,7 @@ impl DaemonClient {
         path: &Path,
         force: bool,
     ) -> Result<serde_json::Value, ClientError> {
+        let path = encode_path_param("daemon/rebuild", "path", path)?;
         self.send_request(
             "daemon/rebuild",
             serde_json::json!({ "path": path, "force": force }),
@@ -384,13 +475,75 @@ impl DaemonClient {
         .await
     }
 
+    /// Send a `daemon/rebuild` JSON-RPC request carrying the macro build
+    /// option fields as well as `force` (surface parity W4, design W4-D8).
+    ///
+    /// Only the fields the caller set are sent: an absent `cfg_flags` or
+    /// `expand_cache` keeps what the workspace manifest records, and
+    /// `reset_macro_options` is sent only when `true`, so a request with
+    /// default [`RebuildOptions`] is byte-identical to [`Self::rebuild`]'s.
+    /// A relative `expand_cache` is sent as given and the daemon resolves it
+    /// against the workspace root; the CLI makes its flag absolute first.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::RequestEncoding`] if `path` or `expand_cache` is not
+    ///   valid UTF-8; nothing is sent.
+    /// - [`ClientError::RpcError`] with code `-32004` if the workspace is
+    ///   not loaded, `-32001` if the rebuild fails or the manifest cannot be
+    ///   read, `-32005` if the manifest names a plugin id the daemon did not
+    ///   compile, and `-32022` if the expand cache directory does not exist
+    ///   or is not a directory.
+    /// - [`ClientError::RpcError`] with code `-32602` if the request is
+    ///   refused as an argument: the expand cache directory is empty, or its
+    ///   canonical path is not valid UTF-8, or another request with
+    ///   different macro options is already waiting.
+    /// - Propagates other errors from [`Self::send_request`].
+    pub async fn rebuild_with_options(
+        &mut self,
+        path: &Path,
+        options: &RebuildOptions,
+    ) -> Result<serde_json::Value, ClientError> {
+        let params = rebuild_params(path, options)?;
+        self.send_request("daemon/rebuild", params).await
+    }
+
+    /// Send the [`Self::rebuild_with_options`] request and return once it is
+    /// written to the daemon socket, without reading the response
+    /// (`sqry daemon rebuild --timeout 0`).
+    ///
+    /// The daemon reads a request frame whole before it acts on it, and it
+    /// does not watch the connection while the rebuild runs, so the rebuild
+    /// proceeds after this client closes the connection; only the daemon's
+    /// reply, which nobody reads, is lost. The connection must not be used
+    /// for another request afterwards: its unread reply would answer that
+    /// request's read.
+    ///
+    /// # Errors
+    ///
+    /// - [`ClientError::RequestEncoding`] if `path` or `expand_cache` is not
+    ///   valid UTF-8; nothing is sent.
+    /// - [`ClientError::Frame`] if the frame cannot be written.
+    pub async fn send_rebuild_with_options(
+        &mut self,
+        path: &Path,
+        options: &RebuildOptions,
+    ) -> Result<(), ClientError> {
+        let params = rebuild_params(path, options)?;
+        self.write_request("daemon/rebuild", params).await?;
+        Ok(())
+    }
+
     /// Send a `daemon/cancel_rebuild` JSON-RPC request to cancel an
     /// in-flight rebuild for the workspace at `path`.
     ///
     /// # Errors
     ///
-    /// Propagates errors from [`Self::send_request`].
+    /// [`ClientError::RequestEncoding`] if `path` is not valid UTF-8
+    /// (nothing is sent); otherwise propagates errors from
+    /// [`Self::send_request`].
     pub async fn cancel_rebuild(&mut self, path: &Path) -> Result<serde_json::Value, ClientError> {
+        let path = encode_path_param("daemon/cancel_rebuild", "path", path)?;
         self.send_request("daemon/cancel_rebuild", serde_json::json!({ "path": path }))
             .await
     }
@@ -415,9 +568,10 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
-    /// Propagates errors from [`Self::send_request`]. Additionally
-    /// returns [`ClientError::SchemaMismatch`] if the JSON-RPC
-    /// `"result"` field cannot be decoded into
+    /// [`ClientError::RequestEncoding`] if `index_root` is not valid UTF-8
+    /// (nothing is sent). Otherwise propagates errors from
+    /// [`Self::send_request`], and returns [`ClientError::SchemaMismatch`]
+    /// if the JSON-RPC `"result"` field cannot be decoded into
     /// `ResponseEnvelope<LoadResult>`. Notable daemon-side error codes:
     ///
     /// - `-32001` (`WorkspaceBuildFailed`) if the graph builder fails.
@@ -427,6 +581,7 @@ impl DaemonClient {
         &mut self,
         index_root: &std::path::Path,
     ) -> Result<ResponseEnvelope<LoadResult>, ClientError> {
+        let index_root = encode_path_param("daemon/load", "index_root", index_root)?;
         let raw = self
             .send_request(
                 "daemon/load",
@@ -445,15 +600,20 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
-    /// Propagates errors from [`Self::send_request`]. Additionally returns
-    /// [`ClientError::SchemaMismatch`] if the daemon response does not decode
-    /// as [`ResponseEnvelope<LoadRevisionResult>`].
+    /// [`ClientError::RequestEncoding`] if `request.root` is not valid
+    /// UTF-8 (nothing is sent). Otherwise propagates errors from
+    /// [`Self::send_request`], and returns [`ClientError::SchemaMismatch`]
+    /// if the daemon response does not decode as
+    /// [`ResponseEnvelope<LoadRevisionResult>`].
     pub async fn load_revision(
         &mut self,
         request: LoadRevisionRequest,
     ) -> Result<ResponseEnvelope<LoadRevisionResult>, ClientError> {
         let raw = self
-            .send_request("daemon/loadRevision", serde_json::json!(request))
+            .send_request(
+                "daemon/loadRevision",
+                encode_param("daemon/loadRevision", "params", &request)?,
+            )
             .await?;
         decode_envelope("daemon/loadRevision", raw)
     }
@@ -462,14 +622,20 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
-    /// Propagates errors from [`Self::send_request`] and strict response
-    /// decoding errors.
+    /// [`ClientError::RequestEncoding`] if `request` cannot be encoded as
+    /// JSON (nothing is sent); it carries a revision id and a flag, so no
+    /// value of today's request type is refused. Otherwise propagates
+    /// errors from [`Self::send_request`] and strict response decoding
+    /// errors.
     pub async fn unload_revision(
         &mut self,
         request: UnloadRevisionRequest,
     ) -> Result<ResponseEnvelope<UnloadRevisionResult>, ClientError> {
         let raw = self
-            .send_request("daemon/unloadRevision", serde_json::json!(request))
+            .send_request(
+                "daemon/unloadRevision",
+                encode_param("daemon/unloadRevision", "params", &request)?,
+            )
             .await?;
         decode_envelope("daemon/unloadRevision", raw)
     }
@@ -478,14 +644,18 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
-    /// Propagates errors from [`Self::send_request`] and strict response
-    /// decoding errors.
+    /// [`ClientError::RequestEncoding`] if `request.root` is not valid
+    /// UTF-8 (nothing is sent). Otherwise propagates errors from
+    /// [`Self::send_request`] and strict response decoding errors.
     pub async fn list_revisions(
         &mut self,
         request: ListRevisionsRequest,
     ) -> Result<ResponseEnvelope<ListRevisionsResult>, ClientError> {
         let raw = self
-            .send_request("daemon/listRevisions", serde_json::json!(request))
+            .send_request(
+                "daemon/listRevisions",
+                encode_param("daemon/listRevisions", "params", &request)?,
+            )
             .await?;
         decode_envelope("daemon/listRevisions", raw)
     }
@@ -494,14 +664,19 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
-    /// Propagates errors from [`Self::send_request`] and strict response
-    /// decoding errors.
+    /// [`ClientError::RequestEncoding`] if `request` cannot be encoded as
+    /// JSON (nothing is sent); it carries a revision id, so no value of
+    /// today's request type is refused. Otherwise propagates errors from
+    /// [`Self::send_request`] and strict response decoding errors.
     pub async fn revision_status(
         &mut self,
         request: RevisionStatusRequest,
     ) -> Result<ResponseEnvelope<RevisionStatus>, ClientError> {
         let raw = self
-            .send_request("daemon/revisionStatus", serde_json::json!(request))
+            .send_request(
+                "daemon/revisionStatus",
+                encode_param("daemon/revisionStatus", "params", &request)?,
+            )
             .await?;
         decode_envelope("daemon/revisionStatus", raw)
     }
@@ -510,14 +685,18 @@ impl DaemonClient {
     ///
     /// # Errors
     ///
-    /// Propagates errors from [`Self::send_request`] and strict response
-    /// decoding errors.
+    /// [`ClientError::RequestEncoding`] if `request.root` is not valid
+    /// UTF-8 (nothing is sent). Otherwise propagates errors from
+    /// [`Self::send_request`] and strict response decoding errors.
     pub async fn prune_revisions(
         &mut self,
         request: PruneRevisionsRequest,
     ) -> Result<ResponseEnvelope<PruneRevisionsResult>, ClientError> {
         let raw = self
-            .send_request("daemon/pruneRevisions", serde_json::json!(request))
+            .send_request(
+                "daemon/pruneRevisions",
+                encode_param("daemon/pruneRevisions", "params", &request)?,
+            )
             .await?;
         decode_envelope("daemon/pruneRevisions", raw)
     }
@@ -1426,5 +1605,211 @@ mod tests {
         }
 
         handle.await.expect("join").expect("server ok");
+    }
+
+    // -----------------------------------------------------------------------
+    // Request encoding: `daemon/rebuild` fields and paths JSON cannot carry.
+    // -----------------------------------------------------------------------
+
+    /// The `daemon/rebuild` parameters carry only what the caller set: a
+    /// default request is `{path, force}`, and each macro field appears only
+    /// when given, `reset_macro_options` only when `true`.
+    #[test]
+    fn rebuild_params_carry_only_the_fields_given() {
+        let path = Path::new("/ws");
+        assert_eq!(
+            rebuild_params(path, &RebuildOptions::default()).expect("encodes"),
+            serde_json::json!({ "path": "/ws", "force": false })
+        );
+        let options = RebuildOptions {
+            force: true,
+            cfg_flags: Some(vec!["test".to_string(), "feature=x".to_string()]),
+            expand_cache: Some(PathBuf::from("/ws/cache")),
+            reset_macro_options: true,
+        };
+        assert_eq!(
+            rebuild_params(path, &options).expect("encodes"),
+            serde_json::json!({
+                "path": "/ws",
+                "force": true,
+                "cfg_flags": ["test", "feature=x"],
+                "expand_cache": "/ws/cache",
+                "reset_macro_options": true,
+            })
+        );
+        let cleared = RebuildOptions {
+            cfg_flags: Some(vec![]),
+            ..RebuildOptions::default()
+        };
+        assert_eq!(
+            rebuild_params(path, &cleared).expect("encodes"),
+            serde_json::json!({ "path": "/ws", "force": false, "cfg_flags": [] }),
+            "an explicit empty list is sent: it clears the recorded flags"
+        );
+    }
+
+    /// A connected client whose fake daemon completes the handshake and then
+    /// reports every request frame it reads (`None` once the client closes).
+    #[allow(clippy::type_complexity)]
+    async fn client_recording_requests() -> (
+        DaemonClient,
+        tokio::task::JoinHandle<anyhow::Result<()>>,
+        std::sync::Arc<std::sync::Mutex<Vec<serde_json::Value>>>,
+    ) {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let record = std::sync::Arc::clone(&seen);
+        let (client_stream, handle) = spawn_fake_daemon(|mut server| async move {
+            let _hello = read_hello(&mut server).await?;
+            write_hello_response(&mut server, "test").await?;
+            while let Some(request) =
+                framing::read_frame_json::<_, serde_json::Value>(&mut server).await?
+            {
+                record.lock().unwrap().push(request);
+            }
+            Ok(())
+        })
+        .await;
+        let client = do_hello_handshake(
+            client_stream,
+            Path::new("<in-memory-duplex>"),
+            DEFAULT_HELLO_TIMEOUT,
+        )
+        .await
+        .expect("hello handshake");
+        (client, handle, seen)
+    }
+
+    /// `send_rebuild_with_options` writes the same request frame
+    /// `rebuild_with_options` would and returns without reading a reply
+    /// (the fake daemon never answers).
+    #[tokio::test]
+    async fn send_rebuild_with_options_writes_the_request_and_reads_nothing() {
+        let (mut client, handle, seen) = client_recording_requests().await;
+        let options = RebuildOptions {
+            force: true,
+            cfg_flags: Some(vec!["test".to_string()]),
+            expand_cache: None,
+            reset_macro_options: true,
+        };
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            client.send_rebuild_with_options(Path::new("/ws"), &options),
+        )
+        .await
+        .expect("returns without a reply")
+        .expect("the frame is written");
+        drop(client);
+        handle.await.expect("join").expect("fake daemon");
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.len(), 1, "{seen:?}");
+        assert_eq!(seen[0]["method"], "daemon/rebuild");
+        assert_eq!(
+            seen[0]["params"],
+            rebuild_params(Path::new("/ws"), &options).expect("encodes")
+        );
+    }
+
+    /// Every management call that carries a path refuses one that is not
+    /// valid UTF-8 with `RequestEncoding`, naming the method and the field,
+    /// and sends nothing: `serde_json::json!` panicked on these, which took
+    /// `sqry daemon rebuild` down with exit 101. Bounded by `grep -n "json!("
+    /// sqry-daemon-client/src/management.rs`: the path-carrying sites are
+    /// `reset`, `rebuild`, `rebuild_with_options` (two fields),
+    /// `send_rebuild_with_options`, `cancel_rebuild`, `load`, and the typed
+    /// requests holding a root (`loadRevision`, `listRevisions`,
+    /// `pruneRevisions`).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn path_parameters_that_are_not_utf8_are_refused_and_never_sent() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut name = b"/ws-".to_vec();
+        name.push(0xff);
+        let bad = PathBuf::from(std::ffi::OsString::from_vec(name));
+
+        let (mut client, handle, seen) = client_recording_requests().await;
+        let mut outcomes: Vec<(&str, Result<(), ClientError>)> = Vec::new();
+        outcomes.push(("reset", client.reset(&bad, false).await.map(drop)));
+        outcomes.push(("rebuild", client.rebuild(&bad, false).await.map(drop)));
+        outcomes.push((
+            "rebuild_with_options path",
+            client
+                .rebuild_with_options(&bad, &RebuildOptions::default())
+                .await
+                .map(drop),
+        ));
+        let bad_cache = RebuildOptions {
+            expand_cache: Some(bad.clone()),
+            ..RebuildOptions::default()
+        };
+        outcomes.push((
+            "rebuild_with_options expand_cache",
+            client
+                .rebuild_with_options(Path::new("/ws"), &bad_cache)
+                .await
+                .map(drop),
+        ));
+        outcomes.push((
+            "send_rebuild_with_options",
+            client
+                .send_rebuild_with_options(Path::new("/ws"), &bad_cache)
+                .await,
+        ));
+        outcomes.push((
+            "cancel_rebuild",
+            client.cancel_rebuild(&bad).await.map(drop),
+        ));
+        outcomes.push(("load", client.load(&bad).await.map(drop)));
+        outcomes.push((
+            "load_revision",
+            client
+                .load_revision(LoadRevisionRequest {
+                    root: bad.clone(),
+                    selector: sqry_daemon_protocol::RevisionSelector::Ref {
+                        name: "main".to_string(),
+                    },
+                    source_byte_mode: None,
+                    pin: false,
+                })
+                .await
+                .map(drop),
+        ));
+        outcomes.push((
+            "list_revisions",
+            client
+                .list_revisions(ListRevisionsRequest {
+                    root: Some(bad.clone()),
+                    include_unloaded: false,
+                })
+                .await
+                .map(drop),
+        ));
+        outcomes.push((
+            "prune_revisions",
+            client
+                .prune_revisions(PruneRevisionsRequest {
+                    root: Some(bad.clone()),
+                    apply: false,
+                })
+                .await
+                .map(drop),
+        ));
+        assert_eq!(outcomes.len(), 10);
+        for (site, outcome) in &outcomes {
+            match outcome {
+                Err(err @ ClientError::RequestEncoding { .. }) => {
+                    let rendered = err.to_string();
+                    assert!(
+                        rendered.contains("invalid UTF-8") && rendered.contains("nothing was sent"),
+                        "{site}: {rendered}"
+                    );
+                }
+                other => panic!("{site}: expected RequestEncoding, got {other:?}"),
+            }
+        }
+        drop(client);
+        handle.await.expect("join").expect("fake daemon");
+        let seen = seen.lock().unwrap().clone();
+        assert!(seen.is_empty(), "nothing was sent: {seen:?}");
     }
 }

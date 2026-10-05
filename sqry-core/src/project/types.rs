@@ -215,7 +215,7 @@ pub type StringId = Arc<str>;
 /// Per `02_DESIGN.md`, `FileEntry` tracks:
 /// - Project-relative path (interned for memory efficiency)
 /// - Repository association (`RepoId`)
-/// - Content hash for incremental change detection
+/// - Content hash, for change detection
 /// - Last modification time
 /// - Detected language
 #[derive(Debug, Clone, Serialize, Deserialize)]

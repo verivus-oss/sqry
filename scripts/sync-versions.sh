@@ -586,9 +586,70 @@ check_date_only_file() {
 VERSION_ONLY_FILES=(
     "QUICKSTART.md"
     "sqry-cli/README.md"
-    ".claude/skills/sqry-semantic-search/SKILL.md"
     ".mcp/server.json"
+    "agent-skills/.claude-plugin/plugin.json"
 )
+
+# Consumer agent skills, and every copy of them. DERIVED from the tree.
+#
+# Two lessons are baked in here, both learned the hard way on this branch.
+#
+# 1. DERIVED, not listed. A hardcoded array stops covering the skill you just
+#    added and says nothing. Before this it named exactly one file under
+#    .claude/skills/ while seven other skills were version-pinned by a script
+#    in a different repository.
+#
+# 2. EVERY COPY, not just the source. scripts/ci/check_agent_skills_parity.py
+#    requires the copies to be byte-identical to their source. If --fix bumped
+#    only the source it would SPLIT them, so the repository's own canonical
+#    bump command would break its own parity gate. It did exactly that until a
+#    validation pass caught it.
+#
+# The copy is real and deliberate: .claude/skills/ is what Claude Code
+# auto-loads in this repository, so it has to be committed and cannot be a
+# symlink, because the release sanitizer fails closed on any symlink in the
+# tree. The benchmark's staged skills are NOT in this set: they are build
+# output of prepare.sh and are gitignored.
+# A copy is version-managed only when it HAS a source here. .claude/skills/
+# also holds CONTRIBUTOR skills (dep-update, sqry-repo, supply-chain-guard)
+# which carry no version field and must not be swept in: globbing that whole
+# directory reported three "unknown -> needs 31.0.0" rows for files that are
+# not copies of anything. Match by name against the source.
+#
+# THIS IS A NARROWER RULE THAN THE PARITY GATE'S, deliberately. That gate has to
+# judge trees this script never sees (a renamed copy root, a copy moved out of
+# one, an orphan whose source is gone), so it classifies by location first and
+# falls back to the version marker. This script only needs the set it must BUMP,
+# which is the copies sitting where they are supposed to sit. The two therefore
+# do not derive the same set, and a comment here once claimed they did. If you
+# change either predicate, scripts/ci/test_agent_skills_parity.py is where the
+# gate's behaviour is pinned.
+skill_files=()
+while IFS= read -r src; do
+    [[ -n "$src" ]] || continue
+    skill_files+=("$src")
+    name="$(basename "$(dirname "$src")")"
+    # ONE copy root. benchmarks/swebench/image/skills/ used to be globbed here
+    # too, but prepare.sh regenerates it with `cp -r` from the source on every
+    # run and it is gitignored now, so those files inherit the source's version
+    # and must not be bumped in place. Globbing them would also sweep in
+    # untracked build output on any machine that has run the benchmark.
+    copy=".claude/skills/$name/SKILL.md"
+    [[ -f "$copy" ]] && skill_files+=("$copy")
+done < <(find agent-skills/skills -mindepth 2 -maxdepth 2 -name 'SKILL.md' -type f 2>/dev/null | sort)
+
+# A derived set that comes back empty is a broken derivation, not a clean tree.
+# `find agent-skills -mindepth 2 -maxdepth 2` silently returned ZERO after the
+# skills moved one level deeper, dropping every skill out of version management
+# while this script still printed "All versions in sync". I then dropped this
+# very guard while rewriting the block above, and only noticed because the
+# negative control was re-run rather than assumed.
+if [[ ${#skill_files[@]} -eq 0 ]]; then
+    echo "ERROR: derived 0 agent-skill files; the derivation is broken or the tree moved" >&2
+    echo "       expected agent-skills/skills/<skill>/SKILL.md" >&2
+    exit 1
+fi
+VERSION_ONLY_FILES+=("${skill_files[@]}")
 
 # --- Version + date files (Category B) ---
 VERSION_DATE_FILES=(

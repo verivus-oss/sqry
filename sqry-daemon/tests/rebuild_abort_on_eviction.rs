@@ -20,6 +20,10 @@
 //! mechanisms independently. These two focused tests + the counter
 //! instrumentation in `TestCapture` close that gap.
 
+// Every test here installs a `TestCapture`, which only the `test-hooks`
+// feature compiles (fifth audit, item 2).
+#![cfg(feature = "test-hooks")]
+
 mod support;
 
 use std::{path::PathBuf, sync::Arc, time::Duration};
@@ -225,4 +229,119 @@ async fn eviction_during_rebuild_hits_pass_boundary_cancellation() {
         harness.manager.lookup(&harness.key).is_none(),
         "evicted workspace must be removed from manager map"
     );
+}
+
+/// Round 8 review, note (a): an LRU eviction while a rebuild is held after
+/// its reservation, then a load of the evicted workspace that fails, then
+/// the rebuild released. The load's gate consumed the eviction's
+/// cancellation (a load from `Evicted` clears it), the cancellation
+/// forwarder is suppressed as above, so the runner read a clear flag at
+/// its publish recheck and published its graph into the slot the failed
+/// load had left `Failed`: `Ok`, one published generation, a `Failed`
+/// workspace carrying a graph. The gate now refuses a load while the
+/// evicted generation's runner holds the runner role and leaves the flag
+/// for it, so the runner answers `WorkspaceEvicted` and publishes nothing;
+/// the control is the same load once the runner has stopped, which builds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_load_after_an_eviction_does_not_let_the_evicted_rebuild_publish() {
+    use std::sync::atomic::Ordering;
+
+    use sqry_core::graph::unified::build::BuildConfig;
+    use sqry_daemon::FailingGraphBuilder;
+    use sqry_daemon::workspace::{WorkingSetInputs, WorkspaceState, working_set_estimate};
+
+    let harness = support::WatcherHarness::new().await;
+    let capture = Arc::new(TestCapture::new());
+    harness
+        .dispatcher
+        .install_test_capture(Arc::clone(&capture))
+        .expect("first install");
+    capture.suppress_forwarder.store(true, Ordering::Release);
+    capture.arm_post_reservation_hold();
+    let dispatched_before = harness.dispatcher.dispatched_count();
+    let estimate = working_set_estimate(WorkingSetInputs {
+        new_graph_final_estimate: 64 * 1024,
+        staging_overhead: 32 * 1024,
+        interner_snapshot_bytes: 16 * 1024,
+    });
+
+    let dispatcher_clone: Arc<RebuildDispatcher> = Arc::clone(&harness.dispatcher);
+    let key_clone = harness.key.clone();
+    let rebuild_task = tokio::spawn(async move {
+        dispatcher_clone
+            .handle_changes(&key_clone, trivial_changes())
+            .await
+    });
+    capture.wait_until_post_reservation().await;
+
+    let ws = harness.manager.lookup(&harness.key).expect("registered");
+    let evicted = harness.manager.evict_lru();
+    let evicted_state = ws.load_state();
+    let load = harness.manager.get_or_load(
+        &harness.key,
+        &FailingGraphBuilder::new("planted load failure"),
+        estimate,
+    );
+    let load_answer = match &load {
+        Ok(_) => "Ok".to_string(),
+        Err(DaemonError::WorkspaceBuildFailed { reason, .. }) => reason.clone(),
+        Err(other) => format!("{other:?}"),
+    };
+    let state_after_load = ws.load_state();
+    let flag_after_load = ws.rebuild_cancelled.load(Ordering::Acquire);
+
+    capture.release_post_reservation();
+    let rebuild = rebuild_task.await.expect("join");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    let published = capture.published_generations.lock().len();
+    let state_after_rebuild = ws.load_state();
+    let graph_after_rebuild = ws.published().roster.is_some();
+
+    // The control: with the runner stopped, the load builds.
+    let builder = support::RealGraphBuilder {
+        plugins: Arc::new(sqry_plugin_registry::create_plugin_manager()),
+        cfg: BuildConfig::default(),
+    };
+    let reload = harness
+        .manager
+        .get_or_load(&harness.key, &builder, estimate)
+        .map(|_| ());
+    let state_after_reload = ws.load_state();
+
+    println!(
+        "R8 note (a): evicted={evicted:?} ({evicted_state}); load={load_answer} \
+         state={state_after_load} flag={flag_after_load}; rebuild={:?} published={published} \
+         state={state_after_rebuild} graph={graph_after_rebuild}; reload={reload:?} \
+         state={state_after_reload}",
+        rebuild.as_ref().map(|_| "Ok")
+    );
+    assert_eq!(
+        evicted.as_ref(),
+        Some(&harness.key),
+        "the eviction took the rebuilding workspace"
+    );
+    assert_eq!(evicted_state, WorkspaceState::Evicted);
+    assert!(
+        load_answer.contains("already in progress"),
+        "a load while the evicted generation's rebuild runs is refused as in progress, \
+         got: {load_answer}"
+    );
+    assert!(
+        matches!(rebuild, Err(DaemonError::WorkspaceEvicted { .. })),
+        "the evicted generation's rebuild must not complete: {rebuild:?}"
+    );
+    assert_eq!(published, 0, "nothing is published after the eviction");
+    assert_eq!(
+        state_after_rebuild,
+        WorkspaceState::Evicted,
+        "the tombstone is left to its writer"
+    );
+    assert!(!graph_after_rebuild, "the tombstone carries no generation");
+    assert_eq!(
+        harness.dispatcher.dispatched_count(),
+        dispatched_before,
+        "dispatched_count must not advance"
+    );
+    assert!(reload.is_ok(), "the control load builds: {reload:?}");
+    assert_eq!(state_after_reload, WorkspaceState::Loaded);
 }

@@ -37,7 +37,7 @@
 //!     shared_graph_acquisition_dogfood
 //! ```
 
-#![cfg(feature = "test-hooks")]
+#![cfg(all(unix, feature = "test-hooks"))]
 #![allow(clippy::too_many_lines)]
 
 mod support;
@@ -48,12 +48,12 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use serial_test::serial;
-use sqry_core::graph::CodeGraph;
 use sqry_core::graph::unified::build::BuildConfig;
 use sqry_core::graph::unified::persistence::{GraphStorage, load_from_path, save_to_path};
 use sqry_core::project::{ProjectRootMode, canonicalize_path};
-use sqry_daemon::workspace::WorkspaceBuilder;
+use sqry_daemon::workspace::{BuiltGraph, WorkspaceBuilder};
 use sqry_daemon::{DaemonError, WorkspaceKey, acquire_counter_reset, acquire_counter_snapshot};
+use sqry_plugin_registry::RosterSource;
 use support::ipc::{TestIpcClient, TestServer, expect_error, expect_success};
 use tempfile::TempDir;
 
@@ -111,7 +111,7 @@ impl std::fmt::Debug for DogfoodPersistingBuilder {
 }
 
 impl WorkspaceBuilder for DogfoodPersistingBuilder {
-    fn build(&self, root: &Path) -> Result<CodeGraph, DaemonError> {
+    fn build(&self, root: &Path) -> Result<BuiltGraph, DaemonError> {
         let g =
             sqry_core::graph::unified::build::build_unified_graph(root, &self.plugins, &self.cfg)
                 .map_err(|e| DaemonError::WorkspaceBuildFailed {
@@ -131,10 +131,14 @@ impl WorkspaceBuilder for DogfoodPersistingBuilder {
                 reason: format!("persist dogfood snapshot: {e}"),
             }
         })?;
-        Ok(g)
+        Ok(BuiltGraph::with_manager(
+            g,
+            &self.plugins,
+            RosterSource::Fallback,
+        ))
     }
 
-    fn load_persisted(&self, root: &Path) -> Result<CodeGraph, DaemonError> {
+    fn load_persisted(&self, root: &Path) -> Result<BuiltGraph, DaemonError> {
         let storage = GraphStorage::new(root);
         if !storage.snapshot_exists() {
             return Err(DaemonError::WorkspaceBuildFailed {
@@ -145,12 +149,12 @@ impl WorkspaceBuilder for DogfoodPersistingBuilder {
                     .into(),
             });
         }
-        load_from_path(storage.snapshot_path(), Some(&self.plugins)).map_err(|e| {
-            DaemonError::WorkspaceBuildFailed {
+        load_from_path(storage.snapshot_path(), Some(&self.plugins))
+            .map(|g| BuiltGraph::with_manager(g, &self.plugins, RosterSource::Fallback))
+            .map_err(|e| DaemonError::WorkspaceBuildFailed {
                 root: root.to_path_buf(),
                 reason: format!("dogfood load_persisted: {e}"),
-            }
-        })
+            })
     }
 }
 
@@ -158,43 +162,16 @@ impl WorkspaceBuilder for DogfoodPersistingBuilder {
 // CLI binary discovery
 // ---------------------------------------------------------------------------
 
-/// Locate the workspace `sqry` CLI binary. Mirrors the discovery logic
-/// in `sqry-cli/tests/common/mod.rs` and `sqry-daemon/tests/e2e_smoke.rs`.
+/// Locate the `sqry` binary for testing.
 ///
-/// Search order:
-/// 1. `SQRY_E2E_SQRY_BIN` (release smoke / installed-binary validation).
-/// 2. `CARGO_BIN_EXE_sqry` (only set when sqry-cli is a dep, which it
-///    isn't here — kept for parity with the cli-side helper).
-/// 3. Walk up from `current_exe()` to `target/<profile>/sqry`.
-///
-/// Returns `None` when the binary cannot be found; the test prints a
-/// directive build hint and skips rather than failing flakily.
-fn find_sqry_cli_bin() -> Option<PathBuf> {
-    if let Ok(path) = std::env::var("SQRY_E2E_SQRY_BIN") {
-        let p = PathBuf::from(path);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_sqry") {
-        let p = PathBuf::from(path);
-        if p.is_file() {
-            return Some(p);
-        }
-    }
-    let exe = std::env::current_exe().ok()?;
-    let parent = exe.parent()?; // target/debug/deps
-    let bin_name = format!("sqry{}", std::env::consts::EXE_SUFFIX);
-    let candidate = parent.join(&bin_name);
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-    let grandparent = parent.parent()?; // target/debug
-    let candidate = grandparent.join(&bin_name);
-    if candidate.is_file() {
-        return Some(candidate);
-    }
-    None
+/// Delegates to the one resolver, `sqry_core::test_support::binaries::sqry_binary`
+/// (surface parity W4, design W4-D13), which reads `SQRY_E2E_SQRY_BIN`, then
+/// `CARGO_BIN_EXE_sqry`, then `CARGO_TARGET_DIR` and the workspace `target`,
+/// debug before release, and panics naming every variable and candidate.
+/// This helper used to return `None` and the test skipped, which reported a
+/// pass over an absent subject; a missing binary now fails the test.
+fn find_sqry_cli_bin() -> PathBuf {
+    sqry_core::test_support::binaries::sqry_binary()
 }
 
 // ---------------------------------------------------------------------------
@@ -300,21 +277,11 @@ fn diagnose_error(err: &sqry_daemon::ipc::protocol::JsonRpcError) -> String {
 #[serial(sga05_acquire_counter)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dogfood_cli_and_daemon_mcp_agree_under_eviction() {
-    // Pre-flight: locate the workspace `sqry` CLI binary. If the
-    // binary is not present we skip the test rather than fail — the
-    // CLI half of the comparison is meaningless without it. CI runs
-    // `cargo build --workspace` before `cargo test --workspace` so
-    // the binary will normally be present.
-    let Some(sqry_bin) = find_sqry_cli_bin() else {
-        eprintln!(
-            "SGA08 dogfood: `sqry` CLI binary not found.\n  \
-             Tried: SQRY_E2E_SQRY_BIN, CARGO_BIN_EXE_sqry, target/debug/sqry, \
-             target/release/sqry.\n  \
-             Build with: cargo build --workspace --bin sqry\n  \
-             Skipping (this is a soft-skip — CI must build the binary first)."
-        );
-        return;
-    };
+    // Pre-flight: locate the workspace `sqry` CLI binary. The CLI half of
+    // the comparison is meaningless without it, so a missing binary fails
+    // the test (the resolver panics naming what it tried) rather than
+    // skipping it.
+    let sqry_bin = find_sqry_cli_bin();
 
     // ---- Step 1: build the synthetic workspace + index it via CLI.
     let tmp = TempDir::new().expect("tempdir");

@@ -480,7 +480,7 @@ mod tests {
         _tmp: TempDir,
         cfg: DaemonConfig,
         prior_xdg: Option<String>,
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: crate::TestEnvGuard,
     }
 
     impl TestCfg {

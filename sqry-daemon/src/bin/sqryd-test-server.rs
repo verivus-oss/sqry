@@ -27,8 +27,8 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use sqry_daemon::{
-    DaemonConfig, EmptyGraphBuilder, IpcServer, RebuildDispatcher, SocketConfig, WorkspaceBuilder,
-    WorkspaceManager,
+    DaemonConfig, IpcServer, RealWorkspaceBuilder, RebuildDispatcher, SocketConfig,
+    WorkspaceBuilder, WorkspaceManager, WorkspaceRosterResolver,
 };
 use tokio::io::AsyncReadExt;
 use tokio_util::sync::CancellationToken;
@@ -62,13 +62,23 @@ async fn main() {
     let config = Arc::new(config);
 
     let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
-    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+    // Surface parity W1: the same wiring as `build_daemon_components`, so
+    // the LSP and MCP integration tests exercise the production roster
+    // resolution (manifest-driven build roster, full compiled load roster,
+    // full-roster executor) rather than a fast-path stand-in.
+    let roster = Arc::new(WorkspaceRosterResolver::new());
     let dispatcher = RebuildDispatcher::new(
         Arc::clone(&manager),
         Arc::clone(&config),
-        Arc::clone(&plugins),
+        Arc::clone(&roster),
     );
-    let tool_executor = Arc::new(sqry_core::query::executor::QueryExecutor::new());
+    let builder: Arc<dyn WorkspaceBuilder> =
+        Arc::new(RealWorkspaceBuilder::new(Arc::clone(&roster)));
+    let tool_executor = Arc::new(
+        sqry_core::query::executor::QueryExecutor::with_plugin_manager(
+            sqry_plugin_registry::create_plugin_manager_all(),
+        ),
+    );
     let shutdown = CancellationToken::new();
 
     // (sqry-mcp payload caches are initialized inside `IpcServer::bind`, so the
@@ -78,7 +88,7 @@ async fn main() {
         Arc::clone(&config),
         Arc::clone(&manager),
         dispatcher,
-        Arc::new(EmptyGraphBuilder) as Arc<dyn WorkspaceBuilder>,
+        builder,
         tool_executor,
         shutdown.clone(),
     )

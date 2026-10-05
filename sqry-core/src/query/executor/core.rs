@@ -86,6 +86,19 @@ pub struct QueryExecutor {
     /// [`Self::with_cost_gate_config`] from the per-workspace
     /// `DaemonConfig`.
     pub(crate) cost_gate_config: crate::query::cost_gate::CostGateConfig,
+
+    /// The one way this executor may build an index it does not find
+    /// (surface parity W1 round 3, design D18). `None` means never build:
+    /// a missing index is `Ok(None)` and a snapshot that fails to load is
+    /// that error, exactly as when `SQRY_AUTO_INDEX` is off. The CLI
+    /// injects the hook that resolves the workspace's recorded selection
+    /// and records it; the standalone MCP engine, the LSP and the daemon
+    /// inject nothing, because their providers already own the build (and
+    /// the refusal) before an executor is reached. The executor never
+    /// builds with its own `plugin_manager`: that roster is whoever
+    /// constructed the executor, and a build with it recorded no
+    /// `high_cost_mode`.
+    pub(crate) auto_build_hook: Option<crate::graph::acquisition::AutoBuildHook>,
 }
 
 impl QueryExecutor {
@@ -100,6 +113,7 @@ impl QueryExecutor {
             disable_parallel: false,
             validation_options: crate::query::validator::ValidationOptions::default(),
             cost_gate_config: crate::query::cost_gate::CostGateConfig::default(),
+            auto_build_hook: None,
         }
     }
 
@@ -114,6 +128,7 @@ impl QueryExecutor {
             disable_parallel: false,
             validation_options: crate::query::validator::ValidationOptions::default(),
             cost_gate_config: crate::query::cost_gate::CostGateConfig::default(),
+            auto_build_hook: None,
         }
     }
 
@@ -180,6 +195,20 @@ impl QueryExecutor {
         self
     }
 
+    /// Inject the one way this executor may build an index it does not
+    /// find (surface parity W1 round 3, design D18).
+    ///
+    /// The hook is called from [`Self::get_or_load_graph`] with the
+    /// canonical directory when no index exists there, or when the
+    /// snapshot fails to load, and only while `SQRY_AUTO_INDEX` is not
+    /// `false`/`0`. It builds, persists and returns the graph, which the
+    /// executor then caches. Without a hook the executor never builds.
+    #[must_use]
+    pub fn with_auto_build_hook(mut self, hook: crate::graph::acquisition::AutoBuildHook) -> Self {
+        self.auto_build_hook = Some(hook);
+        self
+    }
+
     /// Get or load `CodeGraph` with thread-safe caching
     ///
     /// Uses double-checked locking pattern for thread-safe lazy initialization:
@@ -235,21 +264,23 @@ impl QueryExecutor {
                 return Ok(None);
             }
 
+            // Surface parity W1 round 3 (design D18): build only through
+            // the injected hook. With none, the answer is the one the
+            // gate-off branch gives: no graph, nothing written. The
+            // executor's own `plugin_manager` is never a build roster.
+            let Some(hook) = self.auto_build_hook.as_ref().map(Arc::clone) else {
+                *cache = None;
+                return Ok(None);
+            };
+
             log::info!(
-                "No graph found at {}, auto-building index",
+                "No graph found at {}, auto-building index through the injected hook",
                 canonical_dir.display()
             );
             // Release write lock before the heavy build operation
             drop(cache);
 
-            let config = crate::graph::unified::build::BuildConfig::default();
-            let (graph, _build_result) = crate::graph::unified::build::build_and_persist_graph(
-                &canonical_dir,
-                &self.plugin_manager,
-                &config,
-                "cli:auto_index",
-            )?;
-            let arc_graph = Arc::new(graph);
+            let arc_graph = hook(&canonical_dir).map_err(anyhow::Error::from)?;
 
             let mut cache = self.graph_cache.write();
             *cache = Some((canonical_dir, Arc::clone(&arc_graph)));
@@ -274,18 +305,19 @@ impl QueryExecutor {
                 if auto_index_var == "false" || auto_index_var == "0" {
                     return Err(e.into());
                 }
-                log::warn!("Graph load failed ({e}), auto-rebuilding index");
+                // Design D18: rebuild only through the injected hook; with
+                // none, the load error is the answer, as when the gate is
+                // off, and the snapshot bytes are left as they are.
+                let Some(hook) = self.auto_build_hook.as_ref().map(Arc::clone) else {
+                    return Err(e.into());
+                };
+                log::warn!(
+                    "Graph load failed ({e}), auto-rebuilding index through the injected hook"
+                );
                 // Release write lock before the heavy rebuild
                 drop(cache);
 
-                let config = crate::graph::unified::build::BuildConfig::default();
-                let (graph, _build_result) = crate::graph::unified::build::build_and_persist_graph(
-                    &canonical_dir,
-                    &self.plugin_manager,
-                    &config,
-                    "cli:auto_index",
-                )?;
-                let arc_graph = Arc::new(graph);
+                let arc_graph = hook(&canonical_dir).map_err(anyhow::Error::from)?;
 
                 let mut cache = self.graph_cache.write();
                 *cache = Some((canonical_dir, Arc::clone(&arc_graph)));

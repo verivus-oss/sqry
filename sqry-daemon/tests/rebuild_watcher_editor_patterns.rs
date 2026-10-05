@@ -115,15 +115,13 @@ async fn ensure_watching_is_race_free_under_concurrent_callers() {
     // The harness already inserted one entry via its own
     // ensure_watching at construction time. Tear that down so we
     // exercise the "fresh spawn under contention" path.
-    use std::sync::atomic::Ordering;
     use support::wait_until;
     let ws = h.manager.lookup(&h.key).expect("workspace present");
-    ws.rebuild_cancelled.store(true, Ordering::Release);
+    ws.stop_watcher();
     assert!(
         wait_until(|| h.dispatcher.watchers_len() == 0, Duration::from_secs(3)).await,
         "harness's initial watcher must drain before the race test"
     );
-    ws.rebuild_cancelled.store(false, Ordering::Release);
 
     // Fire N concurrent ensure_watching calls for the same key.
     // Each task holds the workspace Arc + root PathBuf it needs.
@@ -156,29 +154,27 @@ async fn ensure_watching_is_race_free_under_concurrent_callers() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ensure_watching_prunes_finished_entry_and_respawns() {
-    use std::sync::atomic::Ordering;
     use support::wait_until;
 
     let h = WatcherHarness::new().await;
     assert_eq!(h.dispatcher.watchers_len(), 1);
 
-    // Force the watcher to shut down via rebuild_cancelled. Once the
+    // Force the watcher to shut down via its stop signal. Once the
     // async task drains, live=false and reap_watcher removes the
-    // entry — so the map reaches size 0 after shutdown.
+    // entry, so the map reaches size 0 after shutdown.
     let ws = h.manager.lookup(&h.key).expect("workspace present");
-    ws.rebuild_cancelled.store(true, Ordering::Release);
+    ws.stop_watcher();
 
     let reaped = wait_until(|| h.dispatcher.watchers_len() == 0, Duration::from_secs(3)).await;
     assert!(reaped, "watcher map must reach 0 after cancellation");
 
-    // Reset the cancellation flag and re-call ensure_watching.
-    // Since the old entry was reaped, this is effectively a fresh
-    // spawn (not a prune-then-respawn through a live=false zombie).
-    // The prune-then-respawn flow is separately exercised if the
-    // reap hasn't happened yet at the time of the second call —
+    // Re-call ensure_watching: it arms a fresh stop signal for the new
+    // watcher. Since the old entry was reaped, this is effectively a
+    // fresh spawn (not a prune-then-respawn through a live=false
+    // zombie). The prune-then-respawn flow is separately exercised if
+    // the reap hasn't happened yet at the time of the second call;
     // here we verify the END STATE after a complete shutdown: a
     // subsequent ensure_watching spawns a fresh pair.
-    ws.rebuild_cancelled.store(false, Ordering::Release);
     h.dispatcher
         .ensure_watching(&h.key, &ws, &h.root)
         .expect("respawn after shutdown must succeed");

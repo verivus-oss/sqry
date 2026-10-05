@@ -136,11 +136,9 @@ fn test_query_syntax_error_exit_code() {
 
     // Test that syntax errors exit with error code 2 (user input errors)
     // Parse errors exit with code 2 as defined by QueryError::exit_code()
-    // NOTE: Must use --semantic flag because hybrid mode falls back to text search
     let path = sqry_bin();
     let mut cmd = Command::new(path);
-    cmd.arg("--semantic") // Force semantic-only mode to get parse errors
-        .arg("query")
+    cmd.arg("query")
         .arg("kind:") // Incomplete predicate - actual syntax error
         .arg(".")
         .assert()
@@ -155,11 +153,9 @@ fn test_query_syntax_error_exit_code() {
 fn test_query_invalid_predicate_exit_code() {
     // Test that invalid predicates exit with error code
     // Validation errors should exit with code 2 (user/validation errors)
-    // NOTE: Must use --semantic flag because hybrid mode falls back to text search
     let path = sqry_bin();
     let mut cmd = Command::new(path);
-    cmd.arg("--semantic") // Force semantic-only mode to get validation errors
-        .arg("query")
+    cmd.arg("query")
         .arg("unknown_field:value")
         .arg(".")
         .assert()
@@ -172,11 +168,9 @@ fn test_query_invalid_predicate_exit_code() {
 fn test_query_empty_value_exit_code() {
     // Test that empty values exit with error code 2 (user input errors)
     // Empty values (parse errors) exit with code 2 as defined by QueryError::exit_code()
-    // NOTE: Must use --semantic flag because hybrid mode falls back to text search
     let path = sqry_bin();
     let mut cmd = Command::new(path);
-    cmd.arg("--semantic") // Force semantic-only mode to get parse errors
-        .arg("query")
+    cmd.arg("query")
         .arg("kind:")
         .arg(".")
         .assert()

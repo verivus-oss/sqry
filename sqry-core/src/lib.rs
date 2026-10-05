@@ -14,7 +14,7 @@
 //! - **plugin**: Plugin system for language extensibility
 //! - **ast**: Tree-sitter parsing and AST querying
 //! - **search**: Text and hybrid search, used when a query is not structural
-//! - **indexing**: Incremental hashing and index compression utilities
+//! - **indexing**: File change hashing and index compression utilities
 //! - **persistence**: Snapshot read and write, including format upconversion
 //! - **workspace**: Workspace root discovery and multi-root resolution
 //! - **cache** and **session**: Caching for warm multi-query execution
@@ -65,7 +65,7 @@ pub mod hash;
 /// Caching layer
 pub mod cache;
 
-/// Indexing utilities (incremental hashing, compression)
+/// Indexing utilities (file change hashing, compression)
 pub mod indexing;
 
 /// Progress reporting for indexing and graph builds

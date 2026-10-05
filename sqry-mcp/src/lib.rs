@@ -152,10 +152,11 @@ pub mod tool_args {
     pub use crate::tools::{
         CallHierarchyArgs, CallHierarchyDirection, ChangeType, ComplexityMetricsArgs, CycleType,
         DependencyImpactArgs, DirectCalleesArgs, DirectCallersArgs, ExportGraphArgs,
-        FindCyclesArgs, FindUnusedArgs, GetDocumentSymbolsArgs, GitVersionRef, IsNodeInCycleArgs,
-        PaginationArgs, RelationQueryArgs, RelationType, SearchFilters, SemanticDiffArgs,
-        SemanticDiffFilters, SemanticSearchArgs, ShowDependenciesArgs, SqryQueryParams,
-        SubgraphArgs, TracePathArgs, UnusedScope, WorkspaceStatusArgs,
+        FindCyclesArgs, FindUnusedArgs, GetDocumentSymbolsArgs, GitVersionRef,
+        HierarchicalSearchArgs, IsNodeInCycleArgs, PaginationArgs, RebuildIndexArgs,
+        RelationQueryArgs, RelationType, SearchFilters, SemanticDiffArgs, SemanticDiffFilters,
+        SemanticSearchArgs, ShowDependenciesArgs, SqryQueryParams, SubgraphArgs, TracePathArgs,
+        UnusedScope, WorkspaceStatusArgs,
     };
     pub type SemanticSearchRevisionArgs = crate::tools::validation::SemanticSearchRevisionArgs;
 }

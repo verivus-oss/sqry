@@ -34,6 +34,7 @@ use crate::{
     JSONRPC_ARTIFACT_KEY_MISMATCH, JSONRPC_CHECKOUT_FILTER_UNSUPPORTED,
     JSONRPC_DIRTY_SNAPSHOT_CHANGED, JSONRPC_INTERNAL_ERROR, JSONRPC_INVALID_PARAMS,
     JSONRPC_MANAGED_WORKTREE_IN_USE, JSONRPC_MEMORY_BUDGET_EXCEEDED, JSONRPC_QUERY_TOO_BROAD,
+    JSONRPC_REBUILD_MACRO_OPTIONS_UNAVAILABLE, JSONRPC_REBUILD_WOULD_NARROW_SELECTION,
     JSONRPC_RESET_CANCELLATION_DISPATCHED, JSONRPC_RESET_WHILE_LOADING,
     JSONRPC_REVISION_DISK_BUDGET_EXCEEDED, JSONRPC_REVISION_OBJECT_MISSING,
     JSONRPC_REVISION_QUERY_REQUIRES_EXPLICIT_SELECTOR, JSONRPC_REVISION_SELECTOR_AMBIGUOUS,
@@ -52,6 +53,48 @@ use crate::{
 ///
 /// [1]: https://docs.rs/sqry-mcp/latest/sqry_mcp/error/constant.KIND_QUERY_TOO_BROAD.html
 pub const KIND_QUERY_TOO_BROAD: &str = "query_too_broad";
+
+/// Wire-stable `kind` tag for [`DaemonError::RebuildWouldNarrowSelection`]
+/// on both the JSON-RPC `error.data` payload and the MCP envelope.
+pub const KIND_REBUILD_WOULD_NARROW_SELECTION: &str = "rebuild_would_narrow_selection";
+
+/// Wire-stable `kind` tag for [`DaemonError::RebuildMacroOptionsUnavailable`]
+/// (surface parity W4, design W4-D7).
+pub const KIND_REBUILD_MACRO_OPTIONS_UNAVAILABLE: &str = "rebuild_macro_options_unavailable";
+
+/// A path as JSON text, rendered lossily when it is not valid UTF-8 (as the
+/// standalone server renders the paths its refusals name). `json!` of a
+/// `PathBuf` panics on such a path: its `Serialize` fails and the macro
+/// unwraps. Every path an error's data names goes through here.
+pub(crate) fn path_text(path: &std::path::Path) -> String {
+    path.display().to_string()
+}
+
+/// The `daemon/rebuild` text of
+/// [`DaemonError::RebuildMacroOptionsUnavailable`]: the core's reason for
+/// the directory's shape, then the remedy that fits where it came from,
+/// naming each wire field beside the `sqry daemon rebuild` flag.
+fn rebuild_macro_options_unavailable_message(
+    root: &std::path::Path,
+    expand_cache_dir: &std::path::Path,
+    origin: sqry_mcp::error::ExpandCacheOrigin,
+) -> String {
+    let reason = sqry_core::graph::unified::build::expand_cache_missing_reason(expand_cache_dir);
+    let remedy = match origin {
+        sqry_mcp::error::ExpandCacheOrigin::Requested => {
+            "the request named it: pass expand_cache (--expand-cache) naming a directory that \
+             exists, or omit it"
+                .to_string()
+        }
+        sqry_mcp::error::ExpandCacheOrigin::Recorded => format!(
+            "the index manifest records it: drop the record with reset_macro_options (sqry daemon \
+             rebuild --no-macro-options {}), or pass expand_cache (--expand-cache) naming a \
+             directory that exists",
+            root.display()
+        ),
+    };
+    format!("rebuild of {} refused: {reason}; {remedy}", root.display())
+}
 
 fn f64_hours_to_u64(hours: f64) -> u64 {
     if !hours.is_finite() || hours <= 0.0 {
@@ -83,8 +126,13 @@ pub enum DaemonError {
 
     /// Workspace load / rebuild failed with no prior-good graph to serve from.
     ///
+    /// The text is the standalone server's for the same failure
+    /// (`RpcError::workspace_build_failed`), so the IPC and the MCP
+    /// surfaces word it alike (F8, round 7); the root is `error.data.root`
+    /// on both.
+    ///
     /// Maps to JSON-RPC `-32001`.
-    #[error("workspace {root} build failed: {reason}")]
+    #[error("workspace build failed: {reason}")]
     WorkspaceBuildFailed { root: PathBuf, reason: String },
 
     /// Workspace is in the Failed state and the most recent successful build
@@ -192,6 +240,31 @@ pub enum DaemonError {
         deadline_ms: u64,
     },
 
+    /// A `daemon/rebuild` or daemon-hosted `rebuild_index` call did not
+    /// receive the outcome of its own rebuild within
+    /// `RebuildDispatcher::outcome_wait` (integration round 7). Unlike
+    /// [`Self::ToolTimeout`] nothing was abandoned: the rebuild continues
+    /// in the daemon and publishes (or records its failure) when it ends.
+    /// Retrying the call would queue another rebuild, so the data says
+    /// `retryable: false` and names the read that gives the outcome:
+    /// `daemon/status` on IPC (the workspace leaves `Rebuilding`, with
+    /// `last_good_at` or `last_error`), `rebuild_index` with
+    /// `force: false` on MCP (it answers from the resident graph without
+    /// building).
+    ///
+    /// Maps to JSON-RPC `-32000`, as [`Self::ToolTimeout`] does.
+    #[error(
+        "rebuild of {} did not answer within {deadline_ms}ms; the rebuild continues in the \
+         daemon, so read its outcome rather than retry (a retry queues another rebuild)",
+        root.display()
+    )]
+    RebuildOutcomeTimeout {
+        root: PathBuf,
+        secs: u64,
+        /// Derived: `secs * 1000`, the bound the caller waited.
+        deadline_ms: u64,
+    },
+
     /// Argument validation failure surfaced by `tool_core` BEFORE any
     /// workspace classification runs. Used for `resolve_index_root`
     /// failures, missing `path` arguments in MCP tool args, and any
@@ -223,7 +296,11 @@ pub enum DaemonError {
     /// path uses.
     ///
     /// [1]: crate::mcp_host::error_map::daemon_err_to_mcp
-    #[error("{0}")]
+    ///
+    /// The IPC message is the inner message alone, as the MCP surfaces send
+    /// it (F8, round 7); `RpcError`'s own `Display` appends the kind, which
+    /// is `error.data.kind` on both.
+    #[error("{}", .0.message)]
     RpcErrorPreserved(sqry_mcp::error::RpcError),
 
     /// Catch-all for errors surfaced by
@@ -338,12 +415,14 @@ pub enum DaemonError {
     #[error("workspace {} is currently loading; retry once load settles", root.display())]
     ResetWhileLoading { root: PathBuf },
 
-    /// `daemon/reset` was invoked on a workspace whose state is
-    /// `Rebuilding`. The reset has dispatched a cancellation token
-    /// to the runner; the caller should retry after `retry_after_ms`
-    /// for the runner to finish its drain pass and the workspace to
-    /// transition to `Failed` (which is then idempotently reset on
-    /// the next call).
+    /// `daemon/reset` was invoked on a workspace whose rebuild runner
+    /// holds the runner role (read under the rebuild lane, decision
+    /// D-i7-3), so nothing was reset: the reset dispatched a cancellation
+    /// to the runner, which consumes it, answers its parked requests
+    /// `-32004` and releases the role. The caller retries after
+    /// `retry_after_ms`, and the retry resets the workspace. Also answered,
+    /// with nothing dispatched, when the lane stays held for
+    /// `RESET_LANE_WAIT`.
     ///
     /// Wire code: `-32009`.
     ///
@@ -379,7 +458,10 @@ pub enum DaemonError {
     /// `kind = "query_too_broad"` is the discriminator).
     ///
     /// Source: `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2.
-    #[error("query rejected by cost gate: {reason}")]
+    ///
+    /// The text is the gate's own (`query rejected: ...`), as the
+    /// standalone server sends it; a prefix here repeated it (F8, round 7).
+    #[error("{reason}")]
     QueryTooBroad {
         reason: String,
         details: serde_json::Value,
@@ -463,8 +545,179 @@ pub enum DaemonError {
     /// Query route requires an explicit revision selector.
     ///
     /// Wire code: `-32020`.
+    /// A rebuild was refused before anything was written because the plugin
+    /// selection it would record drops ids the workspace manifest already
+    /// records (surface parity W1, D5), or, with the manifest gone, ids the
+    /// resident graph built from it records (integration round 7, S4). The
+    /// resident graph and the on-disk index are untouched; `restore_command`
+    /// is the `sqry index` invocation that rebuilds with the recorded
+    /// selection.
+    ///
+    /// Maps to JSON-RPC `-32021`.
+    #[error(
+        "rebuild of {} refused: it would drop plugins [{}] the recorded plugin selection names \
+         (the manifest's, or the resident graph's when the manifest is gone or unreadable); restore with: \
+         {restore_command}",
+        root.display(),
+        missing_plugin_ids.join(", ")
+    )]
+    RebuildWouldNarrowSelection {
+        root: PathBuf,
+        missing_plugin_ids: Vec<String>,
+        restore_command: String,
+    },
+
+    /// A rebuild was refused before anything was written because the macro
+    /// build options it would run with (the manifest's record overlaid by
+    /// the request) name an expand cache directory it cannot use: missing,
+    /// a file, a dangling link (surface parity W4, design W4-D7). Building
+    /// without it would silently drop every macro-generated symbol, so the
+    /// resident graph keeps serving and the on-disk index is untouched.
+    ///
+    /// The reason is the core's, chosen by the directory's shape
+    /// ([`sqry_core::graph::unified::build::expand_cache_missing_reason`]),
+    /// and the remedy fits `origin` (S10, round 7): a directory the request
+    /// named is fixed by naming one that exists, a recorded one also by
+    /// dropping the record (`reset_macro_options`, `sqry daemon rebuild
+    /// --no-macro-options`). The message names the wire fields MCP and IPC
+    /// callers send beside the `sqry daemon rebuild` flags the CLI
+    /// translates them from; the daemon-hosted MCP sends the standalone
+    /// server's envelope instead
+    /// ([`sqry_mcp::error::RpcError::rebuild_macro_options_unavailable`]).
+    ///
+    /// Maps to JSON-RPC `-32022`.
+    #[error("{}", rebuild_macro_options_unavailable_message(root, expand_cache_dir, *origin))]
+    RebuildMacroOptionsUnavailable {
+        root: PathBuf,
+        expand_cache_dir: PathBuf,
+        /// Whether the request named the directory or the manifest records
+        /// it ([`sqry_mcp::error::ExpandCacheOrigin::of`] the request).
+        origin: sqry_mcp::error::ExpandCacheOrigin,
+    },
+
     #[error("revision query requires an explicit selector: {reason}")]
     RevisionQueryRequiresExplicitSelector { reason: String },
+
+    /// The workspace has an index but its manifest cannot be read, so the
+    /// recorded plugin selection is unknown and the daemon refuses to bring
+    /// the workspace up or to write over the file (surface parity W1 round
+    /// 2, design D9 and D12). Nothing was written; the resident graph, if
+    /// any, is intact. `manifest_path` names the file and the message names
+    /// the repair, `sqry index --force <root>`.
+    ///
+    /// Shares JSON-RPC `-32001` with [`Self::WorkspaceBuildFailed`] ("the
+    /// workspace cannot be brought up"); no new wire code. The variant is
+    /// distinct so the rebuild dispatcher can return a refused workspace to
+    /// the state it entered from instead of recording a build failure.
+    #[error(
+        "manifest at {} cannot be read ({reason}); repair with: sqry index --force {}",
+        manifest_path.display(),
+        root.display()
+    )]
+    WorkspaceManifestUnreadable {
+        root: PathBuf,
+        manifest_path: PathBuf,
+        reason: String,
+    },
+
+    /// A read-only query reached a workspace the daemon does not hold, and
+    /// the workspace has no persisted graph to load: its index manifest is
+    /// absent (it was never indexed), or the manifest is present and the
+    /// snapshot it describes is absent. `missing_path` names the absent
+    /// file and `repair_command` the `sqry index` invocation that creates
+    /// it (`--force` when a manifest is already there, because without it
+    /// `sqry index` reports the existing index and writes nothing); an MCP
+    /// caller repairs with the `rebuild_index` tool. Nothing was written.
+    ///
+    /// Shares JSON-RPC `-32001` with [`Self::WorkspaceBuildFailed`] and
+    /// [`Self::WorkspaceManifestUnreadable`] ("the workspace cannot be
+    /// brought up"), as the unreadable manifest does (surface parity W1
+    /// round 3, design D15); the variant is distinct so the wire carries
+    /// the missing file and the repair as their own `error.data` keys.
+    #[error(
+        "workspace {} is not indexed: {} is absent; index it with: {repair_command} \
+         (MCP clients: the rebuild_index tool)",
+        root.display(),
+        missing_path.display()
+    )]
+    WorkspaceNotIndexed {
+        root: PathBuf,
+        missing_path: PathBuf,
+        repair_command: String,
+    },
+
+    /// The workspace's snapshot exists but cannot be loaded: corrupt,
+    /// truncated, failing its integrity check or unreadable (integration
+    /// round 7, DAEMON_FOLLOWUP). The load (or the reload after an
+    /// eviction) refused it before anything was published. Typed so the
+    /// acquirer treats it as a refusal of the on-disk index that a repair
+    /// on disk clears: once `sqry index --force <root>` has rewritten the
+    /// snapshot, the next query loads it, where before the recorded
+    /// `WorkspaceBuildFailed` was answered until a `daemon/load`.
+    ///
+    /// Shares JSON-RPC `-32001` with [`Self::WorkspaceBuildFailed`].
+    #[error(
+        "workspace {} snapshot {} cannot be loaded ({reason}); repair with: sqry index --force {} \
+         (MCP clients: the rebuild_index tool with force: true)",
+        root.display(),
+        snapshot_path.display(),
+        root.display()
+    )]
+    WorkspaceSnapshotUnreadable {
+        root: PathBuf,
+        snapshot_path: PathBuf,
+        reason: String,
+    },
+
+    /// A workspace the daemon had loaded was evicted, and the bounded
+    /// read-only reload a query runs to bring it back failed.
+    /// `reload_failure` is that reload's own error, rendered.
+    ///
+    /// Shares JSON-RPC `-32004` with [`Self::WorkspaceEvicted`]: the
+    /// workspace is not resident and the caller must load it again
+    /// (`daemon/load`, or `rebuild_index` from MCP). The variant is
+    /// distinct so the reason the automatic reload failed reaches the wire
+    /// (`error.data.reload_failure`) instead of the bare "evicted
+    /// mid-rebuild" that names no cause.
+    #[error(
+        "workspace {} was evicted and its reload from the persisted graph failed: {reload_failure}",
+        root.display()
+    )]
+    WorkspaceReloadFailed {
+        root: PathBuf,
+        reload_failure: String,
+    },
+}
+
+/// The `rebuild_index` tool, the MCP caller's repair for
+/// [`DaemonError::WorkspaceNotIndexed`]. Carried as
+/// `error.data.repair_tool` and `details.repair_tool`.
+pub const REPAIR_TOOL_REBUILD_INDEX: &str = "rebuild_index";
+
+impl DaemonError {
+    /// [`Self::WorkspaceNotIndexed`] for a root with no index manifest:
+    /// the repair is `sqry index <root>`.
+    #[must_use]
+    pub fn workspace_not_indexed(root: &Path, manifest_path: PathBuf) -> Self {
+        Self::WorkspaceNotIndexed {
+            root: root.to_path_buf(),
+            missing_path: manifest_path,
+            repair_command: format!("sqry index {}", root.display()),
+        }
+    }
+
+    /// [`Self::WorkspaceNotIndexed`] for a root whose manifest is present
+    /// and whose snapshot is absent: the repair is
+    /// `sqry index --force <root>`, because `sqry index` without `--force`
+    /// reports the manifest as an existing index and builds nothing.
+    #[must_use]
+    pub fn workspace_snapshot_missing(root: &Path, snapshot_path: PathBuf) -> Self {
+        Self::WorkspaceNotIndexed {
+            root: root.to_path_buf(),
+            missing_path: snapshot_path,
+            repair_command: format!("sqry index --force {}", root.display()),
+        }
+    }
 }
 
 impl DaemonError {
@@ -481,14 +734,22 @@ impl DaemonError {
     #[must_use]
     pub const fn jsonrpc_code(&self) -> Option<i32> {
         match self {
-            Self::WorkspaceBuildFailed { .. } => Some(JSONRPC_WORKSPACE_BUILD_FAILED),
+            Self::WorkspaceBuildFailed { .. } | Self::WorkspaceManifestUnreadable { .. } => {
+                Some(JSONRPC_WORKSPACE_BUILD_FAILED)
+            }
+            Self::WorkspaceNotIndexed { .. } | Self::WorkspaceSnapshotUnreadable { .. } => {
+                Some(JSONRPC_WORKSPACE_BUILD_FAILED)
+            }
+            Self::WorkspaceReloadFailed { .. } => Some(JSONRPC_WORKSPACE_EVICTED),
             Self::WorkspaceStaleExpired { .. } => Some(JSONRPC_WORKSPACE_STALE_EXPIRED),
             Self::MemoryBudgetExceeded { .. } => Some(JSONRPC_MEMORY_BUDGET_EXCEEDED),
             Self::WorkspaceEvicted { .. } | Self::WorkspaceNotLoaded { .. } => {
                 Some(JSONRPC_WORKSPACE_EVICTED)
             }
             Self::WorkspaceIncompatibleGraph { .. } => Some(JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH),
-            Self::ToolTimeout { .. } => Some(JSONRPC_TOOL_TIMEOUT),
+            Self::ToolTimeout { .. } | Self::RebuildOutcomeTimeout { .. } => {
+                Some(JSONRPC_TOOL_TIMEOUT)
+            }
             Self::InvalidArgument { .. } => Some(JSONRPC_INVALID_PARAMS),
             // Cluster-C iter-3: pass-through preserves the inner
             // RpcError's JSON-RPC code (typically -32602 for
@@ -513,6 +774,12 @@ impl DaemonError {
             Self::RevisionDiskBudgetExceeded { .. } => Some(JSONRPC_REVISION_DISK_BUDGET_EXCEEDED),
             Self::RevisionQueryRequiresExplicitSelector { .. } => {
                 Some(JSONRPC_REVISION_QUERY_REQUIRES_EXPLICIT_SELECTOR)
+            }
+            Self::RebuildWouldNarrowSelection { .. } => {
+                Some(JSONRPC_REBUILD_WOULD_NARROW_SELECTION)
+            }
+            Self::RebuildMacroOptionsUnavailable { .. } => {
+                Some(JSONRPC_REBUILD_MACRO_OPTIONS_UNAVAILABLE)
             }
             // Lifecycle errors don't cross the IPC boundary.
             Self::AlreadyRunning { .. }
@@ -561,6 +828,7 @@ impl DaemonError {
             | Self::WorkspaceNotLoaded { .. }
             | Self::WorkspaceIncompatibleGraph { .. }
             | Self::ToolTimeout { .. }
+            | Self::RebuildOutcomeTimeout { .. }
             | Self::InvalidArgument { .. }
             | Self::RpcErrorPreserved(_)
             | Self::Internal(_)
@@ -579,7 +847,13 @@ impl DaemonError {
             | Self::ArtifactKeyMismatch { .. }
             | Self::ManagedWorktreeInUse { .. }
             | Self::RevisionDiskBudgetExceeded { .. }
-            | Self::RevisionQueryRequiresExplicitSelector { .. } => 70,
+            | Self::RevisionQueryRequiresExplicitSelector { .. }
+            | Self::RebuildWouldNarrowSelection { .. }
+            | Self::RebuildMacroOptionsUnavailable { .. }
+            | Self::WorkspaceManifestUnreadable { .. }
+            | Self::WorkspaceNotIndexed { .. }
+            | Self::WorkspaceSnapshotUnreadable { .. }
+            | Self::WorkspaceReloadFailed { .. } => 70,
         }
     }
 
@@ -640,15 +914,18 @@ fn workspace_error_data(err: &DaemonError) -> Option<serde_json::Value> {
         )),
         DaemonError::WorkspaceBuildFailed { root, reason }
         | DaemonError::WorkspaceIncompatibleGraph { root, reason } => Some(json!({
-                "root": root,
+                "root": path_text(root),
                 "reason": reason,
         })),
-        DaemonError::WorkspaceEvicted { root } => Some(json!({ "root": root })),
+        DaemonError::WorkspaceEvicted { root } => Some(json!({ "root": path_text(root) })),
         DaemonError::WorkspaceNotLoaded { root } => Some(json!({
-            "root": root,
+            "root": path_text(root),
             "hint": "use daemon/load to load the workspace before calling daemon/rebuild",
         })),
         DaemonError::ToolTimeout { deadline_ms, .. } => Some(tool_timeout_data(*deadline_ms)),
+        DaemonError::RebuildOutcomeTimeout { deadline_ms, .. } => {
+            Some(rebuild_outcome_timeout_data(*deadline_ms, None))
+        }
         DaemonError::InvalidArgument { reason } => Some(json!({
             "kind": "validation_error",
             "retryable": false,
@@ -670,29 +947,111 @@ fn workspace_error_data(err: &DaemonError) -> Option<serde_json::Value> {
             limit_bytes,
             current_loaded_bytes,
         } => Some(json!({
-            "root": root,
+            "root": path_text(root),
             "measured_bytes": measured_bytes,
             "limit_bytes": limit_bytes,
             "current_loaded_bytes": current_loaded_bytes,
         })),
         DaemonError::WorkspacePinned { root } => Some(json!({
-            "root": root,
+            "root": path_text(root),
             "hint": "pass force=true to reset a pinned workspace",
         })),
         DaemonError::ResetWhileLoading { root } => Some(json!({
-            "root": root,
+            "root": path_text(root),
             "hint": "wait for the load to settle, then retry",
         })),
         DaemonError::ResetCancellationDispatched {
             root,
             retry_after_ms,
         } => Some(json!({
-            "root": root,
+            "root": path_text(root),
             "retry_after_ms": retry_after_ms,
         })),
         DaemonError::SocketSetup { path, reason } => Some(json!({
-            "path": path,
+            "path": path_text(path),
             "reason": reason,
+        })),
+        DaemonError::RebuildWouldNarrowSelection {
+            root,
+            missing_plugin_ids,
+            restore_command,
+        } => Some(json!({
+            "kind": KIND_REBUILD_WOULD_NARROW_SELECTION,
+            "retryable": false,
+            "root": path_text(root),
+            "missing_plugin_ids": missing_plugin_ids,
+            "restore_command": restore_command,
+        })),
+        DaemonError::RebuildMacroOptionsUnavailable {
+            root,
+            expand_cache_dir,
+            origin,
+        } => {
+            let mut data = json!({
+                "kind": KIND_REBUILD_MACRO_OPTIONS_UNAVAILABLE,
+                "retryable": false,
+                "root": path_text(root),
+                "expand_cache_dir": path_text(expand_cache_dir),
+                "origin": origin.as_str(),
+            });
+            // Dropping the record is a way out only for a recorded
+            // directory; a requested one is fixed by naming one that exists.
+            if *origin == sqry_mcp::error::ExpandCacheOrigin::Recorded {
+                data["reset_command"] = json!(format!(
+                    "sqry daemon rebuild --no-macro-options {}",
+                    root.display()
+                ));
+            }
+            Some(data)
+        }
+        // Same `{root, reason}` shape as `WorkspaceBuildFailed` (they share
+        // `-32001`), with the manifest and the repair command as their own
+        // keys so a client need not parse `reason`. `reason` is the full
+        // sentence so a client that only reads that key still sees both.
+        DaemonError::WorkspaceManifestUnreadable {
+            root,
+            manifest_path,
+            ..
+        } => Some(json!({
+            "root": path_text(root),
+            "reason": err.to_string(),
+            "manifest_path": path_text(manifest_path),
+            "repair_command": format!("sqry index --force {}", root.display()),
+        })),
+        // The D15 shape for the absent index: `{root, reason}` as every
+        // `-32001` carries, then the absent file and the two repairs (the
+        // CLI command and the MCP tool) as their own keys.
+        DaemonError::WorkspaceNotIndexed {
+            root,
+            missing_path,
+            repair_command,
+        } => Some(json!({
+            "root": path_text(root),
+            "reason": err.to_string(),
+            "missing_path": path_text(missing_path),
+            "repair_command": repair_command,
+            "repair_tool": REPAIR_TOOL_REBUILD_INDEX,
+        })),
+        // The `-32001` `{root, reason}` shape, with the snapshot and the
+        // two repairs as their own keys, as `WorkspaceNotIndexed` carries.
+        DaemonError::WorkspaceSnapshotUnreadable {
+            root,
+            snapshot_path,
+            ..
+        } => Some(json!({
+            "root": path_text(root),
+            "reason": err.to_string(),
+            "snapshot_path": path_text(snapshot_path),
+            "repair_command": format!("sqry index --force {}", root.display()),
+            "repair_tool": REPAIR_TOOL_REBUILD_INDEX,
+        })),
+        // `{root}` as `WorkspaceEvicted` carries, plus the reload's failure.
+        DaemonError::WorkspaceReloadFailed {
+            root,
+            reload_failure,
+        } => Some(json!({
+            "root": path_text(root),
+            "reload_failure": reload_failure,
         })),
         _ => None,
     }
@@ -712,32 +1071,32 @@ fn revision_error_data(err: &DaemonError) -> Option<serde_json::Value> {
             "kind": "revision_object_missing",
             "retryable": false,
             "object": object,
-            "path": path,
+            "path": path.as_deref().map(path_text),
             "hint": "fetch or provide the missing Git object explicitly; sqryd does not fetch implicitly",
         })),
         DaemonError::RevisionSourceUnavailable { reason, path } => Some(json!({
             "kind": "revision_source_unavailable",
             "retryable": false,
             "reason": reason,
-            "path": path,
+            "path": path.as_deref().map(path_text),
         })),
         DaemonError::CheckoutFilterUnsupported { filter, path } => Some(json!({
             "kind": "checkout_filter_unsupported",
             "retryable": false,
             "filter": filter,
-            "path": path,
+            "path": path.as_deref().map(path_text),
             "hint": "use raw_git_objects mode or configure a supported explicit checkout-byte source",
         })),
         DaemonError::SubmoduleUnavailable { path, gitlink_oid } => Some(json!({
             "kind": "submodule_unavailable",
             "retryable": false,
-            "path": path,
+            "path": path_text(path),
             "gitlink_oid": gitlink_oid,
         })),
         DaemonError::DirtySnapshotChanged { root } => Some(json!({
             "kind": "dirty_snapshot_changed",
             "retryable": true,
-            "root": root,
+            "root": path_text(root),
             "hint": "retry after file writes settle",
         })),
         DaemonError::ArtifactKeyMismatch {
@@ -752,7 +1111,7 @@ fn revision_error_data(err: &DaemonError) -> Option<serde_json::Value> {
         DaemonError::ManagedWorktreeInUse { worktree, reason } => Some(json!({
             "kind": "managed_worktree_in_use",
             "retryable": true,
-            "worktree": worktree,
+            "worktree": path_text(worktree),
             "reason": reason,
         })),
         DaemonError::RevisionDiskBudgetExceeded {
@@ -787,7 +1146,7 @@ fn workspace_stale_data(
         chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
     });
     json!({
-        "root": root,
+        "root": path_text(root),
         "age_hours": age_hours,
         "cap_hours": cap_hours,
         "last_good_at": last_good_rfc3339,
@@ -804,6 +1163,33 @@ fn tool_timeout_data(deadline_ms: u64) -> serde_json::Value {
         "details": {
             "tool": serde_json::Value::Null,
             "deadline_ms": deadline_ms,
+        },
+    })
+}
+
+/// The data of [`DaemonError::RebuildOutcomeTimeout`]: the deadline kind,
+/// not retryable (a retry queues another rebuild), and the read that gives
+/// the outcome of the rebuild that continues. `tool` is the MCP tool name,
+/// `None` on IPC, where the read is `daemon/status`.
+pub(crate) fn rebuild_outcome_timeout_data(
+    deadline_ms: u64,
+    tool: Option<&str>,
+) -> serde_json::Value {
+    use serde_json::json;
+    let follow_with = if tool.is_some() {
+        "rebuild_index with force: false (answers from the resident graph without building)"
+    } else {
+        "daemon/status (the workspace leaves Rebuilding, with last_good_at or last_error)"
+    };
+    json!({
+        "kind": "deadline_exceeded",
+        "retryable": false,
+        "retry_after_ms": serde_json::Value::Null,
+        "details": {
+            "tool": tool,
+            "deadline_ms": deadline_ms,
+            "rebuild_continues": true,
+            "follow_with": follow_with,
         },
     })
 }
@@ -898,6 +1284,24 @@ impl From<GraphAcquisitionError> for DaemonError {
                         "compatibility verdict reported Exact alongside IncompatibleGraph error"
                             .to_string()
                     }
+                    // Served with a warning on the acquisition path, so it
+                    // reaches this arm only if a caller wraps it in
+                    // `IncompatibleGraph` explicitly; render it losslessly.
+                    PluginSelectionStatus::DivergesFromManifest {
+                        missing_plugin_ids,
+                        extra_plugin_ids,
+                        manifest_path,
+                    } => {
+                        let mut buf = format!(
+                            "resident graph diverges from manifest: missing [{}], extra [{}]",
+                            missing_plugin_ids.join(", "),
+                            extra_plugin_ids.join(", "),
+                        );
+                        if let Some(p) = manifest_path.as_ref() {
+                            let _ = write!(buf, " (manifest: {})", p.display());
+                        }
+                        buf
+                    }
                     other => format!("unrecognised plugin selection status: {other:?}"),
                 };
                 Self::WorkspaceIncompatibleGraph {
@@ -917,19 +1321,26 @@ impl From<GraphAcquisitionError> for DaemonError {
                 original_lifecycle,
                 reload_failure,
             } => {
-                // Preserve original-lifecycle + reload-failure context
-                // by tracing it before collapsing into the daemon's
-                // single-field WorkspaceEvicted variant. The wire shape
-                // for `-32004` is fixed (`{"root": ...}`); diagnostic
-                // detail rides on the daemon log channel.
                 tracing::warn!(
                     workspace = %workspace_root.display(),
                     original_lifecycle = %original_lifecycle,
                     reload_failure = ?reload_failure,
                     "graph acquisition: workspace evicted, reload failed"
                 );
-                Self::WorkspaceEvicted {
-                    root: workspace_root,
+                // The reload's failure is the reason the caller cannot be
+                // served, so it reaches the wire: `-32004` with
+                // `error.data.reload_failure`. Before this arm carried it,
+                // the conversion kept only the root and the wire read
+                // "evicted mid-rebuild" whatever the reload had said. An
+                // eviction with no reload attempt keeps the bare variant.
+                match reload_failure {
+                    Some(reload_failure) => Self::WorkspaceReloadFailed {
+                        root: workspace_root,
+                        reload_failure,
+                    },
+                    None => Self::WorkspaceEvicted {
+                        root: workspace_root,
+                    },
                 }
             }
             GraphAcquisitionError::StaleExpired {
@@ -957,8 +1368,149 @@ impl From<GraphAcquisitionError> for DaemonError {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Every `DaemonError` variant that names a path, each with a path that
+    /// is not valid UTF-8. The set is the enum's path-typed fields as of
+    /// round 7 (`PathBuf` and `Option<PathBuf>`), listed in the order the
+    /// enum declares them.
+    #[cfg(unix)]
+    pub(crate) fn path_bearing_errors_with_a_non_utf8_path() -> Vec<DaemonError> {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = |name: &str| {
+            let mut bytes = format!("/repo/{name}-").into_bytes();
+            bytes.push(0xff);
+            PathBuf::from(std::ffi::OsString::from_vec(bytes))
+        };
+        vec![
+            DaemonError::WorkspaceBuildFailed {
+                root: bad("root"),
+                reason: "r".into(),
+            },
+            DaemonError::WorkspaceStaleExpired {
+                root: bad("root"),
+                age_hours: 2,
+                cap_hours: 1,
+                last_good_at: None,
+                last_error: None,
+            },
+            DaemonError::WorkspaceEvicted { root: bad("root") },
+            DaemonError::WorkspaceNotLoaded { root: bad("root") },
+            DaemonError::WorkspaceIncompatibleGraph {
+                root: bad("root"),
+                reason: "r".into(),
+            },
+            DaemonError::ToolTimeout {
+                root: bad("root"),
+                secs: 1,
+                deadline_ms: 1000,
+            },
+            DaemonError::RebuildOutcomeTimeout {
+                root: bad("root"),
+                secs: 1,
+                deadline_ms: 1000,
+            },
+            DaemonError::WorkspaceOversize {
+                root: bad("root"),
+                measured_bytes: 2,
+                limit_bytes: 1,
+                current_loaded_bytes: 0,
+            },
+            DaemonError::WorkspacePinned { root: bad("root") },
+            DaemonError::ResetWhileLoading { root: bad("root") },
+            DaemonError::ResetCancellationDispatched {
+                root: bad("root"),
+                retry_after_ms: 100,
+            },
+            DaemonError::SocketSetup {
+                path: bad("socket"),
+                reason: "r".into(),
+            },
+            DaemonError::RevisionObjectMissing {
+                object: "o".into(),
+                path: Some(bad("object")),
+            },
+            DaemonError::RevisionSourceUnavailable {
+                reason: "r".into(),
+                path: Some(bad("source")),
+            },
+            DaemonError::CheckoutFilterUnsupported {
+                filter: "f".into(),
+                path: Some(bad("filtered")),
+            },
+            DaemonError::SubmoduleUnavailable {
+                path: bad("submodule"),
+                gitlink_oid: None,
+            },
+            DaemonError::DirtySnapshotChanged { root: bad("root") },
+            DaemonError::ManagedWorktreeInUse {
+                worktree: bad("worktree"),
+                reason: "r".into(),
+            },
+            DaemonError::RebuildWouldNarrowSelection {
+                root: bad("root"),
+                missing_plugin_ids: vec!["json".into()],
+                restore_command: "c".into(),
+            },
+            DaemonError::RebuildMacroOptionsUnavailable {
+                root: bad("root"),
+                expand_cache_dir: bad("cache"),
+                origin: sqry_mcp::error::ExpandCacheOrigin::Recorded,
+            },
+            DaemonError::WorkspaceManifestUnreadable {
+                root: bad("root"),
+                manifest_path: bad("manifest"),
+                reason: "r".into(),
+            },
+            DaemonError::WorkspaceNotIndexed {
+                root: bad("root"),
+                missing_path: bad("snapshot"),
+                repair_command: "c".into(),
+            },
+            DaemonError::WorkspaceSnapshotUnreadable {
+                root: bad("root"),
+                snapshot_path: bad("snapshot"),
+                reason: "r".into(),
+            },
+            DaemonError::WorkspaceReloadFailed {
+                root: bad("root"),
+                reload_failure: "r".into(),
+            },
+        ]
+    }
+
+    /// A path that is not valid UTF-8 is rendered lossily in an error's
+    /// `data`, never a panic: `json!` of a `PathBuf` unwraps a `Serialize`
+    /// that fails on such a path, so the IPC error for a workspace whose
+    /// root is not UTF-8 crashed the request's handler instead of answering
+    /// it. Each variant above answers, and its data names the path.
+    #[cfg(unix)]
+    #[test]
+    fn error_data_renders_a_non_utf8_path() {
+        let errors = path_bearing_errors_with_a_non_utf8_path();
+        let mut named = 0;
+        for err in &errors {
+            let label = format!("{err:?}");
+            let data = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| err.error_data()))
+                .unwrap_or_else(|_| panic!("error_data panicked for {label}"));
+            let text = data.map(|value| value.to_string()).unwrap_or_default();
+            if text.contains("/repo/") {
+                assert!(
+                    text.contains('\u{fffd}'),
+                    "{label}: the path is rendered lossily: {text}"
+                );
+                named += 1;
+            }
+        }
+        // The two timeouts' data is the deadline alone; every other variant
+        // names its path.
+        assert_eq!(
+            named,
+            errors.len() - 2,
+            "every path-naming variant was rendered"
+        );
+    }
 
     #[test]
     fn jsonrpc_code_covers_every_public_variant() {
@@ -990,6 +1542,278 @@ mod tests {
             root: PathBuf::from("/repo"),
         };
         assert_eq!(evicted.jsonrpc_code(), Some(JSONRPC_WORKSPACE_EVICTED));
+
+        // Surface parity W1 (D5): the narrowing refusal has its own code,
+        // distinct from every neighbour, and a data payload that names the
+        // ids and the restore command so the caller can act without
+        // parsing `message`.
+        let narrow = DaemonError::RebuildWouldNarrowSelection {
+            root: PathBuf::from("/repo"),
+            missing_plugin_ids: vec!["json".to_string()],
+            restore_command: "sqry index --force --include-high-cost /repo".to_string(),
+        };
+        assert_eq!(
+            narrow.jsonrpc_code(),
+            Some(JSONRPC_REBUILD_WOULD_NARROW_SELECTION)
+        );
+        assert_eq!(narrow.jsonrpc_code(), Some(-32021));
+        assert_ne!(
+            narrow.jsonrpc_code(),
+            Some(JSONRPC_REVISION_QUERY_REQUIRES_EXPLICIT_SELECTOR),
+            "-32020 is already owned by the revision-selector error at this head"
+        );
+        assert_ne!(narrow.jsonrpc_code(), Some(JSONRPC_WORKSPACE_BUILD_FAILED));
+        assert_ne!(narrow.jsonrpc_code(), Some(JSONRPC_INVALID_PARAMS));
+        let data = narrow
+            .error_data()
+            .expect("RebuildWouldNarrowSelection must emit error_data");
+        assert_eq!(data["kind"], KIND_REBUILD_WOULD_NARROW_SELECTION);
+        assert_eq!(data["retryable"], false);
+        assert_eq!(data["root"], "/repo");
+        assert_eq!(data["missing_plugin_ids"], serde_json::json!(["json"]));
+        assert_eq!(
+            data["restore_command"],
+            "sqry index --force --include-high-cost /repo"
+        );
+        assert_eq!(narrow.exit_code(), 70);
+        let rendered = narrow.to_string();
+        assert!(
+            rendered.contains("[json]") && rendered.contains("--include-high-cost"),
+            "Display must name the dropped ids and the restore command: {rendered}"
+        );
+
+        // Surface parity W4 (W4-D7): the macro-options refusal takes the
+        // next unused code after -32021, distinct from every neighbour, and
+        // its data names the directory and the reset command.
+        let macro_refusal = DaemonError::RebuildMacroOptionsUnavailable {
+            root: PathBuf::from("/repo"),
+            expand_cache_dir: PathBuf::from("/repo/.expand-cache"),
+            origin: sqry_mcp::error::ExpandCacheOrigin::Recorded,
+        };
+        assert_eq!(
+            macro_refusal.jsonrpc_code(),
+            Some(JSONRPC_REBUILD_MACRO_OPTIONS_UNAVAILABLE)
+        );
+        assert_eq!(macro_refusal.jsonrpc_code(), Some(-32022));
+        assert_ne!(macro_refusal.jsonrpc_code(), narrow.jsonrpc_code());
+        assert_ne!(
+            macro_refusal.jsonrpc_code(),
+            Some(JSONRPC_WORKSPACE_BUILD_FAILED)
+        );
+        assert_ne!(macro_refusal.jsonrpc_code(), Some(JSONRPC_INVALID_PARAMS));
+        let data = macro_refusal
+            .error_data()
+            .expect("RebuildMacroOptionsUnavailable must emit error_data");
+        assert_eq!(data["kind"], KIND_REBUILD_MACRO_OPTIONS_UNAVAILABLE);
+        assert_eq!(data["retryable"], false);
+        assert_eq!(data["root"], "/repo");
+        assert_eq!(data["expand_cache_dir"], "/repo/.expand-cache");
+        assert_eq!(
+            data["reset_command"],
+            "sqry daemon rebuild --no-macro-options /repo"
+        );
+        assert_eq!(macro_refusal.exit_code(), 70);
+        let rendered = macro_refusal.to_string();
+        assert!(
+            rendered.contains("/repo/.expand-cache") && rendered.contains("--no-macro-options"),
+            "Display must name the directory and the reset command: {rendered}"
+        );
+        assert_eq!(data["origin"], "recorded");
+        // S10 (round 7): the reason is the core's, by shape, and a
+        // directory the request named is fixed by naming one that exists,
+        // so no reset is offered for it.
+        assert!(
+            rendered.starts_with(&format!(
+                "rebuild of /repo refused: {};",
+                sqry_core::graph::unified::build::expand_cache_missing_reason(
+                    std::path::Path::new("/repo/.expand-cache")
+                )
+            )),
+            "{rendered}"
+        );
+        let requested = DaemonError::RebuildMacroOptionsUnavailable {
+            root: PathBuf::from("/repo"),
+            expand_cache_dir: PathBuf::from("/repo/.expand-cache"),
+            origin: sqry_mcp::error::ExpandCacheOrigin::Requested,
+        };
+        let data = requested.error_data().expect("error_data");
+        assert_eq!(data["origin"], "requested");
+        assert!(data.get("reset_command").is_none(), "{data}");
+        let rendered = requested.to_string();
+        assert!(
+            rendered.contains("expand_cache (--expand-cache)")
+                && !rendered.contains("--no-macro-options"),
+            "{rendered}"
+        );
+
+        // Surface parity W1 round 2 (D9, D12): an unreadable manifest is
+        // refused with the existing `-32001`, no new code; the Display and
+        // the data payload both name the manifest and the repair command.
+        let unreadable = DaemonError::WorkspaceManifestUnreadable {
+            root: PathBuf::from("/repo"),
+            manifest_path: PathBuf::from("/repo/.sqry/graph/manifest.json"),
+            reason: "missing field `schema_version`".to_string(),
+        };
+        assert_eq!(
+            unreadable.jsonrpc_code(),
+            Some(JSONRPC_WORKSPACE_BUILD_FAILED)
+        );
+        assert_eq!(unreadable.jsonrpc_code(), Some(-32001));
+        assert_ne!(
+            unreadable.jsonrpc_code(),
+            Some(JSONRPC_WORKSPACE_INCOMPATIBLE_GRAPH)
+        );
+        assert_eq!(unreadable.exit_code(), 70);
+        let rendered = unreadable.to_string();
+        assert_eq!(
+            rendered,
+            "manifest at /repo/.sqry/graph/manifest.json cannot be read (missing field `schema_version`); repair with: sqry index --force /repo"
+        );
+        let data = unreadable
+            .error_data()
+            .expect("WorkspaceManifestUnreadable must emit error_data");
+        assert_eq!(data["root"], "/repo");
+        assert_eq!(data["reason"], rendered);
+        assert_eq!(data["manifest_path"], "/repo/.sqry/graph/manifest.json");
+        assert_eq!(data["repair_command"], "sqry index --force /repo");
+    }
+
+    /// The absent index shares `-32001` with the build failure and the
+    /// unreadable manifest (design D15's precedent), and its data carries
+    /// the `{root, reason}` every `-32001` carries plus the absent file and
+    /// both repairs; the snapshot-only shape names `--force`.
+    #[test]
+    fn workspace_not_indexed_is_32001_naming_the_absent_file_and_the_repair() {
+        let root = PathBuf::from("/repo");
+        let manifest = PathBuf::from("/repo/.sqry/graph/manifest.json");
+        let err = DaemonError::workspace_not_indexed(&root, manifest.clone());
+        assert_eq!(err.jsonrpc_code(), Some(JSONRPC_WORKSPACE_BUILD_FAILED));
+        assert_eq!(err.jsonrpc_code(), Some(-32001));
+        assert_ne!(err.jsonrpc_code(), Some(JSONRPC_WORKSPACE_EVICTED));
+        assert_eq!(err.exit_code(), 70);
+        let rendered = err.to_string();
+        assert_eq!(
+            rendered,
+            "workspace /repo is not indexed: /repo/.sqry/graph/manifest.json is absent; \
+             index it with: sqry index /repo (MCP clients: the rebuild_index tool)"
+        );
+        let data = err
+            .error_data()
+            .expect("WorkspaceNotIndexed must emit data");
+        assert_eq!(data["root"], "/repo");
+        assert_eq!(data["reason"], rendered);
+        assert_eq!(data["missing_path"], "/repo/.sqry/graph/manifest.json");
+        assert_eq!(data["repair_command"], "sqry index /repo");
+        assert_eq!(data["repair_tool"], "rebuild_index");
+        assert_eq!(data.as_object().map(serde_json::Map::len), Some(5));
+
+        let snapshot = PathBuf::from("/repo/.sqry/graph/snapshot.sqry");
+        let err = DaemonError::workspace_snapshot_missing(&root, snapshot);
+        let data = err.error_data().expect("data");
+        assert_eq!(data["missing_path"], "/repo/.sqry/graph/snapshot.sqry");
+        assert_eq!(data["repair_command"], "sqry index --force /repo");
+        assert!(err.to_string().contains("sqry index --force /repo"));
+    }
+
+    /// A failed reload after an eviction reaches the wire as `-32004`
+    /// carrying the reload's failure; an eviction with no reload attempt
+    /// keeps the bare `WorkspaceEvicted` and its `{root}` data.
+    #[test]
+    fn from_graph_acquisition_evicted_carries_the_reload_failure() {
+        let carried: DaemonError = GraphAcquisitionError::Evicted {
+            workspace_root: PathBuf::from("/repo"),
+            original_lifecycle: "evicted".to_string(),
+            reload_failure: Some("workspace /repo build failed: snapshot load failed".into()),
+        }
+        .into();
+        assert_eq!(carried.jsonrpc_code(), Some(JSONRPC_WORKSPACE_EVICTED));
+        assert_eq!(carried.exit_code(), 70);
+        assert_eq!(
+            carried.to_string(),
+            "workspace /repo was evicted and its reload from the persisted graph failed: \
+             workspace /repo build failed: snapshot load failed"
+        );
+        let data = carried.error_data().expect("data");
+        assert_eq!(data["root"], "/repo");
+        assert_eq!(
+            data["reload_failure"],
+            "workspace /repo build failed: snapshot load failed"
+        );
+
+        let bare: DaemonError = GraphAcquisitionError::Evicted {
+            workspace_root: PathBuf::from("/repo"),
+            original_lifecycle: "evicted".to_string(),
+            reload_failure: None,
+        }
+        .into();
+        assert!(
+            matches!(bare, DaemonError::WorkspaceEvicted { .. }),
+            "{bare:?}"
+        );
+        assert_eq!(
+            bare.error_data().expect("data"),
+            serde_json::json!({ "root": "/repo" })
+        );
+    }
+
+    /// `clone_err` keeps both new variants (the reload records the absent
+    /// index as `last_error`; the fallthrough for an unlisted variant is
+    /// `unreachable!`).
+    #[test]
+    fn clone_err_round_trips_the_absent_index_and_the_failed_reload() {
+        use crate::workspace::manager::clone_err;
+
+        let not_indexed = DaemonError::workspace_snapshot_missing(
+            Path::new("/repo"),
+            PathBuf::from("/repo/.sqry/graph/snapshot.sqry"),
+        );
+        let cloned = clone_err(&not_indexed);
+        assert!(matches!(cloned, DaemonError::WorkspaceNotIndexed { .. }));
+        assert_eq!(cloned.to_string(), not_indexed.to_string());
+
+        let reload = DaemonError::WorkspaceReloadFailed {
+            root: PathBuf::from("/repo"),
+            reload_failure: "x".into(),
+        };
+        let cloned = clone_err(&reload);
+        assert!(matches!(cloned, DaemonError::WorkspaceReloadFailed { .. }));
+        assert_eq!(cloned.to_string(), reload.to_string());
+    }
+
+    /// T11 (surface parity W1): the daemon renderer names the missing and
+    /// extra ids of a `DivergesFromManifest` verdict instead of falling
+    /// into the "unrecognised plugin selection status" arm.
+    #[test]
+    fn from_graph_acquisition_diverges_from_manifest_names_the_ids() {
+        use sqry_core::graph::acquisition::{GraphAcquisitionError, PluginSelectionStatus};
+
+        let err = GraphAcquisitionError::IncompatibleGraph {
+            source_root: PathBuf::from("/repo"),
+            status: PluginSelectionStatus::DivergesFromManifest {
+                missing_plugin_ids: vec!["json".to_string()],
+                extra_plugin_ids: vec!["terraform".to_string()],
+                manifest_path: Some(PathBuf::from("/repo/.sqry/graph/manifest.json")),
+            },
+        };
+        let de: DaemonError = err.into();
+        match de {
+            DaemonError::WorkspaceIncompatibleGraph { root, reason } => {
+                assert_eq!(root, PathBuf::from("/repo"));
+                assert!(
+                    reason.contains("missing [json]") && reason.contains("extra [terraform]"),
+                    "reason must name both id lists, got: {reason}"
+                );
+                assert!(
+                    reason.contains("/repo/.sqry/graph/manifest.json"),
+                    "reason must name the manifest, got: {reason}"
+                );
+                assert!(
+                    !reason.contains("unrecognised"),
+                    "the verdict must not fall into the catch-all arm: {reason}"
+                );
+            }
+            other => panic!("expected WorkspaceIncompatibleGraph, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1198,6 +2022,32 @@ mod tests {
     // of these tests and force a matching update to the MCP-path
     // wrapper (`daemon_err_to_mcp`) so daemon-path and direct-path
     // MCP responses stay byte-identical.
+
+    /// Round 7 note: a rebuild whose outcome did not arrive in time keeps
+    /// `-32000` and the deadline kind, but says the rebuild continues, is
+    /// not retryable, and names the read that gives the outcome.
+    #[test]
+    fn rebuild_outcome_timeout_says_the_rebuild_continues() {
+        let err = DaemonError::RebuildOutcomeTimeout {
+            root: PathBuf::from("/repo"),
+            secs: 600,
+            deadline_ms: 600_000,
+        };
+        assert_eq!(err.jsonrpc_code(), Some(JSONRPC_TOOL_TIMEOUT));
+        let data = err.error_data().expect("data");
+        assert_eq!(data["kind"], "deadline_exceeded");
+        assert_eq!(data["retryable"], false);
+        assert!(data["retry_after_ms"].is_null());
+        assert_eq!(data["details"]["deadline_ms"], 600_000);
+        assert_eq!(data["details"]["rebuild_continues"], true);
+        assert!(
+            data["details"]["follow_with"]
+                .as_str()
+                .is_some_and(|read| read.starts_with("daemon/status")),
+            "{data}"
+        );
+        assert!(err.to_string().contains("the rebuild continues"), "{err}");
+    }
 
     #[test]
     fn tool_timeout_has_jsonrpc_code_32000_and_deadline_exceeded_kind() {

@@ -8,16 +8,18 @@ use ropey::Rope;
 use sqry_core::graph::acquisition::{
     AcquisitionOperation, AutoBuildHook, FilesystemGraphProvider, GraphAcquirer,
     GraphAcquisitionError, GraphAcquisitionRequest, MissingGraphPolicy, PathPolicy,
-    PluginSelectionPolicy, StalePolicy,
+    PluginSelectionPolicy, PluginSelectionStatus, StalePolicy,
 };
 use sqry_core::graph::unified::concurrent::CodeGraph;
 use sqry_core::graph::unified::resolution::display_graph_qualified_name;
 use sqry_core::graph::unified::{NodeEntry, NodeKind, StagingGraph, StagingOp, StringId};
 use sqry_core::plugin::PluginManager;
-use sqry_core::project::{Project, ProjectManager};
+use sqry_core::project::{Project, ProjectId, ProjectManager};
 use sqry_core::query::QueryExecutor;
 use sqry_core::workspace::{Classification, HeuristicVerdict, LogicalWorkspace, MemberReason};
-use sqry_plugin_registry::create_plugin_manager;
+use sqry_plugin_registry::{
+    PluginSelectionConfig, UnreadableManifestPolicy, WorkspaceRoster, create_plugin_manager_all,
+};
 use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
@@ -37,6 +39,16 @@ pub struct SessionManager {
     documents: DocumentStore,
     /// Graph cache for single-project mode.
     graph_cache: Arc<RwLock<Option<Arc<CodeGraph>>>>,
+    /// Graph cache for workspace-folder mode, keyed by the owning
+    /// project's id (surface parity W1 round 3, design D16). Every entry
+    /// was acquired through the shared `FilesystemGraphProvider` by
+    /// [`acquire_session_graph`], never through the core project's own
+    /// snapshot loader (which opens no manifest), so the
+    /// manifest classification and the D9 self-heal apply to project
+    /// graphs exactly as to the single-root graph. Cleared with
+    /// [`Self::clear_graph_cache`]; one entry is dropped by
+    /// [`Self::clear_project_graph_cache_for_path`].
+    project_graphs: Arc<RwLock<HashMap<ProjectId, Arc<CodeGraph>>>>,
     /// SGA06 — observability counter incremented on every successful return
     /// from [`Self::graph_for_path`]. Used by the SGA06 parity tests to pin
     /// that LSP read-only handlers route their graph acquisition through the
@@ -62,6 +74,27 @@ pub struct SessionManager {
     /// empty. Daemon-hosted LSP sessions install a provider that snapshots the
     /// daemon's resident revision registry for `sqry/workspaceStatus`.
     revision_status_provider: Arc<RwLock<Option<RevisionStatusProvider>>>,
+    /// The graph refusals the client has been told about, one per
+    /// acquisition root ([`RefusalNotices`]).
+    refusal_notices: Arc<parking_lot::Mutex<RefusalNotices>>,
+}
+
+/// The refusal notices of a session: a request that answers without a graph
+/// the session refused (a document-level handler's fallback to the open
+/// document, a `workspace/symbol` folder left out) makes the refusal
+/// visible, but once per refusal state, not once per request: a hover or a
+/// symbol picker sends many requests in the same state. `shown` holds the
+/// refusal last notified for each acquisition root; a graph acquired for
+/// that root clears it, so the next refusal is notified again, as is a
+/// refusal with a different text. A root with no index does not stand
+/// apart: the acquisition builds it ([`acquire_session_graph`]'s auto-build
+/// hook), so it too ends in a graph or a refusal. `pending` holds
+/// the notices the server has not yet sent; the server sends them as
+/// `window/showMessage` warnings when the request that queued them ends.
+#[derive(Debug, Default)]
+struct RefusalNotices {
+    shown: HashMap<PathBuf, String>,
+    pending: Vec<String>,
 }
 
 type RevisionStatusProvider = Arc<dyn Fn() -> Vec<serde_json::Value> + Send + Sync>;
@@ -219,10 +252,12 @@ impl SessionManager {
             config: Arc::new(RwLock::new(config)),
             documents: DocumentStore::new(),
             graph_cache: Arc::new(RwLock::new(None)),
+            project_graphs: Arc::new(RwLock::new(HashMap::new())),
             graph_for_path_calls: Arc::new(AtomicU64::new(0)),
             project_manager,
             logical_workspace,
             revision_status_provider: Arc::new(RwLock::new(None)),
+            refusal_notices: Arc::new(parking_lot::Mutex::new(RefusalNotices::default())),
         }
     }
 
@@ -254,8 +289,15 @@ impl SessionManager {
 
     /// Resolve the workspace-relative path requested by the client.
     ///
-    /// The resolved path is validated to be within the workspace root
-    /// (or `index_root` override) to prevent directory traversal.
+    /// A relative path is joined to the workspace root (or the `index_root`
+    /// override). The resolved path is validated to prevent directory
+    /// traversal: it must lie within that root, within one of the
+    /// workspace folders the client declared, or be the index root of a
+    /// project the session serves (a workspace folder nested in a git
+    /// repository is indexed at the repository root, the root a refusal
+    /// notice names). Before, only the first root was accepted, so
+    /// `sqry.index` for any other workspace folder, the remedy the refusal
+    /// notice names, answered that the folder was outside the workspace.
     ///
     /// # Errors
     ///
@@ -280,15 +322,43 @@ impl SessionManager {
         let resolved = canonicalize_with_missing_tail(&path)
             .with_context(|| format!("failed to resolve requested path {}", path.display()))?;
 
-        if !resolved.starts_with(&canonical_base) {
+        if resolved.starts_with(&canonical_base) || self.serves_root(&resolved) {
+            return Ok(resolved);
+        }
+        let folders = self.project_manager.workspace_folders();
+        if folders.is_empty() {
             anyhow::bail!(
                 "resolved path {} is outside workspace root {}",
                 resolved.display(),
                 canonical_base.display()
             );
         }
+        anyhow::bail!(
+            "resolved path {} is outside workspace root {} and every workspace folder ({})",
+            resolved.display(),
+            canonical_base.display(),
+            folders
+                .iter()
+                .map(|folder| folder.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
 
-        Ok(resolved)
+    /// Whether `resolved` (canonical) is served by the session besides its
+    /// own root: it lies within a workspace folder the client declared, or
+    /// it is the index root of a project the session holds
+    /// ([`Self::resolve_path`]).
+    fn serves_root(&self, resolved: &Path) -> bool {
+        self.project_manager
+            .workspace_folders()
+            .iter()
+            .any(|folder| resolved.starts_with(folder))
+            || self
+                .project_manager
+                .all_projects()
+                .iter()
+                .any(|project| project.index_root == resolved)
     }
 
     #[must_use]
@@ -499,6 +569,25 @@ impl SessionManager {
     ///
     /// Returns an error if project resolution or graph loading fails.
     pub fn graph_for_path(&self, path: &Path) -> Result<Option<Arc<CodeGraph>>> {
+        self.graph_for_path_at(path).1
+    }
+
+    /// [`Self::graph_for_path`] with the root the graph is acquired at: the
+    /// session's index root in single-root mode, the owning project's index
+    /// root otherwise, or `path` itself when no project owns it. A graph
+    /// acquired here clears the root's refusal notice, so the next refusal
+    /// there is shown again ([`Self::note_refusal`]).
+    ///
+    /// A root with no index is built here, not skipped: the provider runs
+    /// the session's auto-build hook wherever it finds no graph, so the
+    /// outcome is a graph or, when that build fails, a refusal. `Ok(None)`
+    /// is therefore unreachable today; it stays in the signature (and the
+    /// callers keep their `None` arms) only for a provider without the
+    /// hook, which would answer [`GraphAcquisitionError::NoGraph`].
+    pub(crate) fn graph_for_path_at(
+        &self,
+        path: &Path,
+    ) -> (PathBuf, Result<Option<Arc<CodeGraph>>>) {
         // SGA06 — record every observable entry into the shared-acquisition
         // path so the parity test suite can pin that read-only LSP handlers
         // (search, callers/callees, relations, hierarchical_search,
@@ -506,7 +595,14 @@ impl SessionManager {
         // acquisition through this method rather than re-entering the
         // executor's own `get_or_load_graph`.
         self.graph_for_path_calls.fetch_add(1, Ordering::Relaxed);
+        let (root, outcome) = self.acquire_graph_for_path(path);
+        if outcome.is_ok() {
+            self.refusal_notices.lock().shown.remove(&root);
+        }
+        (root, outcome)
+    }
 
+    fn acquire_graph_for_path(&self, path: &Path) -> (PathBuf, Result<Option<Arc<CodeGraph>>>) {
         // Backward compatibility: In single-root mode (no workspace folders configured),
         // use the legacy graph() which respects the configured index_root setting.
         if self.project_manager.workspace_folders().is_empty() {
@@ -514,12 +610,21 @@ impl SessionManager {
                 "graph_for_path: single-root mode, using session graph() for path '{}'",
                 path.display()
             );
-            return self.graph();
+            return (self.current_index_root(), self.graph());
         }
 
         // Multi-project mode: resolve the correct project for this file path
-        let project = self.project_for_path(path)?;
+        match self.project_for_path(path) {
+            Ok(project) => (
+                project.index_root.clone(),
+                self.project_graph(path, &project),
+            ),
+            Err(err) => (path.to_path_buf(), Err(err)),
+        }
+    }
 
+    /// The graph of `project`, the workspace-folder project that owns `path`.
+    fn project_graph(&self, path: &Path, project: &Project) -> Result<Option<Arc<CodeGraph>>> {
         log::debug!(
             "Loading graph for path '{}' from project '{}' (root: '{}')",
             path.display(),
@@ -527,18 +632,75 @@ impl SessionManager {
             project.index_root.display()
         );
 
-        // Use per-project graph caching, with the same corrupt/incompatible
-        // snapshot self-healing behavior as single-root mode.
-        match project.graph() {
-            Ok(graph) => Ok(graph),
-            Err(load_error) => {
-                log::warn!(
-                    "Graph load failed for project '{}' ({load_error}), auto-rebuilding index for LSP",
-                    project.index_root.display()
-                );
-                Self::rebuild_project_graph_after_load_failure(&project, &load_error)
-            }
+        // Surface parity W1 round 3 (design D16): the project graph goes
+        // through the same shared provider as the single-root graph
+        // (path policy, SHA-256, manifest classification, the D9
+        // self-heal on `LoadFailed`), cached per project in the session.
+        // The core project's own loader read the snapshot without opening
+        // the manifest, so a manifest naming an id this binary did not
+        // compile was served here while every other surface refused it.
+        if let Some(graph) = self.project_graphs.read().get(&project.id) {
+            return Ok(Some(Arc::clone(graph)));
         }
+        match acquire_session_graph(
+            &project.index_root,
+            "lsp:project_graph",
+            "lsp:project_auto_rebuild",
+        ) {
+            Ok(graph) => {
+                self.project_graphs
+                    .write()
+                    .insert(project.id, Arc::clone(&graph));
+                Ok(Some(graph))
+            }
+            Err(SessionAcquisitionError {
+                error: GraphAcquisitionError::NoGraph { .. },
+                ..
+            }) => {
+                // Only a provider without the auto-build hook answers
+                // `NoGraph`; this session's always has it, so this arm is
+                // unreachable today ([`Self::graph_for_path_at`]). It
+                // returns the same `None` as the single-root arm.
+                Ok(None)
+            }
+            Err(err) => Err(map_acquisition_error_for_lsp(err, &project.index_root)),
+        }
+    }
+
+    /// Make a graph refusal visible to the client once per refusal state.
+    ///
+    /// A request that reads around the graph `root` refused calls this:
+    /// every handler that looks up the symbols of one file falls back to
+    /// the file's own text ([`Self::node_at`], [`Self::nodes_in_document`];
+    /// references and code lenses then answer with the refusal, since their
+    /// answer is a graph fact), and `workspace/symbol` leaves a refused
+    /// folder out while another folder answers. The first refusal at
+    /// `root`, and any refusal whose text differs from the one last shown
+    /// there, queues a notice naming the root, the refusal and the remedy;
+    /// the same refusal again queues nothing until a graph is acquired at
+    /// `root` ([`Self::graph_for_path_at`]). The server sends the queued
+    /// notices as `window/showMessage` warnings ([`Self::take_refusal_notices`]).
+    pub(crate) fn note_refusal(&self, root: &Path, refusal: &anyhow::Error) {
+        let rendered = crate::handlers::render_error_chain(refusal);
+        let mut notices = self.refusal_notices.lock();
+        if notices.shown.get(root) == Some(&rendered) {
+            return;
+        }
+        let reset_arguments = match refusal.downcast_ref::<crate::handlers::LspHandlerError>() {
+            Some(crate::handlers::LspHandlerError::RequestFailed {
+                data: Some(data), ..
+            }) => data.get("resetArguments"),
+            _ => None,
+        };
+        let notice = refusal_notice(root, &rendered, reset_arguments);
+        notices.shown.insert(root.to_path_buf(), rendered);
+        notices.pending.push(notice);
+    }
+
+    /// The refusal notices queued since the last call, oldest first, for the
+    /// server to send as `window/showMessage` warnings.
+    pub fn take_refusal_notices(&self) -> Vec<String> {
+        std::mem::take(&mut self.refusal_notices.lock().pending)
     }
 
     /// Load (or reuse) the cached unified graph for single-root mode.
@@ -557,12 +719,14 @@ impl SessionManager {
     /// canonical path-policy / plugin-selection / SHA-256 integrity checks
     /// that previously lived inline.
     ///
-    /// `MissingGraphPolicy::AutoBuildIfEnabled` matches the pre-SGA06
-    /// behaviour: a missing snapshot returned `None` and the LSP startup
-    /// filter triggered a build via `rebuild_index`. We preserve that
-    /// surface by mapping [`GraphAcquisitionError::NoGraph`] back to
-    /// `Ok(None)`. The auto-build hook is therefore reached only on the
-    /// historic self-heal path (corrupt / partially-written snapshot).
+    /// Under `MissingGraphPolicy::AutoBuildIfEnabled` the provider runs the
+    /// auto-build hook wherever it finds no graph, so a root with no index
+    /// is built here (and a build that fails is a refusal); a corrupt or
+    /// partially written snapshot is rebuilt by the `LoadFailed` arm of
+    /// `acquire_session_graph`. [`GraphAcquisitionError::NoGraph`], which
+    /// this maps to `Ok(None)`, is answered only by a provider without the
+    /// hook, so `Ok(None)` is unreachable today
+    /// (`graph_for_path_at`).
     ///
     /// # Errors
     ///
@@ -587,15 +751,19 @@ impl SessionManager {
             logical_workspace.source_roots().len()
         );
 
-        match acquire_session_graph(&root, "lsp:session_graph") {
+        match acquire_session_graph(&root, "lsp:session_graph", "lsp:auto_rebuild") {
             Ok(graph) => {
                 let mut cache = self.graph_cache.write();
                 *cache = Some(graph.clone());
                 Ok(Some(graph))
             }
-            Err(GraphAcquisitionError::NoGraph { .. }) => {
-                // No manifest → no complete index → return None
-                // (startup filter should have caught this and triggered build)
+            Err(SessionAcquisitionError {
+                error: GraphAcquisitionError::NoGraph { .. },
+                ..
+            }) => {
+                // Only a provider without the auto-build hook answers
+                // `NoGraph`; this session's always has it, so this arm is
+                // unreachable today ([`Self::graph_for_path_at`]).
                 Ok(None)
             }
             Err(err) => {
@@ -607,31 +775,6 @@ impl SessionManager {
                 Err(map_acquisition_error_for_lsp(err, &root))
             }
         }
-    }
-
-    fn rebuild_project_graph_after_load_failure(
-        project: &Project,
-        load_error: &sqry_core::project::ProjectError,
-    ) -> Result<Option<Arc<CodeGraph>>> {
-        let plugins = create_plugin_manager();
-        let config = sqry_core::graph::unified::build::BuildConfig::default();
-        let (new_graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
-            &project.index_root,
-            &plugins,
-            &config,
-            "lsp:project_auto_rebuild",
-        )
-        .with_context(|| {
-            format!(
-                "auto-rebuild failed for {} (original error: {})",
-                project.index_root.display(),
-                load_error
-            )
-        })?;
-
-        let graph = Arc::new(new_graph);
-        project.clear_graph_cache();
-        Ok(Some(graph))
     }
 
     /// SGA06 — return the number of times [`Self::graph_for_path`] has been
@@ -649,19 +792,25 @@ impl SessionManager {
         self.graph_for_path_calls.load(Ordering::Relaxed)
     }
 
-    /// Clear the cached unified graph.
+    /// Clear every cached unified graph: the single-root cache and the
+    /// per-project map (design D16).
     pub fn clear_graph_cache(&self) {
         let mut cache = self.graph_cache.write();
         *cache = None;
+        self.project_graphs.write().clear();
     }
 
-    /// Clear the cached unified graph for the project that owns `path`.
+    /// Drop the cached unified graph for the project that owns `path`.
     ///
     /// This is used after explicit multi-root rebuilds. The single-root cache is
-    /// cleared separately by [`Self::clear_graph_cache`].
+    /// cleared separately by [`Self::clear_graph_cache`]. The entry lives in
+    /// the session's own map (design D16), so `Project::clear_graph_cache`
+    /// in `sqry-core` is not involved.
     pub fn clear_project_graph_cache_for_path(&self, path: &Path) {
         match self.project_for_path(path) {
-            Ok(project) => project.clear_graph_cache(),
+            Ok(project) => {
+                self.project_graphs.write().remove(&project.id);
+            }
             Err(err) => log::warn!(
                 "failed to clear project graph cache for '{}': {err}",
                 path.display()
@@ -742,18 +891,22 @@ impl SessionManager {
         let has_unsaved_changes = snapshot.is_some() && !document_matches_disk(snapshot, path);
 
         if !has_unsaved_changes {
-            match self.graph_for_path(path) {
-                Ok(Some(graph)) => {
+            match self.graph_for_path_at(path) {
+                (_, Ok(Some(graph))) => {
                     if let Some(nodes) = Self::nodes_from_graph(path, &graph) {
                         return Ok(nodes);
                     }
                 }
-                Ok(None) => {}
-                Err(err) => {
+                (_, Ok(None)) => {}
+                (root, Err(err)) => {
+                    // The answer still comes from the document, but the
+                    // refusal is shown to the client, once per refusal state,
+                    // instead of only being logged.
                     log::warn!(
                         "failed to load graph for '{}'; falling back to document content: {err}",
                         path.display()
                     );
+                    self.note_refusal(&root, &err);
                 }
             }
         }
@@ -822,6 +975,64 @@ impl SessionManager {
     }
 }
 
+/// The text of the notice for a graph refusal at `root`: the root, the
+/// refusal (`rendered`, the whole error chain, which names the cause and,
+/// for a refused rebuild, its own remedy; its own closing full stop is
+/// dropped so the sentence ends once), what the session does meanwhile,
+/// and the remedy.
+///
+/// What the session does meanwhile is named per request, because the
+/// requests do not all degrade alike. Those that only need the symbols of
+/// one file (hover, definition, document symbols, code actions, call
+/// hierarchy preparation, `sqry.explainSymbol`) answer from the file's own
+/// text ([`SessionManager::node_at`]). Those whose answer is a graph fact
+/// (references and `sqry.showCallers`/`sqry.showReferences`, which are
+/// callers; code lenses, which are caller counts; diagnostics, which are
+/// unused and cyclic symbols; call hierarchy calls; the `sqry/*` requests)
+/// answer with the refusal: an empty answer would claim that no caller,
+/// count or finding exists (the silent answer S4 removed in round 7).
+/// `workspace/symbol` leaves a refused folder out while another folder
+/// answers, and answers with the refusal when none does.
+///
+/// The remedy is spelled so it can be run as it stands: the CLI
+/// command, and the `sqry.index` arguments, which the server accepts for
+/// any workspace folder ([`SessionManager::resolve_path`]). A refusal of
+/// the macro options the index records carries the `sqry.index` arguments
+/// that drop the record (`reset_arguments`, its `data.resetArguments`),
+/// and the notice names that remedy too: rebuilding with `force` alone
+/// reuses the record and is refused again.
+fn refusal_notice(
+    root: &Path,
+    rendered: &str,
+    reset_arguments: Option<&serde_json::Value>,
+) -> String {
+    let rendered = rendered.trim_end().trim_end_matches('.');
+    let rebuild_arguments = serde_json::json!([root.display().to_string(), true]);
+    let mut notice = format!(
+        "sqry cannot use the code graph for {root}: {rendered}. Until it can, for files under \
+         it, hover, definition, document symbols, code actions, call hierarchy preparation and \
+         sqry.explainSymbol answer from the file's own text only; references, code lenses, \
+         diagnostics, call hierarchy calls and every other request that needs the graph answer \
+         with this refusal; and workspace/symbol leaves it out while another workspace folder \
+         answers, and answers with this refusal when none does. Fix the cause, then rebuild the \
+         index: `sqry index --force {root}`, or the sqry.index command with the arguments \
+         {rebuild_arguments}.",
+        root = root.display()
+    );
+    if let Some(reset_arguments) = reset_arguments {
+        let reset_root = reset_arguments
+            .get(0)
+            .and_then(serde_json::Value::as_str)
+            .map_or_else(|| root.display().to_string(), str::to_owned);
+        notice.push_str(&format!(
+            " The cause is the macro options the index records, so dropping them is the other \
+             remedy: `sqry index --force --no-macro-options {reset_root}`, or the sqry.index \
+             command with the arguments {reset_arguments}."
+        ));
+    }
+    notice
+}
+
 /// SGA06 — acquire a graph for `root` through the shared
 /// [`FilesystemGraphProvider`].
 ///
@@ -843,29 +1054,67 @@ impl SessionManager {
 /// `tool_name` is forwarded into [`GraphAcquisitionRequest::tool_name`] so
 /// provider-side observability can attribute the acquisition.
 ///
+/// `build_command` is the site the self-heal records in the manifest's
+/// provenance when it rebuilds (surface parity W1 round 3, design D16):
+/// `lsp:auto_rebuild` for the single-root and index-status callers,
+/// `lsp:project_auto_rebuild` for the workspace-folder arm of
+/// [`SessionManager::graph_for_path`].
+///
 /// [`build_and_persist_graph`]: sqry_core::graph::unified::build::build_and_persist_graph
 pub(crate) fn acquire_session_graph(
     root: &Path,
     tool_name: &'static str,
-) -> Result<Arc<CodeGraph>, GraphAcquisitionError> {
+    build_command: &'static str,
+) -> Result<Arc<CodeGraph>, SessionAcquisitionError> {
+    acquire_session_graph_with(
+        root,
+        tool_name,
+        build_command,
+        build_and_persist_with_workspace_roster,
+    )
+}
+
+/// The rebuild the provider's auto-build hook runs ([`acquire_session_graph`]).
+type SelfHealBuild = fn(&Path, &str) -> Result<CodeGraph>;
+
+/// [`acquire_session_graph`] with the auto-build hook's rebuild given, so
+/// the hook arm's refusal-kind plumbing is tested with a rebuild that
+/// refuses. Production passes [`build_and_persist_with_workspace_roster`].
+///
+/// The auto-build hook arm runs only where the provider found no
+/// `.sqry/graph` directory for `root`, so there is no manifest there and
+/// the real rebuild meets no roster or macro record to refuse: today it
+/// can only fail as a build (`workspace_not_ready`). Its kind is still
+/// recorded from the rebuild's own error, so a refusal reached there (a
+/// provider that runs the hook in more cases, a record read from elsewhere)
+/// is reported as itself; the unit tests drive that with a refusing
+/// rebuild.
+fn acquire_session_graph_with(
+    root: &Path,
+    tool_name: &'static str,
+    build_command: &'static str,
+    hook_build: SelfHealBuild,
+) -> Result<Arc<CodeGraph>, SessionAcquisitionError> {
     let provider_plugins = build_plugin_manager();
     let auto_build_root = root.to_path_buf();
+    // The provider's hook can only return its own error type, whose
+    // `BuildFailed` carries the reason as text; what the refused rebuild
+    // was (its kind, whether the reset removes it) is kept here, per
+    // acquisition, and joined to the error below.
+    let hook_refusal: Arc<parking_lot::Mutex<Option<SelfHealFailure>>> =
+        Arc::new(parking_lot::Mutex::new(None));
+    let hook_kind = Arc::clone(&hook_refusal);
     let auto_build_hook: AutoBuildHook = Arc::new(move |_req_path| {
         log::warn!(
             "Graph load failed for LSP at '{}', auto-rebuilding index (self-heal)",
             auto_build_root.display()
         );
-        let plugins = create_plugin_manager();
-        let config = sqry_core::graph::unified::build::BuildConfig::default();
-        let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
-            &auto_build_root,
-            &plugins,
-            &config,
-            "lsp:auto_rebuild",
-        )
-        .map_err(|e| GraphAcquisitionError::BuildFailed {
-            workspace_root: auto_build_root.clone(),
-            reason: format!("{e}"),
+        let graph = hook_build(&auto_build_root, build_command).map_err(|e| {
+            *hook_kind.lock() = Some(SelfHealFailure::of(&e));
+            GraphAcquisitionError::BuildFailed {
+                workspace_root: auto_build_root.clone(),
+                reason: crate::handlers::render_error_chain(&e),
+            }
         })?;
         Ok(Arc::new(graph))
     });
@@ -895,6 +1144,31 @@ pub(crate) fn acquire_session_graph(
         // triggers an in-place rebuild. SGA06 preserves only this explicit
         // policy (per the design spec — corrupt-load self-heal is a
         // documented LSP behaviour, distinct from a clean missing-graph).
+        // Decision D-i8-60: the self-heal rewrites only the index at `root`,
+        // the index root it was given (the session root, or a project's
+        // index root: under gitRoot the repository root, which bounds the
+        // provider's walk, so an ancestor graph never reaches this arm
+        // there). A graph the provider found above `root` (an ancestor
+        // inside the same marker-bounded project, above a single root or a
+        // folder outside any repository) is no index root the session
+        // serves, so its failed load is refused, as the standalone MCP
+        // refuses every failed load, and the refusal names both remedies.
+        Err(GraphAcquisitionError::LoadFailed {
+            source_root,
+            reason,
+        }) if !same_directory(&source_root, root) => Err(SessionAcquisitionError {
+            failure: None,
+            error: GraphAcquisitionError::LoadFailed {
+                reason: format!(
+                    "{reason}; the index lies above {root}, the index root the editor serves, \
+                     so the editor does not rebuild it: rebuild it with `sqry index --force \
+                     {source}`, or build an index for {root} itself with the sqry.index command",
+                    root = root.display(),
+                    source = source_root.display(),
+                ),
+                source_root,
+            },
+        }),
         Err(GraphAcquisitionError::LoadFailed {
             source_root,
             reason,
@@ -903,21 +1177,82 @@ pub(crate) fn acquire_session_graph(
                 "Graph load failed for LSP at '{}' ({reason}), auto-rebuilding index (self-heal)",
                 source_root.display()
             );
-            let plugins = create_plugin_manager();
-            let config = sqry_core::graph::unified::build::BuildConfig::default();
-            let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
-                &source_root,
-                &plugins,
-                &config,
-                "lsp:auto_rebuild",
-            )
-            .map_err(|e| GraphAcquisitionError::BuildFailed {
-                workspace_root: source_root.clone(),
-                reason: format!("auto-rebuild after corrupt load failed: {e}"),
-            })?;
+            let graph = build_and_persist_with_workspace_roster(&source_root, build_command)
+                .map_err(|e| SessionAcquisitionError {
+                    failure: Some(SelfHealFailure::of(&e)),
+                    error: GraphAcquisitionError::BuildFailed {
+                        workspace_root: source_root.clone(),
+                        reason: format!(
+                            "auto-rebuild after corrupt load failed: {}",
+                            crate::handlers::render_error_chain(&e)
+                        ),
+                    },
+                })?;
             Ok(Arc::new(graph))
         }
-        Err(err) => Err(err),
+        Err(error) => Err(SessionAcquisitionError {
+            failure: *hook_refusal.lock(),
+            error,
+        }),
+    }
+}
+
+/// Whether `a` and `b` name the same directory, compared canonically when
+/// both resolve and as given otherwise.
+fn same_directory(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
+}
+
+/// Why the session could not acquire a graph: the provider's typed error
+/// and, when it is the self-heal's `BuildFailed`, what that failure was,
+/// so the client sees the real one (S4, round 7): a refused roster or
+/// expand cache is reported as itself, not as `workspace_not_ready`.
+#[derive(Debug)]
+pub(crate) struct SessionAcquisitionError {
+    /// The provider's error, or the self-heal's `BuildFailed`.
+    pub(crate) error: GraphAcquisitionError,
+    /// What the self-heal's failure was ([`SelfHealFailure::of`]); `None`
+    /// when the self-heal did not run.
+    pub(crate) failure: Option<SelfHealFailure>,
+}
+
+impl From<GraphAcquisitionError> for SessionAcquisitionError {
+    fn from(error: GraphAcquisitionError) -> Self {
+        Self {
+            error,
+            failure: None,
+        }
+    }
+}
+
+/// What a self-heal rebuild that failed was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SelfHealFailure {
+    /// The refusal's own kind ([`crate::handlers::index::refusal_kind`])
+    /// when the registry refused the rebuild, `workspace_not_ready` when
+    /// the build or persistence failed.
+    pub(crate) kind: &'static str,
+    /// Whether dropping the macro options the manifest records removes the
+    /// refusal ([`crate::handlers::index::reset_drops_refusal`]), so the
+    /// client is given the `sqry.index` arguments that do it.
+    pub(crate) reset_drops_refusal: bool,
+}
+
+impl SelfHealFailure {
+    /// What the self-heal's rebuild error `err` was.
+    fn of(err: &anyhow::Error) -> Self {
+        let refusal = err
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<sqry_plugin_registry::BuildWithRosterError>());
+        Self {
+            kind: refusal
+                .and_then(crate::handlers::index::refusal_kind)
+                .unwrap_or("workspace_not_ready"),
+            reset_drops_refusal: refusal.is_some_and(crate::handlers::index::reset_drops_refusal),
+        }
     }
 }
 
@@ -927,9 +1262,13 @@ pub(crate) fn acquire_session_graph(
 /// variant prefix is preserved so existing diagnostic-channel matchers
 /// continue to surface stale / incompatible / evicted classes.
 pub(crate) fn map_acquisition_error_for_lsp(
-    err: GraphAcquisitionError,
+    err: SessionAcquisitionError,
     root: &Path,
 ) -> anyhow::Error {
+    let SessionAcquisitionError {
+        error: err,
+        failure,
+    } = err;
     match err {
         GraphAcquisitionError::InvalidPath { path, reason } => {
             anyhow!("invalid path {}: {}", path.display(), reason)
@@ -938,14 +1277,51 @@ pub(crate) fn map_acquisition_error_for_lsp(
             "No unified graph found at {}. Run `sqry index` to create the graph.",
             workspace_root.display()
         ),
+        // A graph this binary refuses to serve: LSP `RequestFailed` with
+        // the kind the MCP hosts give it (S4, round 7). An uncompiled
+        // plugin id is described in the roster resolver's words, as a
+        // rebuild's refusal of the same manifest is; it was the status's
+        // debug rendering in an `InternalError`.
         GraphAcquisitionError::IncompatibleGraph {
             source_root,
             status,
-        } => anyhow!(
-            "Incompatible graph at {}: {:?}. Rebuild the index (`sqry index --force`) after upgrading sqry.",
-            source_root.display(),
-            status
-        ),
+        } => {
+            let reason = match status {
+                PluginSelectionStatus::IncompatibleUnknownPluginIds {
+                    unknown_plugin_ids,
+                    manifest_path,
+                } => sqry_plugin_registry::unknown_plugin_ids_error(
+                    &unknown_plugin_ids,
+                    manifest_path,
+                )
+                .to_string(),
+                PluginSelectionStatus::IncompatibleSnapshotFormat { reason } => reason,
+                PluginSelectionStatus::DivergesFromManifest {
+                    missing_plugin_ids,
+                    extra_plugin_ids,
+                    ..
+                } => format!(
+                    "the graph diverges from its manifest (missing plugins: [{}]; extra \
+                     plugins: [{}])",
+                    missing_plugin_ids.join(", "),
+                    extra_plugin_ids.join(", ")
+                ),
+                // `Exact` is never refused, and the status is
+                // non-exhaustive: name it rather than hide it.
+                other => format!("plugin selection status {other:?}"),
+            };
+            anyhow::Error::new(crate::handlers::LspHandlerError::RequestFailed {
+                message: format!(
+                    "Incompatible graph at {}: {reason}. Rebuild the index (`sqry index \
+                     --force`) with this binary.",
+                    source_root.display()
+                ),
+                data: Some(serde_json::json!({
+                    "kind": "workspace_incompatible_graph",
+                    "root": source_root.display().to_string(),
+                })),
+            })
+        }
         GraphAcquisitionError::LoadFailed {
             source_root,
             reason,
@@ -954,14 +1330,39 @@ pub(crate) fn map_acquisition_error_for_lsp(
             source_root.display(),
             reason
         ),
+        // The self-heal could not rebuild the graph the request needs: a
+        // valid request that failed, so LSP `RequestFailed` carrying the
+        // whole reason (a refusal of the roster or the macro options names
+        // itself there) and the refusal's own kind; a build that failed is
+        // `workspace_not_ready`. A refusal of the recorded macro options
+        // also names the `sqry.index` arguments that drop the record, in
+        // the message and as `data.resetArguments`, as `sqry.index`'s own
+        // refusal does.
         GraphAcquisitionError::BuildFailed {
             workspace_root,
             reason,
-        } => anyhow!(
-            "Graph auto-rebuild failed for {}: {}",
-            workspace_root.display(),
-            reason
-        ),
+        } => {
+            let mut data = serde_json::json!({
+                "kind": failure.map_or("workspace_not_ready", |failure| failure.kind),
+                "root": workspace_root.display().to_string(),
+            });
+            let mut message = format!(
+                "Graph auto-rebuild failed for {}: {}",
+                workspace_root.display(),
+                reason
+            );
+            if failure.is_some_and(|failure| failure.reset_drops_refusal) {
+                data["resetArguments"] = crate::handlers::index::reset_arguments(&workspace_root);
+                message = format!(
+                    "{message}; {}",
+                    crate::handlers::index::reset_remedy(&workspace_root)
+                );
+            }
+            anyhow::Error::new(crate::handlers::LspHandlerError::RequestFailed {
+                message,
+                data: Some(data),
+            })
+        }
         GraphAcquisitionError::StaleExpired {
             workspace_root,
             age_hours,
@@ -1191,8 +1592,66 @@ fn resolve_root_path(index_root: Option<PathBuf>) -> Result<PathBuf> {
     Ok(root.canonicalize().unwrap_or(root))
 }
 
+/// The LSP's load-and-classify roster: the full compiled roster
+/// (`create_plugin_manager_all`), the same one the standalone MCP engine
+/// uses (#314, #352). Until surface parity W1 this returned the fast-path
+/// `create_plugin_manager()`, so a session over a CLI `--include-high-cost`
+/// snapshot failed with `IncompatibleUnknownPluginIds { ["json"] }`; the
+/// same-named function in `sqry-mcp/src/engine.rs` had the opposite meaning
+/// for the same name, which is the trap this comment exists to record.
+/// Build sites resolve their roster from the workspace manifest through
+/// [`build_and_persist_with_workspace_roster`].
 fn build_plugin_manager() -> PluginManager {
-    create_plugin_manager()
+    create_plugin_manager_all()
+}
+
+/// Build and persist the index at `root` with the roster its manifest
+/// records (fast-path fallback when it has none), through the one registry
+/// function every persisting site uses (surface parity W1 round 2, design
+/// D8). This is the self-heal path, so a manifest that exists but cannot
+/// be read resolves to the fallback, is logged, and the fallback selection
+/// is recorded (design D9); a readable manifest naming an uncompiled
+/// plugin id is still refused. Thin wrapper: the recorded selection is the
+/// registry's invariant, the log line is this crate's.
+///
+/// # Errors
+///
+/// Returns an error when a readable manifest names an uncompiled plugin
+/// id, when the macro options the manifest records cannot be resolved (an
+/// expand cache directory that does not exist, is empty or cannot be
+/// recorded), or when the build or persist fails. The registry's error is
+/// the source of the returned one, so a caller rendering it with
+/// [`crate::handlers::render_error_chain`] shows the refusal itself.
+pub(crate) fn build_and_persist_with_workspace_roster(
+    root: &Path,
+    build_command: &str,
+) -> Result<CodeGraph> {
+    let built = sqry_plugin_registry::build_and_persist_with_workspace_roster(
+        root,
+        &PluginSelectionConfig::default(),
+        UnreadableManifestPolicy::FallBack,
+        build_command,
+        &sqry_core::graph::unified::build::BuildConfig::default(),
+        &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
+        sqry_core::progress::no_op_reporter(),
+    )
+    .with_context(|| format!("build and persist failed for {}", root.display()))?;
+    warn_if_manifest_was_unreadable(&built.roster, root);
+    Ok(built.graph)
+}
+
+/// Log the fallback the registry reported for a manifest it could not
+/// read. The registry does not log; every LSP persisting site calls this
+/// so the report is never dropped.
+pub(crate) fn warn_if_manifest_was_unreadable(roster: &WorkspaceRoster, root: &Path) {
+    if let Some(unreadable) = &roster.unreadable_manifest {
+        log::warn!(
+            "manifest {} unreadable ({}); rebuilt {} with the fallback roster and recorded it",
+            unreadable.manifest_path.display(),
+            unreadable.reason,
+            root.display()
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1769,6 +2228,31 @@ impl SessionManager {
         self.logical_workspace().classify(path)
     }
 
+    /// Whether a persisted index exists at `path`, answered through the
+    /// session's resolved [`LogicalWorkspace`] (surface parity W4 round 2,
+    /// design W4-D16).
+    ///
+    /// Only a path the workspace classifies as [`Classification::Source`]
+    /// (a source root it owns, or a descendant of one) is probed on disk; a
+    /// member folder, an excluded path and a path outside the workspace all
+    /// answer `false`, so a caller that falls through to a build on `false`
+    /// builds exactly what it built before this probe existed. The probe
+    /// reads the manifest's presence and never builds: unlike
+    /// [`Self::graph_for_path`], which in single-root mode carries an
+    /// auto-build hook, asking whether an index exists cannot create one.
+    #[must_use]
+    pub fn persisted_index_exists(&self, path: &Path) -> bool {
+        let workspace = self.logical_workspace();
+        match workspace.classify(path) {
+            Classification::Source => {
+                sqry_core::graph::unified::persistence::GraphStorage::new(path).exists()
+            }
+            Classification::Member { .. } | Classification::Excluded | Classification::Unknown => {
+                false
+            }
+        }
+    }
+
     /// `STEP_11_4` — evaluate the handler-level URI gate against the
     /// current logical workspace. Returns the [`HandlerGate`] verdict
     /// every URI-keyed LSP handler must consult before touching the
@@ -1973,5 +2457,237 @@ mod tests {
             .expect_err("symlink escape should be rejected");
 
         assert!(error.to_string().contains("outside workspace root"));
+    }
+
+    // ── Round 8: refusal plumbing that the wire cannot reach today ───────────
+
+    /// A rebuild the self-heal hook runs that the registry refuses: the
+    /// expand cache the (hypothetical) record names is gone.
+    fn refusing_rebuild(root: &Path, _build_command: &str) -> Result<CodeGraph> {
+        Err(
+            anyhow::Error::new(sqry_plugin_registry::BuildWithRosterError::MacroOptions(
+                sqry_core::graph::unified::build::MacroOptionsError::ExpandCacheMissing {
+                    dir: root.join("gone-cache"),
+                },
+            ))
+            .context(format!("build and persist failed for {}", root.display())),
+        )
+    }
+
+    /// A rebuild that fails as a build, not a refusal.
+    fn failing_rebuild(root: &Path, _build_command: &str) -> Result<CodeGraph> {
+        Err(
+            anyhow::Error::new(sqry_plugin_registry::BuildWithRosterError::Build(anyhow!(
+                "disk full"
+            )))
+            .context(format!("build and persist failed for {}", root.display())),
+        )
+    }
+
+    /// A root with a project marker and no index: the provider finds no
+    /// graph for it and runs the auto-build hook.
+    fn unindexed_root() -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().expect("canonical root");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"r8\"\nversion = \"0.1.0\"\n",
+        )
+        .expect("Cargo.toml");
+        (tmp, root)
+    }
+
+    /// Round 8 (plant O28): the auto-build hook arm reports a refused
+    /// rebuild with the refusal's own kind, not `workspace_not_ready`. No
+    /// rebuild that reaches this arm can be refused today (the hook runs
+    /// only where no `.sqry/graph` exists, so there is no record to refuse),
+    /// so the hook's rebuild is injected; the kind it records is what the
+    /// client would see. The other side: a rebuild that fails as a build is
+    /// `workspace_not_ready`.
+    #[test]
+    fn the_auto_build_hook_reports_a_refused_rebuild_with_its_own_kind() {
+        let (_tmp, root) = unindexed_root();
+        let err = acquire_session_graph_with(&root, "test", "test:hook", refusing_rebuild)
+            .expect_err("the injected rebuild refuses");
+        assert_eq!(
+            err.failure,
+            Some(SelfHealFailure {
+                kind: "rebuild_macro_options_unavailable",
+                reset_drops_refusal: true,
+            })
+        );
+        match &err.error {
+            GraphAcquisitionError::BuildFailed { reason, .. } => assert!(
+                reason.contains("gone-cache")
+                    && !reason.contains("auto-rebuild after corrupt load failed"),
+                "the hook arm's reason, the whole chain: {reason}"
+            ),
+            other => panic!("expected the hook's BuildFailed, got {other:?}"),
+        }
+        let mapped = map_acquisition_error_for_lsp(err, &root);
+        match mapped.downcast_ref::<crate::handlers::LspHandlerError>() {
+            Some(crate::handlers::LspHandlerError::RequestFailed { message, data }) => {
+                assert_eq!(
+                    data.as_ref().map(|data| data["kind"].clone()),
+                    Some(serde_json::json!("rebuild_macro_options_unavailable"))
+                );
+                // The record is the cause, so the refusal names the
+                // `sqry.index` arguments that drop it.
+                let reset = serde_json::json!([root.display().to_string(), true, true]);
+                assert_eq!(
+                    data.as_ref().map(|data| data["resetArguments"].clone()),
+                    Some(reset.clone())
+                );
+                assert!(
+                    message.contains(&format!(
+                        "the sqry.index command with the arguments {reset}"
+                    )),
+                    "{message}"
+                );
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+
+        let (_tmp, root) = unindexed_root();
+        let err = acquire_session_graph_with(&root, "test", "test:hook", failing_rebuild)
+            .expect_err("the injected rebuild fails");
+        assert_eq!(
+            err.failure,
+            Some(SelfHealFailure {
+                kind: "workspace_not_ready",
+                reset_drops_refusal: false,
+            })
+        );
+        // A failed build is not the record's fault: no reset is offered.
+        let mapped = map_acquisition_error_for_lsp(err, &root);
+        match mapped.downcast_ref::<crate::handlers::LspHandlerError>() {
+            Some(crate::handlers::LspHandlerError::RequestFailed { message, data }) => {
+                assert!(
+                    data.as_ref()
+                        .is_some_and(|data| data.get("resetArguments").is_none()),
+                    "{data:?}"
+                );
+                assert!(!message.contains("sqry.index"), "{message}");
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    fn incompatible(status: PluginSelectionStatus) -> (String, serde_json::Value) {
+        let root = PathBuf::from("/ws");
+        let err = map_acquisition_error_for_lsp(
+            SessionAcquisitionError::from(GraphAcquisitionError::IncompatibleGraph {
+                source_root: root.clone(),
+                status,
+            }),
+            &root,
+        );
+        match err.downcast::<crate::handlers::LspHandlerError>() {
+            Ok(crate::handlers::LspHandlerError::RequestFailed { message, data }) => {
+                (message, data.expect("data"))
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    /// Round 8 (plants O29, O30): every refused graph status is described
+    /// by its own reason. A snapshot format this binary cannot read names
+    /// the mismatch; a graph that diverges from its manifest (a status only
+    /// a resident-graph provider gives, so no wire reaches it from the
+    /// standalone LSP) names the missing and the extra plugin ids; an
+    /// uncompiled plugin id names the id and the manifest. Each is
+    /// `RequestFailed` with `workspace_incompatible_graph` and the root.
+    #[test]
+    fn every_incompatible_graph_status_is_described_by_its_reason() {
+        let (message, data) = incompatible(PluginSelectionStatus::IncompatibleSnapshotFormat {
+            reason: "snapshot version mismatch: expected 17, found 99".to_string(),
+        });
+        assert_eq!(
+            message,
+            "Incompatible graph at /ws: snapshot version mismatch: expected 17, found 99. \
+             Rebuild the index (`sqry index --force`) with this binary."
+        );
+        assert_eq!(
+            data,
+            serde_json::json!({ "kind": "workspace_incompatible_graph", "root": "/ws" })
+        );
+
+        let (message, _) = incompatible(PluginSelectionStatus::DivergesFromManifest {
+            missing_plugin_ids: vec!["json".to_string(), "rust".to_string()],
+            extra_plugin_ids: vec!["python".to_string()],
+            manifest_path: None,
+        });
+        assert_eq!(
+            message,
+            "Incompatible graph at /ws: the graph diverges from its manifest (missing plugins: \
+             [json, rust]; extra plugins: [python]). Rebuild the index (`sqry index --force`) \
+             with this binary."
+        );
+
+        let (message, data) = incompatible(PluginSelectionStatus::IncompatibleUnknownPluginIds {
+            unknown_plugin_ids: vec!["r8-uncompiled".to_string()],
+            manifest_path: Some(PathBuf::from("/ws/.sqry/graph/manifest.json")),
+        });
+        assert!(
+            message.contains("r8-uncompiled")
+                && message.contains("/ws/.sqry/graph/manifest.json")
+                && !message.contains("IncompatibleUnknownPluginIds"),
+            "{message}"
+        );
+        assert_eq!(data["kind"], "workspace_incompatible_graph");
+    }
+
+    // ── Round 8: refusal notices ─────────────────────────────────────────────
+
+    /// Round 8: a refusal is queued for the client once per refusal state
+    /// at a root: the same refusal again queues nothing, a different one
+    /// queues a new notice, and a graph acquired at the root (here the
+    /// auto-build indexes the empty root) clears the state so the same
+    /// refusal is queued again. Each notice names the root, the refusal and
+    /// the remedy.
+    #[test]
+    fn a_refusal_is_noticed_once_per_state() {
+        let workspace = tempdir().expect("workspace tempdir");
+        // Its own project (an empty `.git`), so the graph acquired below is
+        // the root's own, not an index above `TMPDIR` (decision D-i8-60).
+        fs::create_dir(workspace.path().join(".git")).expect("project marker");
+        let root = workspace.path().canonicalize().expect("canonical root");
+        let session = make_session(root.clone());
+        let refusal = anyhow!("the manifest names r8-uncompiled");
+
+        session.note_refusal(&root, &refusal);
+        session.note_refusal(&root, &refusal);
+        let notices = session.take_refusal_notices();
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert!(
+            notices[0].contains(&root.display().to_string())
+                && notices[0].contains("the manifest names r8-uncompiled")
+                && notices[0].contains(&format!("sqry index --force {}", root.display())),
+            "{}",
+            notices[0]
+        );
+        assert!(session.take_refusal_notices().is_empty(), "taken once");
+
+        session.note_refusal(&root, &anyhow!("a different refusal"));
+        assert_eq!(session.take_refusal_notices().len(), 1, "a new state");
+
+        let other = root.join("other");
+        session.note_refusal(&other, &refusal);
+        assert_eq!(
+            session.take_refusal_notices().len(),
+            1,
+            "another root has its own state"
+        );
+
+        // A graph acquired at the root clears its state.
+        let (acquired_at, outcome) = session.graph_for_path_at(&root);
+        assert_eq!(acquired_at, root);
+        assert!(matches!(outcome, Ok(Some(_))), "{outcome:?}");
+        session.note_refusal(&root, &anyhow!("a different refusal"));
+        assert_eq!(
+            session.take_refusal_notices().len(),
+            1,
+            "the same refusal is shown again after the state cleared"
+        );
     }
 }

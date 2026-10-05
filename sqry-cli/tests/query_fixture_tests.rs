@@ -102,6 +102,7 @@ fn build_graph_snapshot(root: &Path) -> Result<()> {
         confidence: graph.confidence().clone(),
         last_indexed_commit: None,
         plugin_selection: None,
+        macro_options: None,
     };
 
     manifest.save(storage.manifest_path())?;

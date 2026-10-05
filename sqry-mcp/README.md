@@ -1,6 +1,6 @@
 # sqry MCP Server
 
-**Version**: 32.0.1
+**Version**: 33.0.0
 
 MCP Registry name: `mcp-name: io.github.verivus-oss/sqry`
 

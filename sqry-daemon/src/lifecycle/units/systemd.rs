@@ -384,18 +384,22 @@ fn current_posix_username() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{LazyLock, Mutex};
-
     use super::*;
 
-    /// Mutex serializing all tests that mutate `$USER` in the process
-    /// environment.  Rust 2024 marks `std::env::set_var` / `remove_var` as
-    /// `unsafe` precisely because concurrent callers can race on the shared
-    /// environment block.  Any test that calls either function MUST hold this
-    /// guard for its entire duration.
-    static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+    /// The crate-wide lock serialising every test that reads or writes the
+    /// process environment. Rust 2024 marks `std::env::set_var` /
+    /// `remove_var` as `unsafe` precisely because concurrent callers can race
+    /// on the shared environment block, and `$USER` is also written by the
+    /// config tests, so a module-local mutex (which this module used to have)
+    /// serialised nothing against them (surface parity W4 round 2, W4-D14).
+    /// Any test here that touches the environment holds it for its entire
+    /// duration.
+    use crate::TEST_ENV_LOCK as ENV_LOCK;
 
     fn fixture_config() -> DaemonConfig {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         DaemonConfig {
             memory_limit_mb: 2_048,
             ..DaemonConfig::default()
@@ -427,6 +431,9 @@ mod tests {
     /// `MemoryMax=` must reflect `cfg.memory_limit_mb`.
     #[test]
     fn systemd_user_unit_contains_memory_max_matching_config() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig {
             memory_limit_mb: 4_096,
             ..DaemonConfig::default()
@@ -513,6 +520,9 @@ mod tests {
     /// contains all mandatory sections and keys.
     #[test]
     fn systemd_user_unit_snapshot_mandatory_sections() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig {
             memory_limit_mb: 2_048,
             ..DaemonConfig::default()
@@ -614,6 +624,9 @@ mod tests {
     /// System unit MemoryMax must reflect cfg.memory_limit_mb.
     #[test]
     fn systemd_system_unit_memory_max_matches_config() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig {
             memory_limit_mb: 1_024,
             ..DaemonConfig::default()
@@ -656,6 +669,9 @@ mod tests {
     /// confirm the lookup path works end-to-end.
     #[test]
     fn systemd_system_unit_resolves_current_user_as_valid() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Retrieve the current user name; if that returns None we skip rather
         // than fail (unusual CI environment).
         let Some(username_str) = current_posix_username() else {
@@ -680,6 +696,9 @@ mod tests {
     /// An account name that does not exist on any system must return an error.
     #[test]
     fn systemd_system_unit_rejects_invalid_posix_user() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let opts = InstallOptions {
             user: Some("sqryd_nonexistent_test_account_xyzzy_12345".to_owned()),
             ..InstallOptions::default()
@@ -699,6 +718,9 @@ mod tests {
     /// An account name containing NUL must be rejected before POSIX lookup.
     #[test]
     fn systemd_system_unit_rejects_nul_user_name() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let opts = InstallOptions {
             user: Some("sqryd\0invalid".to_owned()),
             ..InstallOptions::default()
@@ -718,7 +740,7 @@ mod tests {
     /// When `opts.user` is `None` and `$USER` is set to the current user,
     /// resolution must succeed by falling back to `$USER`.
     ///
-    /// The `ENV_MUTEX` guard serializes all env-mutation tests so that no two
+    /// The `ENV_LOCK` guard serializes all env-mutation tests so that no two
     /// tests can race on the process-wide `$USER` variable (Rust 2024 marks
     /// `set_var`/`remove_var` as `unsafe` for this reason).
     #[test]
@@ -730,10 +752,10 @@ mod tests {
         };
 
         // Hold the env mutex for the entire duration of the mutation window.
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         // Temporarily set $USER to the current user.
-        // SAFETY: ENV_MUTEX ensures no other test mutates $USER concurrently.
+        // SAFETY: ENV_LOCK ensures no other test mutates $USER concurrently.
         let prior = std::env::var_os("USER");
         unsafe {
             std::env::set_var("USER", &username_str);
@@ -758,14 +780,14 @@ mod tests {
     /// When `opts.user` is `None` and `$USER` is unset, an error must be
     /// returned (with a message directing the user to use `--user`).
     ///
-    /// The `ENV_MUTEX` guard serializes env-mutation tests; see its doc comment.
+    /// The `ENV_LOCK` guard serializes env-mutation tests; see its doc comment.
     #[test]
     fn systemd_system_unit_errors_when_no_user_and_no_env() {
         // Hold the env mutex for the entire duration of the mutation window.
-        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 
         // Unset $USER for this test.
-        // SAFETY: ENV_MUTEX ensures no other test mutates $USER concurrently.
+        // SAFETY: ENV_LOCK ensures no other test mutates $USER concurrently.
         let prior = std::env::var_os("USER");
         unsafe {
             std::env::remove_var("USER");

@@ -662,7 +662,10 @@ mod support;
 use std::pin::Pin;
 
 use sqry_core::project::{ProjectRootMode, canonicalize_path};
-use sqry_daemon::{DaemonConfig, JSONRPC_WORKSPACE_EVICTED, RealWorkspaceBuilder, WorkspaceKey};
+use sqry_daemon::{
+    DaemonConfig, JSONRPC_WORKSPACE_EVICTED, RealWorkspaceBuilder, WorkspaceKey,
+    WorkspaceRosterResolver,
+};
 use sqry_daemon_client::{AsyncReadWrite, DaemonClient, ShimProtocol, connect_shim_with_timeouts};
 use support::init_git_repo;
 use support::ipc::{TestIpcClient, TestServer, expect_error, expect_success};
@@ -736,9 +739,9 @@ async fn file_change_triggers_rebuild() {
     // Use a short debounce (200 ms) for fast test execution. The socket path
     // override inside `with_builder_and_config` ensures we never touch the
     // developer's real daemon socket.
-    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
-    let builder = Arc::new(RealWorkspaceBuilder::new(Arc::clone(&plugins)))
-        as Arc<dyn sqry_daemon::WorkspaceBuilder>;
+    let builder = Arc::new(RealWorkspaceBuilder::new(Arc::new(
+        WorkspaceRosterResolver::new(),
+    ))) as Arc<dyn sqry_daemon::WorkspaceBuilder>;
 
     let server = TestServer::with_builder_and_config(
         builder,
@@ -972,9 +975,9 @@ async fn lru_eviction_under_memory_pressure() {
     // `func_alpha` + `seed` from the 2 source files), so after loading A,
     // `loaded_bytes_A > 0`, which makes the load-B projection strictly exceed
     // the limit and trigger synchronous LRU eviction of workspace A.
-    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
-    let builder = Arc::new(RealWorkspaceBuilder::new(Arc::clone(&plugins)))
-        as Arc<dyn sqry_daemon::WorkspaceBuilder>;
+    let builder = Arc::new(RealWorkspaceBuilder::new(Arc::new(
+        WorkspaceRosterResolver::new(),
+    ))) as Arc<dyn sqry_daemon::WorkspaceBuilder>;
 
     let server = TestServer::with_builder_and_config(
         builder,
@@ -1316,9 +1319,9 @@ async fn concurrent_lsp_mcp_cli_against_one_daemon() {
     let canon_root = canonicalize_path(workspace_root).expect("canonicalize workspace root");
 
     // ── 2. Spawn TestServer with RealWorkspaceBuilder ──────────────────────────
-    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
-    let builder = Arc::new(RealWorkspaceBuilder::new(Arc::clone(&plugins)))
-        as Arc<dyn sqry_daemon::WorkspaceBuilder>;
+    let builder = Arc::new(RealWorkspaceBuilder::new(Arc::new(
+        WorkspaceRosterResolver::new(),
+    ))) as Arc<dyn sqry_daemon::WorkspaceBuilder>;
 
     let server = TestServer::with_builder_and_config(builder, DaemonConfig::default()).await;
     let socket_path = server.path.clone();

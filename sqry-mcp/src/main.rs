@@ -78,7 +78,13 @@ ENVIRONMENT VARIABLES:
     SQRY_MCP_TRACE_CACHE_SIZE             Trace path payload cache capacity (default: 256)
     SQRY_MCP_SUBGRAPH_CACHE_SIZE          Subgraph payload cache capacity (default: 128)
     SQRY_MCP_MAX_CROSS_LANG_EDGES         Max edges for cross-language analysis (default: 50000)
-    SQRY_REDACTION_PRESET                 Response redaction: none|minimal|relative|standard|strict (default: minimal)
+    SQRY_REDACTION_PRESET                 Response redaction: none|minimal|relative|standard|strict (default: minimal).
+                                          Read trimmed, in any letter case; any other value stops the
+                                          server at startup rather than serving unredacted.
+                                          Applies in standalone mode only: in shim mode (the default whenever
+                                          a daemon is reachable) the daemon redacts under the preset in sqryd's
+                                          own environment, and this process's setting is ignored. Pass
+                                          --no-daemon, or set it where sqryd runs.
     SQRYD_SOCKET                          Daemon socket path override for default probe and --daemon mode
     SQRY_DAEMON_NO_AUTO_START             Set to 1 to disable sqryd auto-start in --daemon mode
     SQRYD_PATH                            Explicit path to sqryd binary for --daemon auto-start
@@ -406,25 +412,24 @@ async fn run_rmcp_server() -> Result<()> {
 
     // Initialize response redactor from environment config.
     //
-    // STEP_7 codex iter4: `preset=none` now constructs a passthrough
-    // redactor (rather than `None`) so the walker's
+    // STEP_7 codex iter4: `preset=none` constructs a passthrough redactor
+    // (rather than none at all) so the walker's
     // exclusions-override-passthrough branch
     // (`redact_excluded_in_passthrough`) can fire end-to-end when a
     // `LogicalWorkspaceView` is bound at request time. The walker
     // remains a no-op for non-excluded fields under passthrough mode,
     // so criterion 3 (`preset=none + non-excluded path → absolute
-    // emitted`) is preserved. `None` only arises here for an unknown /
-    // misconfigured preset.
-    let redactor = server::SqryServer::create_redactor(&mcp_config.redaction_preset);
-    match (&redactor, mcp_config.redaction_preset.as_str()) {
-        (Some(_), "none") => tracing::info!(
+    // emitted`) is preserved. An unknown preset or a refused redaction
+    // configuration stops the server here rather than serving unredacted
+    // (D-i8-20).
+    let redactor = server::SqryServer::create_redactor(&mcp_config.redaction_preset)?;
+    match mcp_config.effective_redaction_preset()?.name() {
+        "none" => tracing::info!(
             "Response redaction in passthrough mode (preset=none): excluded paths still rewritten when LogicalWorkspaceView is bound"
         ),
-        (Some(_), preset) => tracing::info!(preset, "Response redaction enabled"),
-        (None, preset) => {
-            tracing::info!(preset, "Response redaction disabled (unknown preset)");
-        }
+        preset => tracing::info!(preset, "Response redaction enabled"),
     }
+    let redactor = Some(redactor);
 
     let server = server::SqryServer::with_config(
         flags,

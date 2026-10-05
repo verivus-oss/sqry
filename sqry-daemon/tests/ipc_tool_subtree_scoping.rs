@@ -27,6 +27,9 @@
 //!    silently succeed with whole-workspace results).
 
 #![allow(clippy::too_many_lines)]
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
 
 mod support;
 
@@ -35,11 +38,11 @@ use std::sync::Arc;
 
 use serde_json::{Value, json};
 use serial_test::serial;
-use sqry_core::graph::CodeGraph;
 use sqry_core::graph::unified::build::BuildConfig;
 use sqry_core::graph::unified::persistence::{GraphStorage, load_from_path, save_to_path};
 use sqry_daemon::DaemonError;
-use sqry_daemon::workspace::WorkspaceBuilder;
+use sqry_daemon::workspace::{BuiltGraph, WorkspaceBuilder};
+use sqry_plugin_registry::RosterSource;
 use support::ipc::{TestIpcClient, TestServer, expect_error, expect_success};
 use tempfile::TempDir;
 
@@ -99,7 +102,7 @@ impl std::fmt::Debug for SubtreePersistingBuilder {
 }
 
 impl WorkspaceBuilder for SubtreePersistingBuilder {
-    fn build(&self, root: &Path) -> Result<CodeGraph, DaemonError> {
+    fn build(&self, root: &Path) -> Result<BuiltGraph, DaemonError> {
         let g =
             sqry_core::graph::unified::build::build_unified_graph(root, &self.plugins, &self.cfg)
                 .map_err(|e| DaemonError::WorkspaceBuildFailed {
@@ -117,10 +120,14 @@ impl WorkspaceBuilder for SubtreePersistingBuilder {
                 reason: format!("persist subtree snapshot: {e}"),
             }
         })?;
-        Ok(g)
+        Ok(BuiltGraph::with_manager(
+            g,
+            &self.plugins,
+            RosterSource::Fallback,
+        ))
     }
 
-    fn load_persisted(&self, root: &Path) -> Result<CodeGraph, DaemonError> {
+    fn load_persisted(&self, root: &Path) -> Result<BuiltGraph, DaemonError> {
         let storage = GraphStorage::new(root);
         if !storage.snapshot_exists() {
             return Err(DaemonError::WorkspaceBuildFailed {
@@ -128,12 +135,12 @@ impl WorkspaceBuilder for SubtreePersistingBuilder {
                 reason: "subtree load_persisted: snapshot missing".into(),
             });
         }
-        load_from_path(storage.snapshot_path(), Some(&self.plugins)).map_err(|e| {
-            DaemonError::WorkspaceBuildFailed {
+        load_from_path(storage.snapshot_path(), Some(&self.plugins))
+            .map(|g| BuiltGraph::with_manager(g, &self.plugins, RosterSource::Fallback))
+            .map_err(|e| DaemonError::WorkspaceBuildFailed {
                 root: root.to_path_buf(),
                 reason: format!("subtree load_persisted: {e}"),
-            }
-        })
+            })
     }
 }
 

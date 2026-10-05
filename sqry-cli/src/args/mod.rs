@@ -55,6 +55,30 @@ pub enum RevisionSourceByteModeArg {
 ///
 /// Search code by what it means, not just what it says.
 /// Uses AST analysis to find functions, classes, and symbols with precision.
+/// Parse a ratio flag (`--threshold-orphaned-files`) and refuse a value
+/// outside `0.0..=1.0` at parse time, so a threshold no ratio of files can
+/// exceed never reaches the validation it would silence.
+fn parse_unit_ratio(raw: &str) -> Result<f64, String> {
+    let value: f64 = raw
+        .parse()
+        .map_err(|err| format!("`{raw}` is not a number: {err}"))?;
+    if !(0.0..=1.0).contains(&value) {
+        return Err(format!("`{raw}` is outside 0.0 to 1.0"));
+    }
+    Ok(value)
+}
+
+/// The value parser of every `--cfg` the CLI takes (`sqry index`, `sqry
+/// daemon rebuild`): the core's rule for one cfg flag
+/// ([`sqry_core::graph::unified::build::check_cfg_flag`]), so an empty, a
+/// blank and a padded (` test`) value are all usage errors (exit 2) with the
+/// core's message, refused before anything runs.
+fn parse_cfg_flag(raw: &str) -> Result<String, String> {
+    sqry_core::graph::unified::build::check_cfg_flag(raw)
+        .map(|()| raw.to_string())
+        .map_err(|err| err.to_string())
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "sqry",
@@ -394,57 +418,42 @@ pub struct Cli {
     // ===== Index Validation Flags (P1-14) =====
     /// Index validation strictness level (off, warn, fail)
     ///
-    /// Controls how to handle index corruption during load:
+    /// Controls how `sqry search` and `sqry query` treat a stale index, one
+    /// whose indexed files are missing on disk past
+    /// `--threshold-orphaned-files`:
     /// - off: Skip validation entirely (fastest)
     /// - warn: Log warnings but continue (default)
-    /// - fail: Abort on validation errors
+    /// - fail: Exit with code 2 instead of running on the stale index
     #[arg(long, value_enum, default_value = "warn", global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 40)]
     pub validate: ValidationMode,
 
     /// Automatically rebuild index if validation fails
     ///
-    /// When set, if index validation fails in strict mode, sqry will
-    /// automatically rebuild the index once and retry. Useful for
-    /// recovering from transient corruption without manual intervention.
+    /// With `--validate fail`, `sqry search` and `sqry query` rebuild an
+    /// index validation finds stale, once, and then run on it instead of
+    /// exiting 2. The command's own arguments (the pattern, the query in
+    /// every form, `--var`, the fuzzy algorithm) are checked before that
+    /// rebuild, so an argument the command refuses leaves the index as it
+    /// was.
     ///
-    /// Requires `--validate` to be set to either `warn` or `fail`; the
-    /// rebuild is only triggered when validation actually evaluates the
-    /// index. With `--validate off` the flag is a no-op.
+    /// With `--validate warn` or `off` the flag does nothing: `warn` only
+    /// reports a stale index.
     #[arg(long, global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 41)]
     pub auto_rebuild: bool,
 
-    /// Maximum ratio of dangling references before rebuild (0.0-1.0)
+    /// Maximum ratio of orphaned files before validation trips (0.0-1.0)
     ///
-    /// Sets the threshold for dangling reference errors during validation.
-    /// Default: 0.05 (5%). If more than this ratio of symbols have dangling
-    /// references, validation will fail in strict mode.
-    #[arg(long, value_name = "RATIO", global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 42)]
-    pub threshold_dangling_refs: Option<f64>,
-
-    /// Maximum ratio of orphaned files before rebuild (0.0-1.0)
-    ///
-    /// Sets the threshold for orphaned file errors during validation.
-    /// Default: 0.20 (20%). If more than this ratio of indexed files are
-    /// orphaned (no longer exist on disk), validation will fail.
-    #[arg(long, value_name = "RATIO", global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 43)]
+    /// The ratio `--validate` compares against: when more than this share
+    /// of the indexed files no longer exists on disk the index is stale
+    /// (`fail` exits 2, `warn` prints a warning). Default: 0.20 (20%).
+    /// A value outside 0.0 to 1.0 is refused at parse time.
+    #[arg(long, value_name = "RATIO", value_parser = parse_unit_ratio, global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 43)]
     pub threshold_orphaned_files: Option<f64>,
-
-    /// Maximum ratio of ID gaps before warning (0.0-1.0)
-    ///
-    /// Sets the threshold for ID gap warnings during validation.
-    /// Default: 0.10 (10%). If more than this ratio of symbol IDs have gaps,
-    /// validation will warn or fail depending on strictness.
-    #[arg(long, value_name = "RATIO", global = true, hide_long_help = true, help_heading = headings::INDEX_CONFIGURATION, display_order = 44)]
-    pub threshold_id_gaps: Option<f64>,
 
     // ===== Hybrid Search Flags =====
     /// Force text search mode (skip semantic, use ripgrep)
-    #[arg(long, short = 't', conflicts_with = "semantic", help_heading = headings::SEARCH_MODES, display_order = 10)]
+    #[arg(long, short = 't', help_heading = headings::SEARCH_MODES, display_order = 10)]
     pub text: bool,
-
-    /// Structural search over the graph (the default; opposite of --text)
-    #[arg(long, short = 's', conflicts_with = "text", help_heading = headings::SEARCH_MODES, display_order = 11)]
-    pub semantic: bool,
 
     /// Number of context lines for text search results
     #[arg(long, default_value = "2", help_heading = headings::SEARCH_MODES, display_order = 30)]
@@ -1167,7 +1176,15 @@ pub enum Command {
         ///
         /// Returns metadata about the existing index (age, symbol count, languages).
         /// Useful for programmatic consumers to check if indexing is needed.
-        #[arg(long, short = 's', help_heading = headings::INDEX_CONFIGURATION, display_order = 20)]
+        /// Builds nothing, so the macro build options (`--cfg`,
+        /// `--expand-cache`, `--no-macro-options`) are refused beside it.
+        #[arg(
+            long,
+            short = 's',
+            conflicts_with_all = ["cfg_flags", "expand_cache", "no_macro_options"],
+            help_heading = headings::INDEX_CONFIGURATION,
+            display_order = 20
+        )]
         status: bool,
 
         /// Automatically add .sqry/ to .gitignore if not already present.
@@ -1181,18 +1198,18 @@ pub enum Command {
         #[arg(long, short = 't', help_heading = headings::PERFORMANCE_TUNING, display_order = 10)]
         threads: Option<usize>,
 
-        /// Disable incremental indexing (hash-based change detection).
+        /// Rebuild even when an index already exists, as `--force` does.
         ///
-        /// When set, indexing will skip the persistent hash index and avoid
-        /// hash-based change detection entirely. Useful for debugging or
-        /// forcing metadata-only evaluation.
+        /// Every build parses every file: no sqry command indexes only the
+        /// files that changed, so there is no incremental state for this
+        /// flag to bypass. It is kept as the spelling scripts already use.
         #[arg(long = "no-incremental", help_heading = headings::PERFORMANCE_TUNING, display_order = 20)]
         no_incremental: bool,
 
-        /// Override cache directory for incremental indexing (default: .sqry-cache).
+        /// Also write a hash index of every indexed file to this directory.
         ///
-        /// Points sqry at an alternate cache location for the hash index.
-        /// Handy for ephemeral or sandboxed environments.
+        /// Nothing is written there without this flag, and nothing reads the
+        /// hash index yet: every build parses every file.
         #[arg(long = "cache-dir", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 10)]
         cache_dir: Option<String>,
 
@@ -1209,8 +1226,18 @@ pub enum Command {
         /// Can be specified multiple times (e.g. --cfg test --cfg unix, or
         /// --cfg feature=serde). Rust symbols gated by `#[cfg(...)]` are marked
         /// active or inactive based on these flags during macro-boundary
-        /// analysis. This is pure data: no code is executed.
-        #[arg(long = "cfg", value_name = "PREDICATE", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 31)]
+        /// analysis. This is pure data: no code is executed. An empty or
+        /// blank flag names no predicate, and a flag with leading or
+        /// trailing whitespace is not the predicate it names; both are
+        /// refused as usage errors. Over an existing index it needs
+        /// `--force` (or `--no-incremental`).
+        #[arg(
+            long = "cfg",
+            value_name = "PREDICATE",
+            value_parser = parse_cfg_flag,
+            help_heading = headings::ADVANCED_CONFIGURATION,
+            display_order = 31
+        )]
         cfg_flags: Vec<String>,
 
         /// Consume a pre-generated macro expand cache from this directory.
@@ -1221,8 +1248,33 @@ pub enum Command {
         /// This is execution-free on the index path: it only reads and validates
         /// JSON, hashes source files, and parses `Cargo.toml`. No code is run
         /// (`cargo expand` itself is confined to `sqry cache expand`).
+        ///
+        /// A relative DIR resolves against your current working directory,
+        /// as any path in your shell does. The directory must exist; the
+        /// manifest records its canonical path. Refused: a directory whose
+        /// canonical path is not valid UTF-8 (the manifest records it as JSON
+        /// text), and on Windows a relative path with a drive prefix or a
+        /// root (`C:cache`, `\cache`). Over an existing index it needs
+        /// `--force` (or `--no-incremental`).
         #[arg(long = "expand-cache", value_name = "DIR", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 32)]
         expand_cache: Option<PathBuf>,
+
+        /// Drop the macro build options the manifest records.
+        ///
+        /// An index records the `--cfg` flags and the `--expand-cache`
+        /// directory it was built with, and every rebuild that persists
+        /// reuses that record unless a flag or field replaces a component:
+        /// `sqry index --force`, `sqry update`, `sqry watch`, the `sqry
+        /// query` auto-index and `--auto-rebuild`, the daemon (`sqry daemon
+        /// rebuild`, its file-watcher rebuilds, and its MCP `rebuild_index`),
+        /// the LSP (`sqry.index`, its auto-index and self-heal), and the
+        /// standalone MCP (`rebuild_index` and its auto-index). This flag
+        /// clears the record first;
+        /// `--cfg` and `--expand-cache` given beside it apply to the cleared
+        /// record. Over an existing index it needs `--force` (or
+        /// `--no-incremental`).
+        #[arg(long = "no-macro-options", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 33)]
+        no_macro_options: bool,
 
         /// Enable JVM classpath analysis.
         ///
@@ -1234,10 +1286,6 @@ pub enum Command {
         /// Requires the `jvm-classpath` feature at compile time.
         #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 40)]
         classpath: bool,
-
-        /// Disable classpath analysis (overrides config defaults).
-        #[arg(long, conflicts_with = "classpath", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 41)]
-        no_classpath: bool,
 
         /// Classpath analysis depth.
         ///
@@ -1361,8 +1409,9 @@ pub enum Command {
 
     /// Update existing symbol index
     ///
-    /// Incrementally updates the index by re-indexing only changed files.
-    /// Much faster than a full rebuild for large codebases.
+    /// Rebuilds the existing index from source, reusing the plugin selection
+    /// and the macro options its manifest records. Every file is parsed
+    /// again: no sqry command re-indexes only the files that changed.
     #[command(display_order = 11)]
     Update {
         /// Directory with existing index (defaults to current directory).
@@ -1376,16 +1425,10 @@ pub enum Command {
         #[arg(long, short = 't', help_heading = headings::PERFORMANCE_TUNING, display_order = 10)]
         threads: Option<usize>,
 
-        /// Disable incremental indexing (force metadata-only or full updates).
+        /// Also write a hash index of every indexed file to this directory.
         ///
-        /// When set, the update process will not use the hash index and will
-        /// rely on metadata-only checks for staleness.
-        #[arg(long = "no-incremental", help_heading = headings::UPDATE_CONFIGURATION, display_order = 10)]
-        no_incremental: bool,
-
-        /// Override cache directory for incremental indexing (default: .sqry-cache).
-        ///
-        /// Points sqry at an alternate cache location for the hash index.
+        /// Nothing is written there without this flag, and nothing reads the
+        /// hash index yet: every update parses every file.
         #[arg(long = "cache-dir", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 10)]
         cache_dir: Option<String>,
 
@@ -1396,10 +1439,6 @@ pub enum Command {
         /// Enable JVM classpath analysis.
         #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 40)]
         classpath: bool,
-
-        /// Disable classpath analysis (overrides config defaults).
-        #[arg(long, conflicts_with = "classpath", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 41)]
-        no_classpath: bool,
 
         /// Classpath analysis depth.
         #[arg(long, value_enum, default_value = "full", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 42)]
@@ -1464,16 +1503,16 @@ pub enum Command {
         debounce: Option<u64>,
 
         /// Show detailed statistics for each update.
+        ///
+        /// After every rebuild, print the same block `sqry update --stats`
+        /// prints: nodes, edges and registered files with their deltas
+        /// against the snapshot the iteration replaced.
         #[arg(long, short = 's', help_heading = headings::OUTPUT_CONTROL, display_order = 10)]
         stats: bool,
 
         /// Enable JVM classpath analysis.
         #[arg(long, help_heading = headings::ADVANCED_CONFIGURATION, display_order = 40)]
         classpath: bool,
-
-        /// Disable classpath analysis (overrides config defaults).
-        #[arg(long, conflicts_with = "classpath", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 41)]
-        no_classpath: bool,
 
         /// Classpath analysis depth.
         #[arg(long, value_enum, default_value = "full", help_heading = headings::ADVANCED_CONFIGURATION, display_order = 42)]
@@ -2389,7 +2428,7 @@ pub enum DaemonAction {
     /// Connects to the daemon and sends a `daemon/load` request with the
     /// canonicalized path. The daemon's `WorkspaceManager` indexes the
     /// workspace, caches the graph in memory, and starts watching for
-    /// file changes to rebuild incrementally.
+    /// file changes; after each batch of them it rebuilds the whole graph.
     Load {
         /// Workspace root directory to load.
         path: PathBuf,
@@ -2479,26 +2518,75 @@ pub enum DaemonAction {
     /// binary upgrade it re-parses with the pre-upgrade code. Restart the daemon
     /// first; see the upgrade-rebuild note on `sqry index`.
     ///
-    /// Use `--force` to discard any incremental state and perform a full rebuild
-    /// from scratch (equivalent to dropping and re-loading the workspace).
+    /// Every daemon rebuild parses the whole workspace again. Without
+    /// `--force` the daemon names the run incremental or full by its change
+    /// heuristics (and reports which); `--force` makes it full. Neither keeps
+    /// state from the previous graph.
     ///
     /// The command will wait up to `--timeout` seconds for the rebuild to finish
     /// and report the result as human-readable text or, with `--json`, as a
-    /// machine-readable JSON object.
+    /// machine-readable JSON object. `--timeout 0` sends the request and
+    /// returns once it is delivered, without waiting for the outcome.
+    ///
+    /// Exit status while waiting: 0 when the rebuild completed; 2 when
+    /// `--timeout` elapsed first (the daemon carries on); 1 for every other
+    /// failure (no daemon, a workspace that is not loaded, a refused or
+    /// failed rebuild, a request that cannot be encoded).
+    ///
+    /// Exit status with `--timeout 0`: the daemon answers a rebuild request
+    /// only with its outcome, so the answer is never read. 0 once the request
+    /// is delivered, whatever the daemon then does: a workspace that is not
+    /// loaded, a refusal and a failure all exit 0 (follow the workspace with
+    /// `sqry daemon status`). 1 when it cannot be delivered (no daemon, a
+    /// request that cannot be encoded).
+    ///
+    /// Either way, a usage error (an empty, blank or padded `--cfg`) exits 2
+    /// and sends nothing.
     #[command(verbatim_doc_comment)]
     Rebuild {
         /// Workspace root directory to rebuild.
         path: PathBuf,
-        /// Force a full rebuild from scratch, discarding incremental state.
+        /// Run the rebuild as full. Every daemon rebuild parses the whole
+        /// workspace, forced or not.
         #[arg(long)]
         force: bool,
         /// Maximum seconds to wait for the rebuild to complete.
-        /// Default is 1800 seconds (30 minutes). Pass 0 to fire-and-forget.
+        /// Default is 1800 seconds (30 minutes); when it elapses the command
+        /// exits 2 and the daemon carries on. Pass 0 to send the request and
+        /// exit 0 once it is delivered, without waiting for the outcome: the
+        /// daemon's answer (even a workspace that is not loaded, or a
+        /// refusal) is never read.
         #[arg(long, default_value_t = 1800)]
         timeout: u64,
         /// Emit machine-readable JSON output instead of human-readable text.
         #[arg(long)]
         json: bool,
+        /// Set active cfg flags for Rust conditional-compilation analysis.
+        ///
+        /// Can be specified multiple times (e.g. --cfg test --cfg unix, or
+        /// --cfg feature=serde). Replaces the cfg flags the manifest records;
+        /// absent, the recorded flags are reused. This is pure data: no code
+        /// is executed. An empty or blank flag names no predicate, and a
+        /// flag with leading or trailing whitespace is not the predicate it
+        /// names; both are refused as usage errors and nothing is sent.
+        #[arg(long = "cfg", value_name = "PREDICATE", value_parser = parse_cfg_flag)]
+        cfg_flags: Vec<String>,
+        /// Consume a pre-generated macro expand cache from this directory.
+        ///
+        /// Replaces the expand cache the manifest records; absent, the
+        /// recorded directory is reused. Execution-free: only JSON is read.
+        /// A relative DIR resolves against your current working directory
+        /// (it is made absolute before the request is sent, so the daemon's
+        /// own working directory never matters). The directory must exist;
+        /// the manifest records its canonical path. Refused: a directory
+        /// whose canonical path is not valid UTF-8, and on Windows a relative
+        /// path with a drive prefix or a root (`C:cache`, `\cache`).
+        #[arg(long = "expand-cache", value_name = "DIR")]
+        expand_cache: Option<PathBuf>,
+        /// Drop the macro build options the manifest records before
+        /// applying --cfg and --expand-cache.
+        #[arg(long = "no-macro-options")]
+        no_macro_options: bool,
     },
     /// Reset a loaded workspace to `Unloaded` state without touching disk.
     ///
@@ -2518,9 +2606,13 @@ pub enum DaemonAction {
     ///
     /// Mappings:
     ///
-    ///   Loaded / Failed / Evicted → Unloaded
-    ///   Rebuilding → cancellation dispatched (-32009; retry after 250ms)
-    ///   Loading    → -32008 `ResetWhileLoading`
+    ///   Loaded / Failed / Evicted / Unloaded → Unloaded
+    ///   Rebuilding, no rebuild running       → Unloaded
+    ///   a rebuild running or queued          → nothing is reset: the rebuild
+    ///       is cancelled (queued requests answered -32004) and the reset
+    ///       answers -32009; retry after 250ms, and the retry resets
+    ///   Loading                              → -32008 `ResetWhileLoading`
+    ///   pinned, without --force              → -32010 `WorkspacePinned`
     #[command(verbatim_doc_comment)]
     Reset {
         /// Workspace root directory to reset.
@@ -2743,10 +2835,6 @@ pub enum GraphOperation {
         ///   `channel_invoke`, `widget_child`
         #[arg(long, help_heading = headings::GRAPH_FILTERING, display_order = 30)]
         edge_type: Option<String>,
-
-        /// Minimum confidence threshold (0.0-1.0).
-        #[arg(long, default_value = "0.0", help_heading = headings::GRAPH_FILTERING, display_order = 40)]
-        min_confidence: f64,
     },
 
     /// List unified graph nodes
@@ -3759,12 +3847,8 @@ pub enum AliasAction {
         #[arg(value_name = "FILE", help_heading = headings::ALIAS_INPUT, display_order = 10)]
         file: String,
 
-        /// Import to local storage (default).
-        #[arg(long, conflicts_with = "global", help_heading = headings::ALIAS_CONFIGURATION, display_order = 10)]
-        local: bool,
-
-        /// Import to global storage.
-        #[arg(long, conflicts_with = "local", help_heading = headings::ALIAS_CONFIGURATION, display_order = 20)]
+        /// Import to global storage (the default is local storage).
+        #[arg(long, help_heading = headings::ALIAS_CONFIGURATION, display_order = 20)]
         global: bool,
 
         /// How to handle conflicts with existing aliases.
@@ -4740,6 +4824,135 @@ mod tests {
             }
         } else {
             panic!("Expected Cache command");
+        }
+    }
+    }
+
+    // T6 (surface parity W4, design W4-D2, W4-D3, W4-D4): every argument
+    // nothing read is gone from clap, so a script that passes one is told
+    // so instead of being silently ignored.
+    large_stack_test! {
+    #[test]
+    fn w4_removed_arguments_are_rejected() {
+        let removed: [&[&str]; 10] = [
+            &["sqry", "-s", "main"],
+            &["sqry", "--semantic", "main"],
+            &["sqry", "--threshold-dangling-refs", "0.05", "main"],
+            &["sqry", "--threshold-id-gaps", "0.1", "main"],
+            &["sqry", "index", "--no-classpath", "."],
+            &["sqry", "update", "--no-classpath"],
+            &["sqry", "watch", "--no-classpath"],
+            &["sqry", "update", "--no-incremental"],
+            &["sqry", "graph", "cross-language", "--min-confidence", "0.5"],
+            &["sqry", "alias", "import", "--local", "f.json"],
+        ];
+        let mut rejected = 0usize;
+        for argv in removed {
+            let parsed = Cli::try_parse_from(argv);
+            assert!(
+                parsed.is_err(),
+                "{argv:?} must be rejected by clap, parsed as {:?}",
+                parsed.map(|cli| cli.command)
+            );
+            rejected += 1;
+        }
+        assert_eq!(rejected, removed.len());
+    }
+    }
+
+    // T6 (W4-D3): the orphan threshold parses inside 0.0 to 1.0 and is
+    // refused outside it.
+    large_stack_test! {
+    #[test]
+    fn w4_orphan_threshold_is_bounded() {
+        let cli = Cli::try_parse_from(["sqry", "--threshold-orphaned-files", "0.6", "main"])
+            .expect("0.6 parses");
+        assert_eq!(cli.threshold_orphaned_files, Some(0.6));
+        let cli = Cli::try_parse_from(["sqry", "main"]).expect("absent parses");
+        assert_eq!(cli.threshold_orphaned_files, None);
+        for bad in ["1.5", "-0.1", "ratio"] {
+            // `--flag=value` so a leading minus reaches the value parser
+            // instead of being read as a short flag.
+            let flag = format!("--threshold-orphaned-files={bad}");
+            let err = Cli::try_parse_from(["sqry", flag.as_str(), "main"])
+                .expect_err("out of range must be refused");
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains(bad),
+                "the refusal names the value {bad}: {rendered}"
+            );
+        }
+    }
+    }
+
+    // T6 (W4-D7, W4-D8): the new flags parse on `index` and on
+    // `daemon rebuild`.
+    large_stack_test! {
+    #[test]
+    fn w4_macro_option_flags_parse() {
+        let cli = Cli::try_parse_from(["sqry", "index", "--no-macro-options", "."])
+            .expect("index --no-macro-options parses");
+        match cli.command.as_deref() {
+            Some(Command::Index {
+                no_macro_options, ..
+            }) => assert!(*no_macro_options),
+            other => panic!("expected Command::Index, got {other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "sqry",
+            "daemon",
+            "rebuild",
+            "--cfg",
+            "test",
+            "--cfg",
+            "feature=serde",
+            "--expand-cache",
+            "/cache/dir",
+            "--no-macro-options",
+            "/repo",
+        ])
+        .expect("daemon rebuild flags parse");
+        let Some(Command::Daemon { action }) = cli.command.as_deref() else {
+            panic!("expected Command::Daemon, got {:?}", cli.command);
+        };
+        match action.as_ref() {
+            DaemonAction::Rebuild {
+                cfg_flags,
+                expand_cache,
+                no_macro_options,
+                force,
+                ..
+            } => {
+                assert_eq!(
+                    *cfg_flags,
+                    vec!["test".to_string(), "feature=serde".to_string()]
+                );
+                assert_eq!(
+                    expand_cache.as_deref(),
+                    Some(std::path::Path::new("/cache/dir"))
+                );
+                assert!(*no_macro_options);
+                assert!(!*force);
+            }
+            other => panic!("expected daemon rebuild, got {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["sqry", "daemon", "rebuild", "/repo"])
+            .expect("daemon rebuild without the flags parses");
+        let Some(Command::Daemon { action }) = cli.command.as_deref() else {
+            panic!("expected Command::Daemon, got {:?}", cli.command);
+        };
+        match action.as_ref() {
+            DaemonAction::Rebuild {
+                cfg_flags,
+                expand_cache,
+                no_macro_options,
+                ..
+            } => {
+                assert!(cfg_flags.is_empty());
+                assert!(expand_cache.is_none());
+                assert!(!*no_macro_options);
+            }
+            other => panic!("expected daemon rebuild, got {other:?}"),
         }
     }
     }

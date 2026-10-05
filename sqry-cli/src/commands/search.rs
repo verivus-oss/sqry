@@ -785,6 +785,43 @@ fn build_search_metadata(
     }
 }
 
+/// Refuse what [`run_search`] refuses from its arguments alone, before any
+/// graph is loaded: revision flags it cannot combine, (on the in-process
+/// regular path, the only one that compiles the pattern) a pattern the cost
+/// gate or the regex compiler rejects, and (on the in-process fuzzy and
+/// JSON-stream paths) a `--fuzzy-algorithm` it does not know. A caller that
+/// would write before the search runs (the `--validate fail --auto-rebuild`
+/// rebuild) calls this first, so a refused search writes nothing; the fuzzy
+/// search used to load the graph and only then refuse its algorithm.
+///
+/// # Errors
+///
+/// The refusal [`run_search`] would give for these arguments.
+pub fn check_search_arguments(
+    cli: &Cli,
+    pattern: &str,
+    cfg_filter: Option<&str>,
+    macro_boundaries: bool,
+    revision: &RevisionQueryArgs,
+) -> Result<()> {
+    let explicit_revision = revision_query_target_from_args(revision).is_some();
+    if explicit_revision && (cli.json_stream || cfg_filter.is_some() || macro_boundaries) {
+        anyhow::bail!(
+            "revision search does not support --json-stream, --cfg-filter, or --macro-boundaries"
+        );
+    }
+    if explicit_revision && cli.ignore_case {
+        anyhow::bail!("revision search does not support --ignore-case");
+    }
+    if !explicit_revision && !cli.fuzzy && !cli.json_stream {
+        build_pattern_regex(cli, pattern)?;
+    }
+    if !explicit_revision && (cli.fuzzy || cli.json_stream) {
+        parse_fuzzy_algorithm(&cli.fuzzy_algorithm)?;
+    }
+    Ok(())
+}
+
 /// Run symbol search command.
 /// P2-3 Step 2e: Language filtering uses `file_path()` without index context - allowed
 ///
@@ -836,18 +873,9 @@ pub fn run_search(
     // skips fuzzy / JSON-stream / macro-boundary paths where the in-process
     // pipeline carries semantics the daemon does not yet replicate
     // (fuzzy-tuning knobs, streaming events, macro-metadata filtering).
+    check_search_arguments(cli, pattern, cfg_filter, macro_boundaries, revision)?;
     let revision_target = revision_query_target_from_args(revision);
     let explicit_revision = revision_target.is_some();
-    if explicit_revision
-        && (cli.json_stream || macro_flags.cfg_filter.is_some() || macro_flags.macro_boundaries)
-    {
-        anyhow::bail!(
-            "revision search does not support --json-stream, --cfg-filter, or --macro-boundaries"
-        );
-    }
-    if explicit_revision && cli.ignore_case {
-        anyhow::bail!("revision search does not support --ignore-case");
-    }
 
     if explicit_revision || should_attempt_daemon(cli, &macro_flags) {
         let daemon_started = Instant::now();

@@ -138,39 +138,46 @@ impl SqryServer {
     /// on top. This ensures config-file presets are respected even when `SQRY_REDACTION_PRESET`
     /// is not set in the environment.
     ///
-    /// `STEP_7` codex iter4 BLOCK fix — `"none"` no longer short-circuits
-    /// to [`None`]. Acceptance criterion 6 requires excluded paths to render
+    /// `STEP_7` codex iter4 BLOCK fix: `"none"` does not short-circuit to
+    /// no redactor. Acceptance criterion 6 requires excluded paths to render
     /// as the opaque-hash form **regardless of preset**, including
     /// `preset=none`. The redaction walker enforces criterion 6 in
     /// passthrough mode only when a [`Redactor`] exists **and** a
     /// [`LogicalWorkspaceView`] is bound at request time (via
-    /// [`Self::redactor_for_workspace`]). Returning `None` for `"none"`
-    /// kept the criterion-6 path off end-to-end. We now construct a
-    /// passthrough redactor (`RedactionConfig::none()`); the
+    /// [`Self::redactor_for_workspace`]), so `"none"` builds a passthrough
+    /// redactor (`RedactionConfig::none()`); the
     /// `redact_excluded_in_passthrough` branch in
     /// `sqry_mcp_redaction::walker` only rewrites excluded paths and
     /// leaves every other field verbatim, preserving criterion 3
     /// (`preset=none + path inside source_root → absolute emitted`).
-    /// Unknown preset names still return `None` so misconfiguration
-    /// degrades to no-redaction rather than panicking.
-    pub fn create_redactor(preset: &str) -> Option<Arc<Redactor>> {
-        match preset {
-            "none" | "minimal" | "relative" | "standard" | "strict" => {}
-            other => {
-                tracing::warn!("Unknown redaction preset '{other}', disabling redaction");
-                return None;
-            }
-        }
+    ///
+    /// The name is read as every surface reads it (trimmed, any letter
+    /// case: [`sqry_mcp_redaction::RedactionPreset::parse`]).
+    ///
+    /// # Errors
+    ///
+    /// An unknown preset name, or a configuration the redactor refuses (an
+    /// over-long `SQRY_HASH_SALT`, an unparseable `SQRY_PRESERVE_PATHS`).
+    /// Both used to answer with redaction off; the server now refuses to
+    /// start instead (decision D-i8-20).
+    pub fn create_redactor(preset: &str) -> anyhow::Result<Arc<Redactor>> {
+        let parsed = sqry_mcp_redaction::RedactionPreset::parse(preset).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Unknown redaction preset {preset:?}: expected one of {} (any letter case); \
+                 refusing to serve unredacted",
+                sqry_mcp_redaction::RedactionPreset::NAMES.join(", ")
+            )
+        })?;
 
         // Build config from the caller-supplied preset + fine-grained env overrides
-        let config = RedactionConfig::from_preset_with_env(preset);
-        match Redactor::new(config) {
-            Ok(redactor) => Some(Arc::new(redactor)),
-            Err(e) => {
-                tracing::warn!("Failed to create redactor, disabling redaction: {e}");
-                None
-            }
-        }
+        let config = RedactionConfig::from_preset_with_env(parsed.name());
+        Redactor::new(config).map(Arc::new).map_err(|e| {
+            anyhow::anyhow!(
+                "The redaction configuration for preset {:?} is refused ({e}); \
+                 refusing to serve unredacted",
+                parsed.name()
+            )
+        })
     }
 
     /// Build a per-request redactor scoped to the resolved workspace.
@@ -213,19 +220,6 @@ impl SqryServer {
             return Redactor::with_logical_workspace(config, view).ok();
         }
         Redactor::new(config).ok()
-    }
-
-    fn redact_error_message(redactor: Option<&Redactor>, msg: String) -> String {
-        if let Some(redactor) = redactor {
-            let mut value = serde_json::Value::String(msg);
-            redactor.redact(&mut value);
-            match value {
-                serde_json::Value::String(redacted) => redacted,
-                other => other.to_string(),
-            }
-        } else {
-            msg
-        }
     }
 
     fn build_redacted_response<T: Serialize>(
@@ -316,7 +310,9 @@ impl SqryServer {
             .workspace_sessions
             .resolve_for_request(params, context)
             .await
-            .map_err(|error| McpError::invalid_request(error.to_string(), None))?;
+            // Redacted at the `call_tool` boundary like every error raised
+            // before a workspace is bound.
+            .map_err(|error| Self::resolution_refusal(tool_name, &error))?;
 
         tracing::debug!(
             tool = tool_name,
@@ -356,6 +352,19 @@ impl SqryServer {
         .await
     }
 
+    /// The wire refusal for a request whose workspace could not be resolved:
+    /// the client's roots (its `roots/list` failed, or a root is unusable)
+    /// are an invalid request (`-32600`, no data, the whole chain), as they
+    /// were before S5; anything else is the request's `path` (or its
+    /// absence) refused, an invalid argument naming it (S5, round 7).
+    fn resolution_refusal(tool_name: &str, error: &anyhow::Error) -> McpError {
+        if workspace_session::is_client_roots_refusal(error) {
+            McpError::invalid_request(crate::error::render_error_chain(error), None)
+        } else {
+            rpc_error_to_mcp(RpcError::workspace_unresolved(tool_name, error))
+        }
+    }
+
     /// Resolve request workspace before entering `spawn_blocking` for long-running tools.
     async fn execute_tool_with_timeout_for_request<P, F, T>(
         &self,
@@ -380,7 +389,9 @@ impl SqryServer {
             .workspace_sessions
             .resolve_for_request(params, context)
             .await
-            .map_err(|error| McpError::invalid_request(error.to_string(), None))?;
+            // Redacted at the `call_tool` boundary like every error raised
+            // before a workspace is bound.
+            .map_err(|error| Self::resolution_refusal(tool_name, &error))?;
 
         tracing::debug!(
             tool = tool_name,
@@ -490,119 +501,147 @@ impl SqryServer {
 
             let scoped_redactor = workspace_scoped_redactor.as_ref();
 
-            match result {
-                Ok(Ok(Ok(execution))) => Self::build_redacted_response(execution, scoped_redactor),
-                Ok(Ok(Err(anyhow_err))) => {
-                    // `A_cancellation.md` §4: if the closure observed
-                    // the cancellation we just signalled (deadline
-                    // elapsed → token flipped → `evaluate_all`
-                    // short-circuited with
-                    // `QueryError::Cancelled`), surface the canonical
-                    // `RpcError::deadline_exceeded` envelope so the
-                    // wire shape is identical to the wrapper-only
-                    // timeout path. This downcast must run BEFORE
-                    // the existing `RpcError` downcast so the
-                    // cancellation arm is not classified as a
-                    // generic internal error.
-                    if let Some(sqry_core::query::QueryError::Cancelled) =
-                        anyhow_err.downcast_ref::<sqry_core::query::QueryError>()
-                    {
-                        return Err(rpc_error_to_mcp(RpcError::deadline_exceeded(
-                            &tool_name_owned,
-                            timeout_ms,
-                            retry_delay_ms,
-                        )));
-                    }
-                    // `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2:
-                    // pre-flight cost-gate rejection emerges from
-                    // `execute_evaluate_with` as a `CostGateError`
-                    // wrapped in `anyhow::Error`. Reshape into the
-                    // canonical `RpcError::query_too_broad` envelope
-                    // (4-key wire shape, 7-key `details` payload) so
-                    // the standalone path produces byte-identical
-                    // output to the daemon's `DaemonError::QueryTooBroad`
-                    // arm.
-                    if let Some(gate_err) =
-                        anyhow_err.downcast_ref::<sqry_core::query::cost_gate::CostGateError>()
-                    {
-                        let details = gate_err.to_query_too_broad_details();
-                        let message = gate_err.to_string();
-                        return Err(rpc_error_to_mcp(RpcError::query_too_broad(
-                            message, details,
-                        )));
-                    }
-                    // Planner-side cost gate (`sqry_query`,
-                    // `plan-query`). Distinct error type, identical
-                    // wire envelope.
-                    if let Some(gate_err) = anyhow_err
-                        .downcast_ref::<sqry_db::planner::cost_gate::PlannerCostGateError>(
-                    ) {
-                        let details = gate_err.to_query_too_broad_details();
-                        let message = gate_err.to_string();
-                        return Err(rpc_error_to_mcp(RpcError::query_too_broad(
-                            message, details,
-                        )));
-                    }
-                    // `C_budget.md` §3 + `00_contracts.md` §3.CC-2:
-                    // runtime row-budget exceedance surfaces through
-                    // the canonical `query_too_broad` envelope with
-                    // `details.source = "runtime_budget"` (vs the
-                    // static-gate `details.source = "static_estimate"`).
-                    // Same envelope shape as the static-gate path so
-                    // MCP clients use a single parser regardless of
-                    // which side observed first.
-                    if let Some(budget_err) =
-                        anyhow_err.downcast_ref::<sqry_core::query::budget::BudgetExceeded>()
-                    {
-                        // Cluster-C iter-2: include the sanitised
-                        // `predicate_shape` so the runtime_budget
-                        // envelope is wire-comparable to the
-                        // cluster-B static_estimate envelope.
-                        let details = serde_json::json!({
-                            "source": "runtime_budget",
-                            "kind": sqry_core::query::cost_gate::KIND_QUERY_TOO_BROAD,
-                            "examined": budget_err.examined,
-                            "limit": budget_err.limit,
-                            "predicate_shape": budget_err.predicate_shape.clone(),
-                            "suggested_predicates":
-                                sqry_core::query::cost_gate::SCOPE_FILTER_FIELDS,
-                            "doc_url":
-                                sqry_core::query::cost_gate::QUERY_TOO_BROAD_DOC_URL,
-                        });
-                        return Err(rpc_error_to_mcp(RpcError::query_too_broad(
-                            budget_err.to_string(),
-                            details,
-                        )));
-                    }
-                    // Structured tool errors are surfaced through the
-                    // canonical envelope rather than the opaque
-                    // internal-error fallback, so MCP clients can
-                    // pattern-match on `details.code`.
-                    if let Some(rpc_err) = anyhow_err.downcast_ref::<RpcError>() {
-                        Err(rpc_error_to_mcp(rpc_err.clone()))
-                    } else {
-                        Err(McpError::internal_error(
-                            Self::redact_error_message(scoped_redactor, anyhow_err.to_string()),
-                            None,
-                        ))
-                    }
-                }
-                Ok(Err(join_err)) => Err(McpError::internal_error(
-                    Self::redact_error_message(
-                        scoped_redactor,
-                        format!("Task panicked: {join_err}"),
-                    ),
-                    None,
-                )),
-                Err(_) => Err(rpc_error_to_mcp(RpcError::deadline_exceeded(
-                    &tool_name_owned,
-                    timeout_ms,
-                    retry_delay_ms,
-                ))),
-            }
+            // Every arm's error, the refusals included, is redacted with the
+            // redactor bound to the request's workspace, as the success arm's
+            // response is (S3, round 7: a refusal used to print absolute
+            // paths under the default preset).
+            Self::tool_outcome(
+                result,
+                &tool_name_owned,
+                timeout_ms,
+                retry_delay_ms,
+                scoped_redactor,
+            )
+            .map_err(|err| crate::error::redact_mcp_error(scoped_redactor, err))
         }
         .instrument(span)
         .await
+    }
+
+    /// The response for one tool call's outcome: the success response
+    /// (redacted), or the error each failure arm maps to. The caller
+    /// redacts the error.
+    fn tool_outcome<T: Serialize>(
+        result: Result<
+            Result<anyhow::Result<ToolExecution<T>>, tokio::task::JoinError>,
+            tokio::time::error::Elapsed,
+        >,
+        tool_name_owned: &str,
+        timeout_ms: u64,
+        retry_delay_ms: u64,
+        scoped_redactor: Option<&Redactor>,
+    ) -> Result<serde_json::Value, McpError> {
+        match result {
+            Ok(Ok(Ok(execution))) => Self::build_redacted_response(execution, scoped_redactor),
+            Ok(Ok(Err(anyhow_err))) => {
+                // `A_cancellation.md` §4: if the closure observed
+                // the cancellation we just signalled (deadline
+                // elapsed → token flipped → `evaluate_all`
+                // short-circuited with
+                // `QueryError::Cancelled`), surface the canonical
+                // `RpcError::deadline_exceeded` envelope so the
+                // wire shape is identical to the wrapper-only
+                // timeout path. This downcast must run BEFORE
+                // the existing `RpcError` downcast so the
+                // cancellation arm is not classified as a
+                // generic internal error.
+                if let Some(sqry_core::query::QueryError::Cancelled) =
+                    anyhow_err.downcast_ref::<sqry_core::query::QueryError>()
+                {
+                    return Err(rpc_error_to_mcp(RpcError::deadline_exceeded(
+                        tool_name_owned,
+                        timeout_ms,
+                        retry_delay_ms,
+                    )));
+                }
+                // `B_cost_gate.md` §3 + `00_contracts.md` §3.CC-2:
+                // pre-flight cost-gate rejection emerges from
+                // `execute_evaluate_with` as a `CostGateError`
+                // wrapped in `anyhow::Error`. Reshape into the
+                // canonical `RpcError::query_too_broad` envelope
+                // (4-key wire shape, 7-key `details` payload) so
+                // the standalone path produces byte-identical
+                // output to the daemon's `DaemonError::QueryTooBroad`
+                // arm.
+                if let Some(gate_err) =
+                    anyhow_err.downcast_ref::<sqry_core::query::cost_gate::CostGateError>()
+                {
+                    let details = gate_err.to_query_too_broad_details();
+                    let message = gate_err.to_string();
+                    return Err(rpc_error_to_mcp(RpcError::query_too_broad(
+                        message, details,
+                    )));
+                }
+                // Planner-side cost gate (`sqry_query`,
+                // `plan-query`). Distinct error type, identical
+                // wire envelope.
+                if let Some(gate_err) =
+                    anyhow_err.downcast_ref::<sqry_db::planner::cost_gate::PlannerCostGateError>()
+                {
+                    let details = gate_err.to_query_too_broad_details();
+                    let message = gate_err.to_string();
+                    return Err(rpc_error_to_mcp(RpcError::query_too_broad(
+                        message, details,
+                    )));
+                }
+                // `C_budget.md` §3 + `00_contracts.md` §3.CC-2:
+                // runtime row-budget exceedance surfaces through
+                // the canonical `query_too_broad` envelope with
+                // `details.source = "runtime_budget"` (vs the
+                // static-gate `details.source = "static_estimate"`).
+                // Same envelope shape as the static-gate path so
+                // MCP clients use a single parser regardless of
+                // which side observed first.
+                if let Some(budget_err) =
+                    anyhow_err.downcast_ref::<sqry_core::query::budget::BudgetExceeded>()
+                {
+                    // Cluster-C iter-2: include the sanitised
+                    // `predicate_shape` so the runtime_budget
+                    // envelope is wire-comparable to the
+                    // cluster-B static_estimate envelope.
+                    let details = serde_json::json!({
+                        "source": "runtime_budget",
+                        "kind": sqry_core::query::cost_gate::KIND_QUERY_TOO_BROAD,
+                        "examined": budget_err.examined,
+                        "limit": budget_err.limit,
+                        "predicate_shape": budget_err.predicate_shape.clone(),
+                        "suggested_predicates":
+                            sqry_core::query::cost_gate::SCOPE_FILTER_FIELDS,
+                        "doc_url":
+                            sqry_core::query::cost_gate::QUERY_TOO_BROAD_DOC_URL,
+                    });
+                    return Err(rpc_error_to_mcp(RpcError::query_too_broad(
+                        budget_err.to_string(),
+                        details,
+                    )));
+                }
+                // Structured tool errors are surfaced through the
+                // canonical envelope rather than the opaque
+                // internal-error fallback, so MCP clients can
+                // pattern-match on `details.code`.
+                // The fallback renders the whole chain: a context
+                // added on the way up must not hide the cause.
+                // Neither is redacted here: the caller redacts every
+                // error this returns.
+                if let Some(rpc_err) = anyhow_err.downcast_ref::<RpcError>() {
+                    Err(rpc_error_to_mcp(rpc_err.clone()))
+                } else {
+                    Err(McpError::internal_error(
+                        crate::error::render_error_chain(&anyhow_err),
+                        None,
+                    ))
+                }
+            }
+            Ok(Err(join_err)) => Err(McpError::internal_error(
+                format!("Task panicked: {join_err}"),
+                None,
+            )),
+            Err(_) => Err(rpc_error_to_mcp(RpcError::deadline_exceeded(
+                tool_name_owned,
+                timeout_ms,
+                retry_delay_ms,
+            ))),
+        }
     }
 
     /// Build a response JSON object from `ToolExecution`, preserving all metadata.
@@ -1668,6 +1707,24 @@ impl ServerHandler for SqryServer {
         Ok(ListPromptsResult::with_all_items(prompts))
     }
 
+    /// Dispatch a tool call through the router `#[tool_handler]` would use,
+    /// redacting every error with the server's redactor (S3, round 7). The
+    /// tool wrapper already redacts what a tool returns with the redactor
+    /// bound to the request's workspace; this boundary covers the errors
+    /// raised before a workspace is resolved: argument conversion and
+    /// validation, disabled tools, and unresolvable workspaces.
+    async fn call_tool(
+        &self,
+        request: rmcp::model::CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let tool_call = rmcp::handler::server::tool::ToolCallContext::new(self, request, context);
+        Self::tool_router()
+            .call(tool_call)
+            .await
+            .map_err(|err| crate::error::redact_mcp_error(self.redactor.as_deref(), err))
+    }
+
     /// Get a specific prompt by name.
     async fn get_prompt(
         &self,
@@ -1675,7 +1732,10 @@ impl ServerHandler for SqryServer {
         context: RequestContext<RoleServer>,
     ) -> Result<GetPromptResult, McpError> {
         let prompt_context = PromptContext::new(self, request.name, request.arguments, context);
-        self.prompt_router.get_prompt(prompt_context).await
+        self.prompt_router
+            .get_prompt(prompt_context)
+            .await
+            .map_err(|err| crate::error::redact_mcp_error(self.redactor.as_deref(), err))
     }
 
     /// List available documentation resources.
@@ -1697,9 +1757,9 @@ impl ServerHandler for SqryServer {
     ) -> Result<ReadResourceResult, McpError> {
         match resources::read_resource(&request.uri) {
             Some(contents) => Ok(ReadResourceResult::new(vec![contents])),
-            None => Err(McpError::resource_not_found(
-                format!("unknown resource: {}", request.uri),
-                None,
+            None => Err(crate::error::redact_mcp_error(
+                self.redactor.as_deref(),
+                McpError::resource_not_found(format!("unknown resource: {}", request.uri), None),
             )),
         }
     }
@@ -1721,20 +1781,10 @@ impl ServerHandler for SqryServer {
 // Error Bridge: RpcError -> McpError
 // ============================================================================
 
-/// Convert `RpcError` to `McpError`, preserving error details.
+/// Convert `RpcError` to `McpError`, preserving error details. The one
+/// bridge lives in [`crate::error::rpc_error_to_mcp`].
 fn rpc_error_to_mcp(err: RpcError) -> McpError {
-    let data = serde_json::json!({
-        "kind": err.kind,
-        "retryable": err.retryable,
-        "retry_after_ms": err.retry_after_ms,
-        "details": err.details,
-    });
-
-    // Map error codes: -32602 = invalid params, everything else = internal error
-    match err.code {
-        -32602 => McpError::invalid_params(err.message, Some(data)),
-        _ => McpError::internal_error(err.message, Some(data)),
-    }
+    crate::error::rpc_error_to_mcp(err)
 }
 
 // ============================================================================
@@ -2115,6 +2165,9 @@ fn convert_rebuild_index_params(params: RebuildIndexParams) -> crate::tools::Reb
     crate::tools::RebuildIndexArgs {
         path: params.path,
         force: params.force,
+        cfg_flags: params.cfg_flags,
+        expand_cache: params.expand_cache.map(std::path::PathBuf::from),
+        reset_macro_options: params.reset_macro_options,
     }
 }
 
@@ -2672,22 +2725,38 @@ mod tests {
     #[test]
     fn create_redactor_accepts_relative_preset_and_keeps_redaction_enabled() {
         // Issue #394 item 4 regression: `relative` MUST be an accepted preset so
-        // the server builds an enabled redactor. If it fell into the unknown-preset
-        // branch, `create_redactor` would return None and the server would run
-        // with redaction DISABLED, leaking absolute host paths and code/docs.
+        // the server builds an enabled redactor. In the unknown-preset branch,
+        // `create_redactor` returned None and the server ran with redaction
+        // DISABLED, leaking absolute host paths and code/docs; it now refuses.
         assert!(
-            SqryServer::create_redactor("relative").is_some(),
+            SqryServer::create_redactor("relative").is_ok(),
             "relative preset must produce an enabled redactor, not disable redaction"
         );
-        // The known presets all stay enabled.
-        for preset in ["none", "minimal", "standard", "strict"] {
+        // The known presets all stay enabled, in any letter case and padded
+        // (round 8, D-i8-20).
+        for preset in [
+            "none",
+            "minimal",
+            "standard",
+            "strict",
+            "Strict",
+            " MINIMAL ",
+        ] {
             assert!(
-                SqryServer::create_redactor(preset).is_some(),
+                SqryServer::create_redactor(preset).is_ok(),
                 "preset `{preset}` must produce a redactor"
             );
         }
-        // A genuinely-unknown preset still degrades to no redactor (documented).
-        assert!(SqryServer::create_redactor("bogus-preset").is_none());
+        // An unknown preset is refused, never read as no redaction (round 8,
+        // D-i8-20: it used to return no redactor and the server ran
+        // unredacted).
+        for preset in ["bogus-preset", "", "strictest"] {
+            let err = SqryServer::create_redactor(preset)
+                .err()
+                .unwrap_or_else(|| panic!("{preset:?} must be refused"))
+                .to_string();
+            assert!(err.contains("refusing to serve unredacted"), "{err}");
+        }
     }
 
     #[test]

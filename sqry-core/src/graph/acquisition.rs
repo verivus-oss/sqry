@@ -322,6 +322,24 @@ pub enum PluginSelectionStatus {
         /// Human-readable explanation.
         reason: String,
     },
+    /// Every manifest plugin id is loadable by this binary, but the graph
+    /// being served was built with a different set than the manifest
+    /// records. Produced only by providers that serve a resident graph
+    /// (the daemon): the filesystem provider loads the manifest's own
+    /// snapshot, so it can never disagree with it. Served with a warning,
+    /// never refused, because the graph is real and queryable; the warning
+    /// tells the caller which plugins the resident graph lacks (or has
+    /// beyond the manifest) so the divergence is never silent.
+    DivergesFromManifest {
+        /// Ids the manifest records that the resident graph was not built
+        /// with (resident narrower than manifest).
+        missing_plugin_ids: Vec<String>,
+        /// Ids the resident graph was built with that the manifest does not
+        /// record (resident wider than manifest).
+        extra_plugin_ids: Vec<String>,
+        /// Absolute path to the manifest compared against.
+        manifest_path: Option<PathBuf>,
+    },
 }
 
 /// Free-form per-acquisition diagnostics.
@@ -697,7 +715,10 @@ impl FilesystemGraphProvider {
         storage: &GraphStorage,
         workspace_root: &Path,
     ) -> Result<(Option<Manifest>, String), GraphAcquisitionError> {
-        if !storage.manifest_path().exists() {
+        // `exists()`, not a bare file check: a manifest a live persist has
+        // moved aside is waited out, not read as "no manifest", which would
+        // load the snapshot unverified (decision D-i8-1).
+        if !storage.exists() {
             return Ok((None, String::new()));
         }
 
@@ -772,7 +793,17 @@ impl FilesystemGraphProvider {
         }
     }
 
-    fn identity_from_manifest(manifest: Option<&Manifest>, workspace_root: &Path) -> GraphIdentity {
+    /// Assemble a [`GraphIdentity`] from a manifest, with
+    /// `plugin_selection_status: Exact` (the filesystem provider only reaches
+    /// this after `validate_plugin_selection` passed). Public so the daemon
+    /// provider fills `snapshot_sha256`, `manifest_built_at` and
+    /// `snapshot_format_version` from the same code and then overwrites the
+    /// status with its own verdict.
+    #[must_use]
+    pub fn identity_from_manifest(
+        manifest: Option<&Manifest>,
+        workspace_root: &Path,
+    ) -> GraphIdentity {
         GraphIdentity {
             snapshot_sha256: manifest.map(|m| m.snapshot_sha256.clone()),
             manifest_built_at: manifest.map(|m| m.built_at.clone()),
@@ -1296,6 +1327,7 @@ mod tests {
                 active_plugin_ids: plugin_ids.iter().map(|id| (*id).to_string()).collect(),
                 high_cost_mode: None,
             }),
+            macro_options: None,
         };
         manifest
             .save(storage.manifest_path())
@@ -1348,6 +1380,9 @@ mod tests {
     #[test]
     fn filesystem_provider_returns_invalid_path_for_outside_workspace() {
         let tmp = TempDir::new().expect("tempdir");
+        // The marker bounds every ancestor walk at `tmp`, so a graph above
+        // `TMPDIR` cannot reach the sibling.
+        fs::create_dir(tmp.path().join(".git")).expect("project marker");
         let workspace = tmp.path().join("workspace");
         fs::create_dir_all(&workspace).expect("mk workspace");
         // Build a real graph fixture so a workspace exists; this guarantees
@@ -1356,26 +1391,20 @@ mod tests {
         let plugins = build_plugin_manager_for_tests();
         build_test_fixture(&workspace, &["mock-rust"]);
 
-        // A sibling directory has no graph anywhere up the tree (as long as
-        // no ancestor of the tempdir has one). The provider must therefore
-        // surface NoGraph rather than IncompatibleGraph or LoadFailed.
+        // A sibling directory has no graph anywhere up to the marker. The
+        // provider must therefore surface NoGraph rather than
+        // IncompatibleGraph or LoadFailed.
         let sibling = tmp.path().join("sibling");
         fs::create_dir_all(&sibling).expect("mk sibling");
         let provider = FilesystemGraphProvider::new(Arc::new(plugins));
         let err = provider
             .acquire(fs_request(sibling.clone()))
             .expect_err("sibling without graph must fail");
-        // The strict spec says this fails BEFORE any graph load. The
-        // observable signal is either NoGraph (ancestor walk found nothing
-        // within the tempdir hierarchy) or InvalidPath if a host-level
-        // ancestor `.sqry/graph` is present. Either way the request_path
-        // is preserved.
+        // The strict spec says this fails BEFORE any graph load: the
+        // ancestor walk stops at the marker having found nothing.
         assert!(
-            matches!(
-                err,
-                GraphAcquisitionError::NoGraph { .. } | GraphAcquisitionError::InvalidPath { .. }
-            ),
-            "expected NoGraph or InvalidPath, got {err:?}"
+            matches!(err, GraphAcquisitionError::NoGraph { .. }),
+            "expected NoGraph, got {err:?}"
         );
     }
 
@@ -1532,6 +1561,68 @@ mod tests {
                     }
                     other => panic!("expected IncompatibleSnapshotFormat, got {other:?}"),
                 }
+            }
+            other => panic!("expected IncompatibleGraph, got {other:?}"),
+        }
+    }
+
+    /// T11 (surface parity W1): the filesystem provider loads the manifest's
+    /// own snapshot, so its verdict is `Exact` or
+    /// `IncompatibleUnknownPluginIds` and never `DivergesFromManifest`,
+    /// whether the manifest records fewer ids than the roster (roster wider),
+    /// the same ids, or an id the roster lacks.
+    #[test]
+    fn filesystem_provider_never_reports_diverges_from_manifest() {
+        let tmp = TempDir::new().expect("tempdir");
+
+        // Manifest narrower than the roster: the roster registers
+        // `mock-rust`, the manifest records nothing. The filesystem
+        // provider serves the manifest's snapshot, so this is Exact.
+        let narrower = tmp.path().join("narrower");
+        fs::create_dir_all(&narrower).expect("mk narrower");
+        build_test_fixture(&narrower, &[]);
+        let provider = FilesystemGraphProvider::new(Arc::new(build_plugin_manager_for_tests()));
+        let acquisition = provider
+            .acquire(fs_request(narrower.clone()))
+            .expect("empty selection loads");
+        assert_eq!(
+            acquisition.identity.plugin_selection_status,
+            PluginSelectionStatus::Exact
+        );
+
+        // Manifest equal to the roster: Exact.
+        let equal = tmp.path().join("equal");
+        fs::create_dir_all(&equal).expect("mk equal");
+        build_test_fixture(&equal, &["mock-rust"]);
+        let acquisition = provider
+            .acquire(fs_request(equal.clone()))
+            .expect("matching selection loads");
+        assert_eq!(
+            acquisition.identity.plugin_selection_status,
+            PluginSelectionStatus::Exact
+        );
+
+        // Manifest names an id the roster lacks: refused as unknown, not
+        // reported as divergence.
+        let unknown = tmp.path().join("unknown");
+        fs::create_dir_all(&unknown).expect("mk unknown");
+        build_test_fixture(&unknown, &["mock-rust", "w1-not-compiled"]);
+        let err = provider
+            .acquire(fs_request(unknown.clone()))
+            .expect_err("unknown id must refuse");
+        match err {
+            GraphAcquisitionError::IncompatibleGraph { status, .. } => {
+                assert!(
+                    matches!(
+                        status,
+                        PluginSelectionStatus::IncompatibleUnknownPluginIds { .. }
+                    ),
+                    "expected IncompatibleUnknownPluginIds, got {status:?}"
+                );
+                assert!(
+                    !matches!(status, PluginSelectionStatus::DivergesFromManifest { .. }),
+                    "the filesystem provider must never yield DivergesFromManifest"
+                );
             }
             other => panic!("expected IncompatibleGraph, got {other:?}"),
         }

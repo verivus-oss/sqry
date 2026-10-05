@@ -1,8 +1,9 @@
-//! Git integration for change-aware index updates
+//! Git integration: worktrees, ref resolution and change detection
 //!
-//! This module provides git-based change detection to enable 10-100x faster
-//! incremental index builds by processing only files that have changed since
-//! the last index build.
+//! This module provides git-based change detection (`GitChangeTracker`) that
+//! can list the files changed since a commit. No build uses it to skip
+//! files: every index build, `sqry update` and `sqry watch` included, parses
+//! every file.
 //!
 //! # Architecture
 //!

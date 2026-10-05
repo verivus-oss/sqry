@@ -106,8 +106,134 @@ pub fn canonicalize_for_hash(
     })
 }
 
+/// Whether `input` is an absolute path, in any form a response carries.
+///
+/// The forms: a `file:` URI ([`super::uri::is_file_uri`]: the scheme in
+/// any letter case, then `/`); a path that starts at a root (`/usr`,
+/// `\Windows`); a UNC, extended-length or device path (`\\server\share`,
+/// `\\?\C:\x`, `//server/share`); or a drive letter followed by a
+/// separator (`C:\x`, `C:/x`).
+///
+/// A relative path, a name (`alpha`, `S::m`, `a::b`), an enumerated value
+/// (`static_estimate`) and a URL of any other scheme (`https://...`) are
+/// not: a drive letter must be followed by a separator, so a qualified name
+/// whose first segment is one letter is not read as a drive. Under a
+/// contextual path key (the walker's `CONTEXTUAL_PATH_FIELDS`) a value that
+/// is exactly one such path is placed like a path key's value
+/// ([`classify_contextual_value`]).
+#[must_use]
+pub fn is_absolute_path_text(input: &str) -> bool {
+    if super::uri::is_file_uri(input) {
+        return true;
+    }
+    match input.as_bytes() {
+        [b'/' | b'\\', ..] => true,
+        [drive, b':', b'/' | b'\\', ..] => drive.is_ascii_alphabetic(),
+        _ => false,
+    }
+}
+
+/// How a string under a contextual path key (`source`, `target`, `src`,
+/// `dst`, `uri`, `url`: the walker's `CONTEXTUAL_PATH_FIELDS`) holds a path.
+/// See [`classify_contextual_value`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextualPath<'a> {
+    /// The value holds no path separator, or it is one URL of a scheme
+    /// other than `file` (`https://host/a/b`): a name, an enumerated value
+    /// or a web address, never rewritten.
+    NotAPath,
+    /// The value, with its surrounding whitespace trimmed, is exactly one
+    /// absolute path ([`is_absolute_path_text`]) with no whitespace in it.
+    /// It names a place, so it is redacted as a path key's value is:
+    /// relative to the workspace when it lies inside it, otherwise as an
+    /// outside path. Carries the trimmed text.
+    Anchored(&'a str),
+    /// The value holds a path separator but is not one absolute path: a
+    /// relative path (`src/lib.rs`, `./x`), a home path (`~/x`), a
+    /// drive-relative path (`C:proj\lib.rs`), a path after a prefix
+    /// (`path:/x`, `(/x)`), a path with whitespace in it, or prose that
+    /// holds a path (`read from /mnt/x`). Nothing says where such a value
+    /// lies, so it is never placed in the workspace: it is redacted as a
+    /// path outside it ([`redact_unanchored_path`]).
+    Unanchored,
+}
+
+/// Classify a string found under a contextual path key.
+///
+/// The rule is general rather than a list of prefixes: a value carries a
+/// path when it contains a path separator (`/` or `\`), except when it is a
+/// single URL of a scheme other than `file` (`scheme://...` with a scheme
+/// of two or more characters, so a drive letter is not a scheme, and no
+/// whitespace in the value). A `file:` URI in any letter case contains a
+/// separator, so it always carries a path. A name (`alpha`, `crate::foo`,
+/// `a.b.c`, `S::~S`), an enumerated value (`static_estimate`) and a drive
+/// letter with no separator (`C:cache`) carry none.
+///
+/// A name that itself contains a separator (an import specifier such as
+/// `github.com/org/pkg` or `./utils`, a route such as
+/// `route::GET::/api/users`, an operator such as `operator/`, a PHP name
+/// written with `\`) cannot be told from a path, so it is classified as one
+/// and redacted.
+#[must_use]
+pub fn classify_contextual_value(input: &str) -> ContextualPath<'_> {
+    if !input.contains(['/', '\\']) {
+        return ContextualPath::NotAPath;
+    }
+    let trimmed = input.trim();
+    let one_word = !trimmed.contains(char::is_whitespace);
+    if one_word && is_url_of_another_scheme(trimmed) {
+        return ContextualPath::NotAPath;
+    }
+    if one_word && is_absolute_path_text(trimmed) {
+        return ContextualPath::Anchored(trimmed);
+    }
+    ContextualPath::Unanchored
+}
+
+/// Whether `text` starts with `scheme://` for a scheme other than `file`,
+/// of two or more characters (RFC 3986: a letter, then letters, digits,
+/// `+`, `-` or `.`). A one-letter "scheme" is a drive letter (`C://x`).
+fn is_url_of_another_scheme(text: &str) -> bool {
+    let Some((scheme, _)) = text.split_once("://") else {
+        return false;
+    };
+    let mut chars = scheme.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && scheme.len() >= 2
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+        && !scheme.eq_ignore_ascii_case("file")
+}
+
+/// Redact a contextual value that holds a path but names no place
+/// ([`ContextualPath::Unanchored`]) as a path outside the workspace.
+///
+/// Only the text after its last separator survives (`<external>/lib.rs`),
+/// or, when `hash_filenames` is set (the strict preset), a hash of the whole
+/// trimmed value (`<external>/[hash]`). No directory of the value, and no
+/// text before its last separator, is ever emitted.
+#[must_use]
+pub fn redact_unanchored_path(
+    input: &str,
+    hash_filenames: bool,
+    hash_salt: Option<&str>,
+) -> String {
+    let trimmed = input.trim();
+    if hash_filenames {
+        return format!("<external>/[{}]", hash_path(trimmed, hash_salt));
+    }
+    let last = trimmed
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default();
+    format!("<external>/{last}")
+}
+
 fn parse_input_path(input: &str) -> Result<String, PathError> {
-    if input.starts_with("file://") {
+    if super::uri::is_file_uri(input) {
         super::uri::parse_file_uri(input)
     } else {
         Ok(input.to_string())

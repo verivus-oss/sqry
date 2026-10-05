@@ -317,6 +317,87 @@ pub struct PluginSelectionManifest {
     pub high_cost_mode: Option<String>,
 }
 
+/// Persisted Rust macro build options the snapshot was built with (surface
+/// parity W4, design W4-D6).
+///
+/// Written by the durable persistence transaction from
+/// `BuildConfig::macro_options` and read back by every persisting builder
+/// through `resolve_macro_options`, so a rebuild on any surface reuses the
+/// `--cfg` flags and the expand cache the index was created with unless a
+/// request replaces or resets them. Absent (the key is omitted) when the
+/// build carried neither, so a manifest written without macro options is
+/// byte-identical to one written before the record existed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MacroOptionsManifest {
+    /// Raw `--cfg` predicate strings, in the order they were given.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cfg_flags: Vec<String>,
+
+    /// Absolute path of the expand cache directory (`--expand-cache <DIR>`),
+    /// canonicalised at record time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expand_cache_dir: Option<String>,
+}
+
+/// The expand cache directory a build carried is not valid UTF-8, so the
+/// manifest, which records it as JSON text, cannot record it as given
+/// (surface parity W4, design W4-D11).
+///
+/// `resolve_macro_options` refuses such a directory where it is accepted, so
+/// no build that went through the resolver reaches this; a caller that
+/// bypasses the resolver gets this error instead of a lossy record that the
+/// next rebuild would refuse.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "expand cache directory {} is not valid UTF-8; the graph manifest records the directory as \
+     JSON text and does not record a path lossily",
+    dir.display()
+)]
+pub struct ExpandCachePathNotUtf8 {
+    /// The directory that could not be recorded.
+    pub dir: PathBuf,
+}
+
+impl MacroOptionsManifest {
+    /// The record for the options a build carried, or `None` when the
+    /// build carried neither a cfg flag nor an expand cache (nothing to
+    /// record, and the key stays out of the manifest).
+    ///
+    /// # Errors
+    ///
+    /// [`ExpandCachePathNotUtf8`] when the expand cache directory is not
+    /// valid UTF-8. The path is never recorded lossily: a record the next
+    /// rebuild cannot reuse is worse than no write.
+    pub fn try_from_build_options(
+        options: &crate::graph::unified::build::MacroBuildOptions,
+    ) -> Result<Option<Self>, ExpandCachePathNotUtf8> {
+        if options.is_empty() {
+            return Ok(None);
+        }
+        let expand_cache_dir = match &options.expand_cache_dir {
+            None => None,
+            Some(dir) => Some(
+                dir.to_str()
+                    .ok_or_else(|| ExpandCachePathNotUtf8 { dir: dir.clone() })?
+                    .to_string(),
+            ),
+        };
+        Ok(Some(Self {
+            cfg_flags: options.cfg_flags.clone(),
+            expand_cache_dir,
+        }))
+    }
+
+    /// The build options this record describes.
+    #[must_use]
+    pub fn to_build_options(&self) -> crate::graph::unified::build::MacroBuildOptions {
+        crate::graph::unified::build::MacroBuildOptions {
+            cfg_flags: self.cfg_flags.clone(),
+            expand_cache_dir: self.expand_cache_dir.as_ref().map(PathBuf::from),
+        }
+    }
+}
+
 impl BuildProvenance {
     /// Creates a new build provenance record.
     #[must_use]
@@ -413,15 +494,21 @@ pub struct Manifest {
 
     /// Git commit SHA that was indexed.
     ///
-    /// When present, enables git-aware incremental updates by tracking
-    /// which commit the graph was built from. If the repository has no
-    /// commits or is not a git repository, this will be `None`.
+    /// Records which commit the graph was built from. Nothing reads it to
+    /// update the graph: every rebuild parses every file. If the repository
+    /// has no commits or is not a git repository, this will be `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_indexed_commit: Option<String>,
 
     /// Plugin selection that built the persisted snapshot.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plugin_selection: Option<PluginSelectionManifest>,
+
+    /// Rust macro build options the snapshot was built with (surface parity
+    /// W4, design W4-D6). Absent when the build carried none, so the key is
+    /// omitted and older manifests load with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub macro_options: Option<MacroOptionsManifest>,
 }
 
 impl Manifest {
@@ -450,6 +537,7 @@ impl Manifest {
             confidence: HashMap::new(),
             last_indexed_commit: None,
             plugin_selection: None,
+            macro_options: None,
         }
     }
 
@@ -527,6 +615,13 @@ impl Manifest {
         plugin_selection: Option<PluginSelectionManifest>,
     ) -> Self {
         self.plugin_selection = plugin_selection;
+        self
+    }
+
+    /// Sets the persisted macro build options (surface parity W4, W4-D6).
+    #[must_use]
+    pub fn with_macro_options(mut self, macro_options: Option<MacroOptionsManifest>) -> Self {
+        self.macro_options = macro_options;
         self
     }
 }
@@ -1027,6 +1122,100 @@ mod tests {
 
         let json = serde_json::to_string(&manifest).unwrap();
         assert!(!json.contains("\"plugin_selection\""));
+    }
+
+    /// T8 (surface parity W4, invariant I1): a manifest written with no
+    /// macro options carries no `macro_options` key, so its JSON is what
+    /// the pre-W4 writer produced.
+    #[test]
+    fn manifest_without_macro_options_omits_the_key() {
+        let manifest = Manifest::new("/repo", 1, 1, "sha", BuildProvenance::new("1.0", "test"));
+        assert!(manifest.macro_options.is_none());
+        let json = serde_json::to_string(&manifest).expect("serialize");
+        assert!(
+            !json.contains("\"macro_options\""),
+            "no key without a record: {json}"
+        );
+        let default_record = MacroOptionsManifest::try_from_build_options(
+            &crate::graph::unified::build::MacroBuildOptions::default(),
+        );
+        assert_eq!(default_record, Ok(None), "default options record nothing");
+    }
+
+    /// T8 (surface parity W4, W4-D6): a record with a cfg flag and an
+    /// expand cache round-trips through JSON and back to build options.
+    #[test]
+    fn manifest_macro_options_round_trip() {
+        let options = crate::graph::unified::build::MacroBuildOptions {
+            cfg_flags: vec!["test".to_string(), "feature=serde".to_string()],
+            expand_cache_dir: Some(PathBuf::from("/abs/expand-cache")),
+        };
+        let record = MacroOptionsManifest::try_from_build_options(&options)
+            .expect("a UTF-8 path is recordable")
+            .expect("recorded");
+        assert_eq!(record.cfg_flags, vec!["test", "feature=serde"]);
+        assert_eq!(
+            record.expand_cache_dir.as_deref(),
+            Some("/abs/expand-cache")
+        );
+        let manifest = Manifest::new("/repo", 1, 1, "sha", BuildProvenance::new("1.0", "test"))
+            .with_macro_options(Some(record.clone()));
+        let json = serde_json::to_string(&manifest).expect("serialize");
+        assert!(json.contains("\"macro_options\""), "key present: {json}");
+        let round_trip: Manifest = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(round_trip.macro_options, Some(record.clone()));
+        assert_eq!(record.to_build_options(), options);
+
+        // A record with only cfg flags omits the cache key.
+        let cfg_only = MacroOptionsManifest::try_from_build_options(
+            &crate::graph::unified::build::MacroBuildOptions {
+                cfg_flags: vec!["unix".to_string()],
+                expand_cache_dir: None,
+            },
+        )
+        .expect("nothing to encode")
+        .expect("recorded");
+        let json = serde_json::to_string(&cfg_only).expect("serialize");
+        assert_eq!(json, "{\"cfg_flags\":[\"unix\"]}");
+    }
+
+    /// U2u (surface parity W4 round 2, design W4-D11): a directory that is
+    /// not valid UTF-8 is an error, never a lossy record; a non-ASCII UTF-8
+    /// directory is recorded byte for byte.
+    #[cfg(unix)]
+    #[test]
+    fn a_non_utf8_expand_cache_directory_is_not_recorded_lossily() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let mut name = b"/abs/expand-cache-".to_vec();
+        name.push(0xff);
+        let dir = PathBuf::from(std::ffi::OsString::from_vec(name));
+        let options = crate::graph::unified::build::MacroBuildOptions {
+            cfg_flags: vec!["test".to_string()],
+            expand_cache_dir: Some(dir.clone()),
+        };
+        let err = MacroOptionsManifest::try_from_build_options(&options)
+            .expect_err("a non-UTF-8 directory is not recordable");
+        assert_eq!(err, ExpandCachePathNotUtf8 { dir });
+        let rendered = err.to_string();
+        println!("{rendered}");
+        assert!(rendered.contains("not valid UTF-8"), "{rendered}");
+        assert!(!rendered.is_empty());
+    }
+
+    /// U2u, the accepted side (invariant I10).
+    #[test]
+    fn a_non_ascii_utf8_expand_cache_directory_is_recorded_exactly() {
+        let dir = "/abs/expand-cach\u{e9}-\u{3a9}-\u{43a}\u{435}\u{448}";
+        let options = crate::graph::unified::build::MacroBuildOptions {
+            cfg_flags: Vec::new(),
+            expand_cache_dir: Some(PathBuf::from(dir)),
+        };
+        let record = MacroOptionsManifest::try_from_build_options(&options)
+            .expect("UTF-8 is recordable")
+            .expect("recorded");
+        assert_eq!(record.expand_cache_dir.as_deref(), Some(dir));
+        assert_eq!(record.to_build_options(), options, "round-trips equal");
     }
 
     #[test]

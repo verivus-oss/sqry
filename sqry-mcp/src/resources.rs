@@ -482,6 +482,15 @@ Path arguments for every path-taking tool (`get_definition`,
 `semantic_search` `path`, `get_document_symbols`, ...) are
 workspace-relative (`src/lib.rs`) or normal filesystem paths. Do NOT
 prefix them with a `source_root_id` — `485f1995/src/lib.rs` is invalid.
+A relative path is read against the session's workspace (a client root,
+the last workspace, the configured root, or an index at or above the
+server's working directory); with none of these it is refused, and an
+absolute path names a directory with no index yet. A path with leading or
+trailing whitespace is refused (it is read exactly as given), and so is
+a path that resolves outside every client root the client listed. A root
+of another scheme or one naming a file is skipped; when every root the
+client listed is skipped, every request is refused (an invalid request
+naming the skipped roots), never served without the bound.
 Clients migrating from earlier responses: the per-root `path` field was
 replaced by `source_root_id`; it matches the `<source_root_id>/...`
 prefixes the minimal redaction preset emits in other tools' path fields.

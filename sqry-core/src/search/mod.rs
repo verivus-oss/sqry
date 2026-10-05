@@ -185,6 +185,17 @@ impl Searcher {
         Ok(all_matches)
     }
 
+    /// Check that `pattern` compiles under `config` the way [`Self::search`]
+    /// compiles it, without reading any file.
+    ///
+    /// # Errors
+    ///
+    /// The error [`Self::search`] gives for a pattern it cannot compile, or
+    /// for a mode it does not support.
+    pub fn check_pattern(pattern: &str, config: &SearchConfig) -> Result<()> {
+        Self::build_matcher(pattern, config).map(drop)
+    }
+
     fn build_matcher(pattern: &str, config: &SearchConfig) -> Result<RegexMatcher> {
         let mut matcher_builder = grep_regex::RegexMatcherBuilder::new();
         matcher_builder.case_insensitive(config.case_insensitive);

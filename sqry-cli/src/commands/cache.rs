@@ -19,13 +19,9 @@ use std::time::Duration;
 /// Returns an error if cache operations fail or stats cannot be collected.
 pub fn run_cache(cli: &Cli, action: &CacheAction) -> Result<()> {
     match action {
-        CacheAction::Stats { path } => {
-            let search_path = path.as_deref().unwrap_or(".");
-            show_cache_stats(cli, search_path)
-        }
+        CacheAction::Stats { path } => show_cache_stats(cli, path.as_deref()),
         CacheAction::Clear { path, confirm } => {
-            let search_path = path.as_deref().unwrap_or(".");
-            clear_cache(cli, search_path, *confirm);
+            clear_cache(path.as_deref(), *confirm);
             Ok(())
         }
         CacheAction::Prune {
@@ -49,10 +45,23 @@ pub fn run_cache(cli: &Cli, action: &CacheAction) -> Result<()> {
     }
 }
 
-/// Show cache statistics
-fn show_cache_stats(cli: &Cli, _path: &str) -> Result<()> {
-    // Create cache manager with default config
+/// The AST cache configuration `sqry cache stats <PATH>` and `sqry cache
+/// clear <PATH>` act on (surface parity W4, W4-D4): the environment's
+/// configuration, with the cache root at `<PATH>/.sqry-cache` when a path
+/// is given (an explicit path wins over `SQRY_CACHE_ROOT`, as flags win
+/// over environment elsewhere); without a path, the environment's root.
+fn cache_config_for(path: Option<&str>) -> CacheConfig {
     let config = CacheConfig::from_env();
+    match path {
+        Some(path) => config.with_cache_root(Path::new(path).join(CacheConfig::DEFAULT_CACHE_ROOT)),
+        None => config,
+    }
+}
+
+/// Show cache statistics
+fn show_cache_stats(cli: &Cli, path: Option<&str>) -> Result<()> {
+    let config = cache_config_for(path);
+    let cache_root = config.cache_root().display().to_string();
     let cache = CacheManager::new(config);
     let stats = cache.stats();
 
@@ -68,6 +77,7 @@ fn show_cache_stats(cli: &Cli, _path: &str) -> Result<()> {
                 "total_mb": bytes_to_mb_lossy(stats.total_bytes),
                 "hit_rate": stats.hit_rate(),
             },
+            "cache_root": cache_root,
         });
         println!("{}", serde_json::to_string_pretty(&json_stats)?);
     } else {
@@ -92,9 +102,8 @@ fn show_cache_stats(cli: &Cli, _path: &str) -> Result<()> {
         // Calculate effectiveness
         print_cache_effectiveness(stats.hits, stats.misses);
 
-        // Show cache location and disk usage
-        let cache_root =
-            std::env::var("SQRY_CACHE_ROOT").unwrap_or_else(|_| ".sqry-cache".to_string());
+        // Show cache location and disk usage: the root the manager above
+        // was built over (the `<PATH>` positional, else the environment).
         println!("Cache location: {cache_root}");
 
         // Show disk usage
@@ -164,7 +173,7 @@ fn bytes_to_mb_lossy(bytes: u64) -> f64 {
 }
 
 /// Clear the cache
-fn clear_cache(_cli: &Cli, _path: &str, confirm: bool) {
+fn clear_cache(path: Option<&str>, confirm: bool) {
     if !confirm {
         eprintln!("Error: Cache clear requires --confirm flag for safety");
         eprintln!();
@@ -175,8 +184,9 @@ fn clear_cache(_cli: &Cli, _path: &str, confirm: bool) {
         std::process::exit(1);
     }
 
-    // Create cache manager and clear it
-    let config = CacheConfig::from_env();
+    // Create the cache manager over the requested root and clear it
+    let config = cache_config_for(path);
+    let cache_root = config.cache_root().display().to_string();
     let cache = CacheManager::new(config);
 
     // Get stats before clearing
@@ -188,6 +198,7 @@ fn clear_cache(_cli: &Cli, _path: &str, confirm: bool) {
     let stats_after = cache.stats();
 
     println!("Cache cleared successfully");
+    println!("Cache location: {cache_root}");
     println!();
     println!("Removed:");
     println!("  Entries:     {}", stats_before.entry_count);
@@ -280,6 +291,11 @@ fn build_prune_options(
     if let Some(p) = path {
         options = options.with_target_dir(PathBuf::from(p));
     }
+
+    // The options are checked before the cache manager is created, which
+    // creates the cache root when it is missing: a prune with no retention
+    // policy writes nothing.
+    options.validate()?;
 
     Ok(options)
 }
@@ -426,7 +442,7 @@ fn run_expand_cache(
     // Expand each crate
     let mut results = Vec::new();
     for (name, path) in &target_crates {
-        let result = expand_single_crate(name, path, &workspace_root, &cache_dir, refresh)?;
+        let result = expand_single_crate(name, path, &cache_dir, refresh)?;
         results.push(result);
     }
 
@@ -518,13 +534,12 @@ fn is_cache_fresh(cache_path: &Path, current_hash: &str) -> bool {
 /// The output is a per-crate, qualified, kinded `generated_symbols` list, built
 /// by tree-sitter parsing (not a line heuristic) and routed through
 /// [`ExpandCache::write`] so writer and index-side reader share one path/key
-/// scheme. `workspace_root` is retained for signature compatibility with the
-/// caller; per-file attribution is not recoverable from `cargo expand` output,
-/// so ownership is carried structurally via each symbol's module scope chain.
+/// scheme. Per-file attribution is not recoverable from `cargo expand`
+/// output, so ownership is carried structurally via each symbol's module
+/// scope chain.
 fn expand_single_crate(
     crate_name: &str,
     crate_dir: &Path,
-    _workspace_root: &Path,
     cache_dir: &Path,
     refresh: bool,
 ) -> Result<CrateExpandResult> {

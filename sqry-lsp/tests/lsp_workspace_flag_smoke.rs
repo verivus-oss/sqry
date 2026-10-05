@@ -25,46 +25,14 @@ use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// Locate the `sqry` binary the same way `sqry-cli/tests/common::sqry_bin`
-/// does. Duplicated here so this LSP-crate test does not have to reach
-/// across the workspace boundary.
+/// Locate the `sqry` binary for testing.
+///
+/// Delegates to the one resolver, `sqry_core::test_support::binaries::sqry_binary`
+/// (surface parity W4, design W4-D13), which reads `SQRY_E2E_SQRY_BIN`, then
+/// `CARGO_BIN_EXE_sqry`, then `CARGO_TARGET_DIR` and the workspace `target`,
+/// debug before release, and panics naming every variable and candidate.
 fn sqry_bin() -> std::path::PathBuf {
-    if let Ok(path) = std::env::var("SQRY_E2E_SQRY_BIN") {
-        let p = std::path::PathBuf::from(path);
-        if p.is_file() {
-            return p;
-        }
-    }
-    if let Ok(path) = std::env::var("CARGO_BIN_EXE_sqry") {
-        return std::path::PathBuf::from(path);
-    }
-    let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    let workspace_dir = std::path::PathBuf::from(manifest_dir)
-        .parent()
-        .expect("workspace dir")
-        .to_path_buf();
-    let exe_suffix = std::env::consts::EXE_SUFFIX;
-    let make = |base: &str| -> std::path::PathBuf {
-        if exe_suffix.is_empty() {
-            std::path::PathBuf::from(base)
-        } else {
-            std::path::PathBuf::from(format!("{base}{exe_suffix}"))
-        }
-    };
-    let debug = workspace_dir.join(make("target/debug/sqry"));
-    let release = workspace_dir.join(make("target/release/sqry"));
-    if debug.exists() {
-        debug
-    } else if release.exists() {
-        release
-    } else {
-        panic!(
-            "Could not find sqry binary. Tried CARGO_BIN_EXE_sqry, {}, {}. \
-             Run `cargo build` first.",
-            debug.display(),
-            release.display(),
-        )
-    }
+    sqry_core::test_support::binaries::sqry_binary()
 }
 
 /// Send a single JSON-RPC message with LSP Content-Length framing.
@@ -142,6 +110,10 @@ fn workspace_flag_via_subprocess_drives_source_roots() {
     // Pre-create a temp workspace + a tiny .rs file so the indexer has
     // real content to walk.
     let tmp = TempDir::new().expect("create workspace tempdir");
+    // An empty `.git` makes the temp directory its own project, so an index
+    // or project above `TMPDIR` cannot make `sqry index` refuse it as nested
+    // (decision D-i8-60).
+    std::fs::create_dir(tmp.path().join(".git")).expect("project marker");
     let workspace_path = tmp
         .path()
         .canonicalize()

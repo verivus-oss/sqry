@@ -5,7 +5,8 @@
 //! execution and multiple output formats.
 
 use crate::args::{BatchFormat, Cli};
-use crate::commands::query::create_executor_with_plugins_for_cli;
+use crate::commands::query::{cli_auto_build_hook, create_executor_with_plugins_for_cli};
+use crate::index_discovery::find_nearest_index;
 use crate::output::{DisplaySymbol, JsonSymbol};
 use anyhow::{Context, Result, bail};
 use rayon::prelude::*;
@@ -46,7 +47,14 @@ pub fn run_batch(
     }
 
     let load_start = Instant::now();
-    let executor = create_executor_with_plugins_for_cli(cli, &workspace)?;
+    // Design D18: the batch executor loads through its own
+    // `get_or_load_graph`, so it carries the CLI's build hook (resolved
+    // at the nearest index root, or the workspace when there is none);
+    // without one it would never build.
+    let hook_root = find_nearest_index(&workspace)
+        .map_or_else(|| workspace.clone(), |location| location.index_root);
+    let executor = create_executor_with_plugins_for_cli(cli, &workspace)?
+        .with_auto_build_hook(cli_auto_build_hook(cli, &hook_root)?);
     let preload_elapsed = load_start.elapsed();
 
     let should_capture_results =

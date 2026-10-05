@@ -9,6 +9,10 @@
 //! tests drive the real handshake → load flow over a live IPC socket
 //! and assert the binding is honoured end-to-end.
 
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
+
 mod support;
 
 use std::path::PathBuf;

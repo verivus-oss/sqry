@@ -32,18 +32,27 @@ pub mod units;
 #[cfg(test)]
 pub(crate) mod test_support {
     use std::ffi::OsString;
-    use std::sync::{Mutex, MutexGuard};
 
-    static NOTIFY_SOCKET_LOCK: Mutex<()> = Mutex::new(());
-
+    /// Sets or unsets `NOTIFY_SOCKET` for one test and restores it on drop.
+    ///
+    /// Holds the crate-wide `TEST_ENV_LOCK` (surface parity W4 round 2,
+    /// W4-D14) rather than a mutex of its own: a module-local lock serialises
+    /// nothing against the other tests that write the environment under the
+    /// crate lock. The guard field drops after `Drop::drop` restores the
+    /// variable, so the restore also happens under the lock. The lock gate
+    /// (`tests/env_lock_discipline.rs`, decision D-i7-envlock-1) reads this as a
+    /// holder, whose guard covers its `drop` only: a test whose own reads the
+    /// gate follows takes the crate lock itself instead of keeping one.
     pub(crate) struct NotifySocketGuard {
         previous: Option<OsString>,
-        _lock: MutexGuard<'static, ()>,
+        _lock: crate::TestEnvGuard,
     }
 
     impl NotifySocketGuard {
         pub(crate) fn unset() -> Self {
-            let _lock = NOTIFY_SOCKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _lock = crate::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let previous = std::env::var_os("NOTIFY_SOCKET");
             unsafe {
                 std::env::remove_var("NOTIFY_SOCKET");
@@ -52,7 +61,9 @@ pub(crate) mod test_support {
         }
 
         pub(crate) fn set(value: &str) -> Self {
-            let _lock = NOTIFY_SOCKET_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            let _lock = crate::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             let previous = std::env::var_os("NOTIFY_SOCKET");
             unsafe {
                 std::env::set_var("NOTIFY_SOCKET", value);

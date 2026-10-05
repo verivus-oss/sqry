@@ -1,58 +1,82 @@
 //! File URI parsing and handling.
 //!
-//! Handles `file://` URIs according to RFC 8089, including:
-//! - Unix paths: `file:///path/to/file`
+//! Handles `file:` URIs according to RFC 8089, including:
+//! - Unix paths: `file:///path/to/file`, and the form with no authority,
+//!   `file:/path/to/file`
 //! - Windows paths: `file:///C:/path/to/file`
 //! - UNC paths: `file://server/share/path`
+//! - The local host named as the authority: `file://localhost/path`
 //! - Percent-encoded characters
+//!
+//! The scheme is matched in any letter case (`FILE:///x` is `file:///x`),
+//! as RFC 3986 makes URI schemes case-insensitive.
 
 use crate::PathError;
 
-/// Parse a `file://` URI and extract the filesystem path.
+/// Parse a `file:` URI and extract the filesystem path.
 ///
 /// # URI Formats
 ///
 /// | URI | Parsed Path |
 /// |-----|-------------|
 /// | `file:///home/user/file.rs` | `/home/user/file.rs` |
+/// | `FILE:///home/user/file.rs` | `/home/user/file.rs` |
+/// | `file:/home/user/file.rs` | `/home/user/file.rs` |
+/// | `file://localhost/home/user/file.rs` | `/home/user/file.rs` |
 /// | `file:///C:/Users/file.rs` | `C:/Users/file.rs` |
 /// | `file://server/share/path` | `\\server\share\path` |
 /// | `file:///foo%20bar.rs` | `/foo bar.rs` |
 ///
 /// # Errors
 ///
-/// Returns `PathError::NotFileUri` if input doesn't start with `file://`.
+/// Returns `PathError::NotFileUri` if the input is not a `file:` URI
+/// ([`is_file_uri`]).
 /// Returns `PathError::MalformedFileUri` for invalid syntax.
 pub fn parse_file_uri(uri: &str) -> Result<String, PathError> {
-    if !uri.starts_with("file://") {
+    let Some(after_scheme) = file_uri_rest(uri) else {
         return Err(PathError::NotFileUri);
-    }
+    };
 
-    let after_scheme = &uri[7..]; // Skip "file://"
-
-    if after_scheme.is_empty() {
-        return Err(PathError::MalformedFileUri);
-    }
-
-    // file:///path (Unix) or file:///C:/path (Windows)
-    if after_scheme.starts_with('/') {
-        // Check for Windows drive letter: file:///C:/path
-        let chars: Vec<char> = after_scheme.chars().collect();
-        if chars.len() >= 4 && chars[1].is_ascii_alphabetic() && chars[2] == ':' {
-            // Windows: file:///C:/path → C:/path
-            let path = percent_decode(&after_scheme[1..])?;
-            return Ok(path);
+    // `after_scheme` starts with `/`. Two slashes open an authority
+    // (`file://host/...`, empty for `file:///...`); one slash is the path
+    // itself (`file:/...`).
+    let path = match after_scheme.strip_prefix("//") {
+        None => after_scheme,
+        Some("") => return Err(PathError::MalformedFileUri),
+        Some(after_authority) if after_authority.starts_with('/') => after_authority,
+        Some(after_authority) => {
+            let Some((host, _)) = after_authority.split_once('/') else {
+                return Err(PathError::MalformedFileUri);
+            };
+            if !host.eq_ignore_ascii_case("localhost") {
+                // file://host/path → treat as UNC \\host\path
+                let unc = format!("\\\\{}", after_authority.replace('/', "\\"));
+                return Ok(unc);
+            }
+            // `localhost` names this machine (RFC 8089): the path follows it.
+            &after_authority[host.len()..]
         }
+    };
 
-        // Unix: file:///path → /path
-        percent_decode(after_scheme)
-    } else if after_scheme.contains('/') {
-        // file://host/path → treat as UNC \\host\path
-        let unc = format!("\\\\{}", after_scheme.replace('/', "\\"));
-        Ok(unc)
-    } else {
-        Err(PathError::MalformedFileUri)
+    // Check for Windows drive letter: /C:/path → C:/path
+    let chars: Vec<char> = path.chars().collect();
+    if chars.len() >= 4 && chars[1].is_ascii_alphabetic() && chars[2] == ':' {
+        return percent_decode(&path[1..]);
     }
+
+    // Unix: /path
+    percent_decode(path)
+}
+
+/// The text after the scheme when `s` is a `file:` URI: `file:` in any
+/// letter case followed by `/`.
+fn file_uri_rest(s: &str) -> Option<&str> {
+    let scheme = s.get(..5)?;
+    if !scheme.eq_ignore_ascii_case("file:") {
+        return None;
+    }
+    let rest = &s[5..];
+    rest.starts_with('/').then_some(rest)
 }
 
 /// Decode percent-encoded characters in URI paths.
@@ -132,11 +156,12 @@ fn percent_encode(s: &str) -> String {
     result
 }
 
-/// Check if a string looks like a file URI.
+/// Check if a string is a `file:` URI: the scheme `file:` in any letter
+/// case, followed by `/` (`file:///x`, `file://host/x`, `file:/x`).
 #[inline]
 #[must_use]
 pub fn is_file_uri(s: &str) -> bool {
-    s.starts_with("file://")
+    file_uri_rest(s).is_some()
 }
 
 #[cfg(test)]
@@ -217,6 +242,51 @@ mod tests {
         assert!(is_file_uri("file://server/share"));
         assert!(!is_file_uri("/path/to/file"));
         assert!(!is_file_uri("https://example.com"));
+    }
+
+    /// The scheme in any letter case, and the form with no authority, are
+    /// `file:` URIs; a `file:` with no `/` after it, or another scheme that
+    /// starts with `file`, is not.
+    #[test]
+    fn test_is_file_uri_any_case_and_no_authority() {
+        for uri in [
+            "FILE:///path",
+            "File://server/share",
+            "file:/path",
+            "fIlE:/C:/x",
+        ] {
+            assert!(is_file_uri(uri), "{uri}");
+        }
+        for text in ["file:", "file:path", "files:/x", "fil", "", "file\\x"] {
+            assert!(!is_file_uri(text), "{text}");
+        }
+    }
+
+    /// Every `file:` URI form parses to the path it names: any scheme case,
+    /// no authority, and the local host named as the authority, for Unix and
+    /// Windows paths alike.
+    #[test]
+    fn test_parse_every_file_uri_form() {
+        for (uri, path) in [
+            ("FILE:///home/user/file.rs", "/home/user/file.rs"),
+            ("file:/home/user/file.rs", "/home/user/file.rs"),
+            ("file://localhost/home/user/file.rs", "/home/user/file.rs"),
+            ("file://LocalHost/home/user/file.rs", "/home/user/file.rs"),
+            ("File:/C:/Users/file.rs", "C:/Users/file.rs"),
+            ("file://localhost/C:/Users/file.rs", "C:/Users/file.rs"),
+            ("file:/foo%20bar.rs", "/foo bar.rs"),
+            ("file:/", "/"),
+        ] {
+            assert_eq!(parse_file_uri(uri).ok().as_deref(), Some(path), "{uri}");
+        }
+        assert!(matches!(
+            parse_file_uri("file://localhost"),
+            Err(PathError::MalformedFileUri)
+        ));
+        assert_eq!(
+            parse_file_uri("FILE://server/share/path").ok().as_deref(),
+            Some("\\\\server\\share\\path")
+        );
     }
 
     #[test]

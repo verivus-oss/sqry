@@ -15,7 +15,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sqry_daemon::{
     DaemonConfig, EmptyGraphBuilder, IpcServer, RebuildDispatcher, SocketConfig, WorkspaceBuilder,
-    WorkspaceManager,
+    WorkspaceManager, WorkspaceRosterResolver,
     ipc::framing::{read_frame_json, write_frame_json},
     ipc::protocol::{DaemonHello, DaemonHelloResponse, JsonRpcError, JsonRpcResponse},
     ipc::shim_registry::ShimRegistry,
@@ -77,6 +77,24 @@ impl TestServer {
         builder: Arc<dyn WorkspaceBuilder>,
         config_in: DaemonConfig,
     ) -> Self {
+        Self::with_builder_config_and_roster(
+            builder,
+            config_in,
+            Arc::new(WorkspaceRosterResolver::new()),
+        )
+        .await
+    }
+
+    /// Surface parity W1: spawn a test server whose rebuild dispatcher
+    /// resolves rosters through `roster`. Tests plant a resident roster
+    /// narrower than a manifest by passing
+    /// `WorkspaceRosterResolver::pinned(...)` here and a
+    /// `RealWorkspaceBuilder` built over the same resolver.
+    pub async fn with_builder_config_and_roster(
+        builder: Arc<dyn WorkspaceBuilder>,
+        config_in: DaemonConfig,
+        roster: Arc<WorkspaceRosterResolver>,
+    ) -> Self {
         let tmp = TempDir::new().expect("tempdir");
         let sock_path = tmp.path().join("sqryd.sock");
         let config = Arc::new(DaemonConfig {
@@ -87,12 +105,7 @@ impl TestServer {
             ..config_in
         });
         let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
-        let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
-        let dispatcher = RebuildDispatcher::new(
-            Arc::clone(&manager),
-            Arc::clone(&config),
-            Arc::clone(&plugins),
-        );
+        let dispatcher = RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&config), roster);
         // Clone before consuming: the test harness holds one `Arc` handle,
         // `IpcServer::bind` consumes the other. Both share the same
         // underlying `RebuildDispatcher` state.
@@ -111,7 +124,13 @@ impl TestServer {
             shutdown.clone(),
         )
         .await
-        .expect("bind");
+        .expect("bind")
+        // The tests compare daemon-hosted payloads with the standalone
+        // executors' raw output and assert the paths in them, as the
+        // standalone server's own parity tests do with redaction off; the
+        // redaction under the default preset is tested on the real binary
+        // (`mcp_host_redaction.rs`).
+        .with_mcp_redaction(sqry_daemon::mcp_host::redaction::McpRedaction::disabled());
         let bound_path = server.socket_path().to_path_buf();
         let shim_registry = server.shim_registry();
         let handle = tokio::spawn(server.run());

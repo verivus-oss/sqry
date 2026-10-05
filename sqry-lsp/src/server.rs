@@ -76,6 +76,21 @@ impl SqryLanguageServer {
         Self { client, sessions }
     }
 
+    /// Send the graph refusal notices queued while the request ran, as
+    /// `window/showMessage` warnings: a request that reads around the graph
+    /// its root refused (a lookup of one file's symbols falling back to the
+    /// file's own text, a `workspace/symbol` folder left out) queues one per
+    /// refusal state ([`SessionManager::note_refusal`]), so the refusal is
+    /// visible without a warning per request. Every handler that can queue
+    /// one sends them before it answers: hover, definition, references,
+    /// document symbols, workspace symbols, code actions, code lenses, call
+    /// hierarchy preparation and the `sqry.*` commands.
+    async fn show_refusal_notices(&self) {
+        for notice in self.sessions.take_refusal_notices() {
+            let () = self.client.show_message(MessageType::WARNING, notice).await;
+        }
+    }
+
     /// Execute the custom `sqry/search` request.
     ///
     /// # Errors
@@ -151,7 +166,7 @@ impl SqryLanguageServer {
                     Ok(result)
                 }
                 Ok(Err(err)) => {
-                    let message = err.to_string();
+                    let message = crate::handlers::render_error_chain(&err);
                     self.emit_search_telemetry("error", start.elapsed(), None, Some(&message))
                         .await;
                     Err(map_error(err))
@@ -249,7 +264,7 @@ impl SqryLanguageServer {
                     Ok(result)
                 }
                 Ok(Err(err)) => {
-                    let message = err.to_string();
+                    let message = crate::handlers::render_error_chain(&err);
                     self.emit_relation_telemetry("error", start.elapsed(), None, Some(&message))
                         .await;
                     Err(map_error(err))
@@ -1190,7 +1205,7 @@ impl LanguageServer for SqryLanguageServer {
         let mut guard = HandlerGuard::new("hover");
         let session = self.sessions.clone();
         let handle = cancel::spawn_blocking(move || hover::handle(&session, &params));
-        match handle.await {
+        let response = match handle.await {
             Ok(Ok(result)) => {
                 log_handler_success("hover", guard.elapsed());
                 guard.mark_complete();
@@ -1206,7 +1221,9 @@ impl LanguageServer for SqryLanguageServer {
                 guard.mark_complete();
                 Err(map_join_error(&join_err))
             }
-        }
+        };
+        self.show_refusal_notices().await;
+        response
     }
 
     /// # Cancellation Safety
@@ -1222,23 +1239,26 @@ impl LanguageServer for SqryLanguageServer {
         let session = self.sessions.clone();
         let timeout = session.config().call_hierarchy.timeout;
         let handle = cancel::spawn_blocking(move || call_hierarchy::prepare(&session, &params));
-        self.run_call_hierarchy_with_timeout(
-            "call_hierarchy_prepare",
-            "prepare",
-            "callHierarchy/prepare",
-            timeout,
-            handle,
-            |result: Option<Vec<CallHierarchyItem>>| {
-                let total = result.as_ref().map_or(0, std::vec::Vec::len);
-                let metrics = CallHierarchyMetrics {
-                    total,
-                    returned: total,
-                    truncated: false,
-                };
-                (result, metrics)
-            },
-        )
-        .await
+        let response = self
+            .run_call_hierarchy_with_timeout(
+                "call_hierarchy_prepare",
+                "prepare",
+                "callHierarchy/prepare",
+                timeout,
+                handle,
+                |result: Option<Vec<CallHierarchyItem>>| {
+                    let total = result.as_ref().map_or(0, std::vec::Vec::len);
+                    let metrics = CallHierarchyMetrics {
+                        total,
+                        returned: total,
+                        truncated: false,
+                    };
+                    (result, metrics)
+                },
+            )
+            .await;
+        self.show_refusal_notices().await;
+        response
     }
 
     /// # Cancellation Safety
@@ -1324,7 +1344,7 @@ impl LanguageServer for SqryLanguageServer {
         let mut guard = HandlerGuard::new("definition");
         let session = self.sessions.clone();
         let handle = cancel::spawn_blocking(move || definition::handle(&session, &params));
-        match handle.await {
+        let response = match handle.await {
             Ok(Ok(result)) => {
                 log_handler_success("definition", guard.elapsed());
                 guard.mark_complete();
@@ -1340,7 +1360,9 @@ impl LanguageServer for SqryLanguageServer {
                 guard.mark_complete();
                 Err(map_join_error(&join_err))
             }
-        }
+        };
+        self.show_refusal_notices().await;
+        response
     }
 
     /// # Cancellation Safety
@@ -1353,7 +1375,7 @@ impl LanguageServer for SqryLanguageServer {
         let mut guard = HandlerGuard::new("references");
         let session = self.sessions.clone();
         let handle = cancel::spawn_blocking(move || references::handle(&session, &params));
-        match handle.await {
+        let response = match handle.await {
             Ok(Ok(result)) => {
                 log_handler_success("references", guard.elapsed());
                 guard.mark_complete();
@@ -1369,7 +1391,9 @@ impl LanguageServer for SqryLanguageServer {
                 guard.mark_complete();
                 Err(map_join_error(&join_err))
             }
-        }
+        };
+        self.show_refusal_notices().await;
+        response
     }
 
     /// # Cancellation Safety
@@ -1385,7 +1409,7 @@ impl LanguageServer for SqryLanguageServer {
         let mut guard = HandlerGuard::new("document_symbol");
         let session = self.sessions.clone();
         let handle = cancel::spawn_blocking(move || document_symbol::handle(&session, &params));
-        match handle.await {
+        let response = match handle.await {
             Ok(Ok(result)) => {
                 log_handler_success("document_symbol", guard.elapsed());
                 guard.mark_complete();
@@ -1401,7 +1425,9 @@ impl LanguageServer for SqryLanguageServer {
                 guard.mark_complete();
                 Err(map_join_error(&join_err))
             }
-        }
+        };
+        self.show_refusal_notices().await;
+        response
     }
 
     /// # Cancellation Safety
@@ -1417,10 +1443,28 @@ impl LanguageServer for SqryLanguageServer {
         let mut guard = HandlerGuard::new("workspace_symbol");
         let session = self.sessions.clone();
         let handle = cancel::spawn_blocking(move || workspace_symbol::handle(&session, &params));
-        match handle.await {
+        let response = match handle.await {
             Ok(Ok(result)) => {
                 log_handler_success("workspace_symbol", guard.elapsed());
                 guard.mark_complete();
+                // Every folder left out is logged to the client on every
+                // request (the answer is partial each time), with its
+                // refusal's kind and text; the notice below is shown once
+                // per refusal state.
+                for folder in result.iter().flat_map(|page| &page.refused) {
+                    let () = self
+                        .client
+                        .log_message(
+                            MessageType::WARNING,
+                            format!(
+                                "workspace/symbol: left out the workspace folder {} ({}): {}",
+                                folder.root.display(),
+                                folder.kind,
+                                folder.message
+                            ),
+                        )
+                        .await;
+                }
                 Ok(result.map(|page| {
                     page.items
                         .into_iter()
@@ -1438,7 +1482,9 @@ impl LanguageServer for SqryLanguageServer {
                 guard.mark_complete();
                 Err(map_join_error(&join_err))
             }
-        }
+        };
+        self.show_refusal_notices().await;
+        response
     }
 
     /// # Cancellation Safety
@@ -1451,7 +1497,7 @@ impl LanguageServer for SqryLanguageServer {
         let mut guard = HandlerGuard::new("code_action");
         let session = self.sessions.clone();
         let handle = cancel::spawn_blocking(move || code_action::handle(&session, &params));
-        match handle.await {
+        let response = match handle.await {
             Ok(Ok(result)) => {
                 log_handler_success("code_action", guard.elapsed());
                 guard.mark_complete();
@@ -1467,7 +1513,9 @@ impl LanguageServer for SqryLanguageServer {
                 guard.mark_complete();
                 Err(map_join_error(&join_err))
             }
-        }
+        };
+        self.show_refusal_notices().await;
+        response
     }
 
     /// `STEP_11_4` iter3 — `textDocument/diagnostic` dispatcher
@@ -1538,7 +1586,7 @@ impl LanguageServer for SqryLanguageServer {
         let mut guard = HandlerGuard::new("code_lens");
         let session = self.sessions.clone();
         let handle = cancel::spawn_blocking(move || codelens::handle(&session, &params));
-        match handle.await {
+        let response = match handle.await {
             Ok(Ok(outcome)) => {
                 log_handler_success("code_lens", guard.elapsed());
                 guard.mark_complete();
@@ -1558,7 +1606,9 @@ impl LanguageServer for SqryLanguageServer {
                 guard.mark_complete();
                 Err(map_join_error(&join_err))
             }
-        }
+        };
+        self.show_refusal_notices().await;
+        response
     }
 
     /// # Cancellation Safety
@@ -1583,7 +1633,7 @@ impl LanguageServer for SqryLanguageServer {
                 let handle = cancel::spawn_blocking(move || {
                     execute_command::execute(&session, &command, args)
                 });
-                match handle.await {
+                let response = match handle.await {
                     Ok(Ok(result)) => {
                         log_handler_success("execute_command", guard.elapsed());
                         guard.mark_complete();
@@ -1599,7 +1649,9 @@ impl LanguageServer for SqryLanguageServer {
                         guard.mark_complete();
                         Err(map_join_error(&join_err))
                     }
-                }
+                };
+                self.show_refusal_notices().await;
+                response
             }
         }
     }
@@ -1773,21 +1825,33 @@ impl Drop for HandlerGuard {
     }
 }
 
+/// Map a handler error to its wire error. A refusal
+/// ([`LspHandlerError::RequestFailed`]) is LSP `RequestFailed` and an
+/// internal failure `InternalError`; both carry the whole error chain, so a
+/// context added on the way up never hides the cause.
 fn map_error(err: anyhow::Error) -> RpcError {
     match err.downcast::<QueryError>() {
         Ok(query_err) => RpcError::invalid_params(query_err.to_string()),
-        Err(other) => match other.downcast::<LspHandlerError>() {
-            Ok(handler_err @ LspHandlerError::InvalidParams(_)) => RpcError {
-                code: ErrorCode::InvalidParams,
-                message: handler_err.to_string().into(),
-                data: None,
-            },
-            Err(other) => RpcError {
-                code: ErrorCode::InternalError,
-                message: other.to_string().into(),
-                data: None,
-            },
-        },
+        Err(other) => {
+            let message = crate::handlers::render_error_chain(&other);
+            match other.downcast::<LspHandlerError>() {
+                Ok(handler_err @ LspHandlerError::InvalidParams(_)) => RpcError {
+                    code: ErrorCode::InvalidParams,
+                    message: handler_err.to_string().into(),
+                    data: None,
+                },
+                Ok(LspHandlerError::RequestFailed { data, .. }) => RpcError {
+                    code: ErrorCode::ServerError(crate::handlers::LSP_REQUEST_FAILED),
+                    message: message.into(),
+                    data,
+                },
+                Err(_) => RpcError {
+                    code: ErrorCode::InternalError,
+                    message: message.into(),
+                    data: None,
+                },
+            }
+        }
     }
 }
 
@@ -1836,6 +1900,11 @@ fn map_call_hierarchy_error(err: call_hierarchy::CallHierarchyError) -> RpcError
             message: reason.into(),
             data: None,
         },
+        call_hierarchy::CallHierarchyError::Refused { message, data } => RpcError {
+            code: ErrorCode::ServerError(crate::handlers::LSP_REQUEST_FAILED),
+            message: message.into(),
+            data,
+        },
     }
 }
 
@@ -1852,6 +1921,13 @@ impl SqryLanguageServer {
     /// rebuild is aborted mid-operation, which is safe because the index can be rebuilt
     /// from scratch without leaving the system in an inconsistent state. The `ProgressGuard`
     /// ensures that `WorkDoneProgress` notifications are properly terminated.
+    ///
+    /// The arguments are positional: the directory to index (the session's
+    /// root when absent; any workspace folder, a path under one, or the
+    /// index root of a workspace folder's project is accepted, see
+    /// [`SessionManager::resolve_path`]), `force` (second, default
+    /// `false`), and the reset of the macro options the manifest records
+    /// (third, default `false`; [`index::rebuild_index_with_reset`]).
     async fn run_index_command(&self, arguments: Vec<Value>) -> RpcResult<()> {
         let path_override = arguments
             .first()
@@ -1861,6 +1937,13 @@ impl SqryLanguageServer {
         // Extract force flag (second argument, defaults to false)
         let force = arguments
             .get(1)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        // The reset of the recorded macro options (third argument, defaults
+        // to false): the remedy a refusal of the record names.
+        let reset_macro_options = arguments
+            .get(2)
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
@@ -1903,7 +1986,13 @@ impl SqryLanguageServer {
         let session = self.sessions.clone();
         let target_clone = target.clone();
         let rebuild = cancel::spawn_blocking(move || {
-            index::rebuild_index(&session, &target_clone, &reporter, force)
+            index::rebuild_index_with_reset(
+                &session,
+                &target_clone,
+                &reporter,
+                force,
+                reset_macro_options,
+            )
         });
 
         // Use ProgressGuard to ensure WorkDoneProgress is always ended
@@ -1912,7 +2001,12 @@ impl SqryLanguageServer {
         let summary = match rebuild.await {
             Ok(Ok(summary)) => summary,
             Ok(Err(err)) => {
-                guard.end(format!("✗ Index build failed: {err}")).await;
+                guard
+                    .end(format!(
+                        "✗ Index build failed: {}",
+                        crate::handlers::render_error_chain(&err)
+                    ))
+                    .await;
                 abort_progress_task(progress_task).await;
                 return Err(map_error(err));
             }
@@ -1927,11 +2021,19 @@ impl SqryLanguageServer {
 
         // End progress with success message
         guard
-            .end(format!(
-                "✓ Indexed {} symbols in {:.2}s",
-                summary.total_symbols,
-                summary.duration.as_secs_f64()
-            ))
+            .end(if summary.built {
+                format!(
+                    "✓ Indexed {} symbols in {:.2}s",
+                    summary.total_symbols,
+                    summary.duration.as_secs_f64()
+                )
+            } else {
+                format!(
+                    "✓ Loaded the existing index ({} symbols) in {:.2}s; pass force to rebuild",
+                    summary.total_symbols,
+                    summary.duration.as_secs_f64()
+                )
+            })
             .await;
         abort_progress_task(progress_task).await;
 
@@ -1958,6 +2060,7 @@ impl SqryLanguageServer {
                 "outcome": "success",
                 "symbols": summary.total_symbols,
                 "durationMs": summary.duration.as_millis(),
+                "built": summary.built,
             }))
             .await;
 
@@ -2376,8 +2479,9 @@ fn spawn_auto_index_task(target: PathBuf, client: Client, session: SessionManage
                 summary.duration.as_secs_f64()
             ),
             Ok(Err(err)) => {
-                warn!("Auto-index failed for {}: {err}", target.display());
-                format!("Auto-index failed: {err}")
+                let rendered = crate::handlers::render_error_chain(&err);
+                warn!("Auto-index failed for {}: {rendered}", target.display());
+                format!("Auto-index failed: {rendered}")
             }
             Err(join_err) => {
                 warn!("Auto-index task error for {}: {join_err}", target.display());

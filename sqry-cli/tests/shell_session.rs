@@ -178,3 +178,71 @@ fn shell_csv_and_tsv_modes_stay_machine_readable() {
         "tsv stderr must not contain human diagnostics: {tsv_stderr}"
     );
 }
+
+/// A shell query's refusal names its cause: `execute_query` adds the query
+/// as context over the session's error, and the printed line must carry
+/// that inner error too, not only the context.
+#[test]
+fn shell_query_error_names_its_cause() {
+    let project = project_with_rust_source();
+    index_project(&project);
+    let (_stdout, stderr) = run_shell_script(&project, &["kind:nosuchkind", "exit"]);
+    let line = stderr
+        .lines()
+        .find(|line| line.starts_with("Error: failed to execute query"))
+        .unwrap_or_else(|| panic!("instrument: the query was refused: {stderr}"));
+    assert!(
+        line.contains("Invalid value 'nosuchkind' for field 'kind'"),
+        "the shell's query error must carry its cause after the context: {line}"
+    );
+}
+
+/// `refresh` reloads the index; when the reload fails its refusal names the
+/// cause beneath `refresh_session`'s context. The snapshot is replaced with
+/// bytes that cannot load after the shell has loaded it.
+#[test]
+fn shell_refresh_error_names_its_cause() {
+    use std::io::{BufRead, BufReader};
+
+    let project = project_with_rust_source();
+    index_project(&project);
+    let mut child = StdCommand::new(sqry_bin())
+        .current_dir(project.path())
+        .arg("shell")
+        .arg(project.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to spawn sqry shell");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    let mut line = String::new();
+    loop {
+        line.clear();
+        assert!(
+            stdout.read_line(&mut line).expect("read stdout") > 0,
+            "instrument: the shell exited before loading the index"
+        );
+        if line.starts_with("Loaded index from") {
+            break;
+        }
+    }
+    let snapshot = project.path().join(".sqry/graph/snapshot.sqry");
+    assert!(snapshot.exists(), "instrument: the snapshot path");
+    fs::write(&snapshot, b"not a snapshot").unwrap();
+    {
+        let stdin = child.stdin.as_mut().expect("stdin is available");
+        writeln!(stdin, "refresh").unwrap();
+        writeln!(stdin, "exit").unwrap();
+    }
+    let output = child.wait_with_output().expect("read shell output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let line = stderr
+        .lines()
+        .find(|line| line.starts_with("Error: failed to reload index for"))
+        .unwrap_or_else(|| panic!("instrument: the refresh was refused: {stderr}"));
+    assert!(
+        line.contains("Invalid magic bytes"),
+        "the shell's refresh error must carry its cause after the context: {line}"
+    );
+}

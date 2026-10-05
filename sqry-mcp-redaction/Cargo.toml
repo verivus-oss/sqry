@@ -14,7 +14,6 @@ categories = ["development-tools", "encoding", "parser-implementations"]
 serde_json.workspace = true
 thiserror.workspace = true
 sha2.workspace = true
-regex.workspace = true
 log.workspace = true
 
 [dev-dependencies]

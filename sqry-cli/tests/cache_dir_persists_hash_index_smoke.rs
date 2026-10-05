@@ -8,9 +8,9 @@
 //! with `--cache-dir <T>`, and asserts:
 //!
 //! 1. The command exits successfully.
-//! 2. After the build finishes, `<T>/file_hashes.bin` exists (canonical
-//!    `HashIndex::save()` filename per
-//!    `sqry-core/src/indexing/incremental.rs:405`).
+//! 2. After the build finishes, `<T>/file_hashes.bin` exists (the
+//!    filename `HashIndex::save` in sqry-core `indexing/incremental.rs`
+//!    writes).
 //! 3. The artifact is non-empty.
 //! 4. `HashIndex::load(<T>)` decodes the artifact without error — i.e.
 //!    the postcard envelope round-trips through the public load API.
@@ -133,5 +133,139 @@ fn cache_dir_flag_persists_hash_index_to_target_dir() {
         entry_count >= 1,
         "loaded HashIndex covered zero files; expected >=1 entry for the \
          3 .rs files indexed (len={entry_count})",
+    );
+}
+
+/// The paths under `project` a refused call must leave as they were: the
+/// index directory and the hash-index file, each absent or with its bytes.
+fn written_state(project: &Path, cache: &Path) -> Vec<(String, Option<Vec<u8>>)> {
+    let manifest = project.join(".sqry").join("graph").join("manifest.json");
+    let snapshot = project.join(".sqry").join("graph").join("snapshot.sqry");
+    [manifest, snapshot, cache.to_path_buf()]
+        .into_iter()
+        .map(|path| (path.display().to_string(), fs::read(&path).ok()))
+        .collect()
+}
+
+/// A `--cache-dir` that names no directory the hash index can be written
+/// into is refused by name before anything is written, by `sqry index` and
+/// by `sqry update` alike: a file, a path under a file, and (on Unix) a link
+/// to nothing. Each used to build, fail the hash-index write after the build
+/// with a log line the CLI does not show, and exit 0 with no hash index
+/// written. An existing directory and one that does not exist yet are the
+/// accepted controls: both get `file_hashes.bin`.
+#[test]
+fn a_cache_dir_that_is_not_a_directory_is_refused_before_anything_is_written() {
+    let project = TempDir::new().expect("project");
+    let root = project.path();
+    fs::write(root.join("a.rs"), "fn alpha() -> u32 { 1 }\n").expect("a.rs");
+    fs::write(root.join("not-a-dir"), b"a file").expect("file");
+
+    let mut cases = vec![
+        ("a file", "not-a-dir".to_string(), "is not a directory"),
+        (
+            "a path under a file",
+            "not-a-dir/cache".to_string(),
+            "cannot be read",
+        ),
+    ];
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(root.join("gone"), root.join("dangling")).expect("link");
+        cases.push((
+            "a link to nothing",
+            "dangling".to_string(),
+            "is a link to nothing",
+        ));
+    }
+
+    for (case, dir, says) in &cases {
+        let cache = root.join(dir);
+        let before = written_state(root, &cache);
+        let output = run_isolated(root, &["index", ".", "--cache-dir", dir]);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "index, {case}: {err}");
+        assert!(
+            err.contains(&format!("--cache-dir {dir} {says}"))
+                && err.contains("nothing was written"),
+            "index, {case}: {err}"
+        );
+        assert_eq!(
+            written_state(root, &cache),
+            before,
+            "index, {case}: nothing was written"
+        );
+        assert!(
+            !root.join(".sqry").exists(),
+            "index, {case}: no index was built"
+        );
+    }
+
+    let output = run_isolated(root, &["index", "."]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (case, dir, says) in &cases {
+        let cache = root.join(dir);
+        let before = written_state(root, &cache);
+        let output = run_isolated(root, &["update", ".", "--cache-dir", dir]);
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(1), "update, {case}: {err}");
+        assert!(
+            err.contains(&format!("--cache-dir {dir} {says}"))
+                && err.contains("nothing was written"),
+            "update, {case}: {err}"
+        );
+        assert_eq!(
+            written_state(root, &cache),
+            before,
+            "update, {case}: nothing was written"
+        );
+    }
+
+    fs::create_dir(root.join("existing")).expect("existing dir");
+    for (command, dir) in [("update", "existing"), ("update", "fresh/nested")] {
+        let output = run_isolated(root, &[command, ".", "--cache-dir", dir]);
+        assert!(
+            output.status.success(),
+            "{command} {dir}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            root.join(dir).join("file_hashes.bin").is_file(),
+            "{command} {dir}: the hash index is written"
+        );
+    }
+}
+
+/// A hash index that cannot be written into an accepted `--cache-dir` fails
+/// the command before the index is persisted, instead of being logged at a
+/// level the CLI does not show while the command exits 0. The write is made
+/// to fail by a directory standing where its temporary file goes.
+#[test]
+fn a_hash_index_that_cannot_be_written_fails_the_command() {
+    let project = TempDir::new().expect("project");
+    let root = project.path();
+    fs::write(root.join("a.rs"), "fn alpha() -> u32 { 1 }\n").expect("a.rs");
+    fs::create_dir_all(root.join("cache").join("file_hashes.bin.tmp")).expect("blocker");
+
+    let output = run_isolated(root, &["index", ".", "--cache-dir", "cache"]);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{err}");
+    assert!(
+        err.contains(
+            "--cache-dir cache: the hash index could not be written; the index was not written"
+        ),
+        "{err}"
+    );
+    assert!(
+        !root
+            .join(".sqry")
+            .join("graph")
+            .join("manifest.json")
+            .exists(),
+        "{err}"
     );
 }

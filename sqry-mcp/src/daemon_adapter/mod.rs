@@ -390,3 +390,21 @@ pub fn tool_response_json<T: Serialize>(
 ) -> Result<serde_json::Value, McpError> {
     crate::response::build_tool_response(exec, false)
 }
+
+/// Build the `graph_metadata` block for a resident graph through the same
+/// constructor the standalone tools use (`build_graph_metadata`), so the
+/// daemon-hosted `rebuild_index` envelope reports `total_nodes`,
+/// `total_edges`, `languages` and `cross_language_edges` for the graph it
+/// just built instead of `None` (surface parity W1, S8).
+#[must_use]
+pub fn graph_metadata_for_resident_graph(
+    workspace_root: &std::path::Path,
+    graph: &CodeGraph,
+) -> crate::execution::GraphMetadata {
+    let snapshot = graph.snapshot();
+    crate::execution::graph_builders::build_graph_metadata(
+        Some(workspace_root),
+        Some(&snapshot),
+        None,
+    )
+}

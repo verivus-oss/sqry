@@ -106,7 +106,7 @@ zstd.workspace = true
 sha2.workspace = true
 xxhash-rust = { version = "0.8", features = ["xxh64"] }
 notify = { version = "8.2", default-features = false, features = ["macos_fsevent"] }
-similar = "3.1"  # Fast text diffing for content-based incremental indexing
+similar = "3.1"  # Text diffing; no sqry-core code calls it (content-based change detection is not implemented)
 smallvec = { version = "1.15", features = ["serde"] }  # Inline-allocation for ResolutionStep::Ambiguous candidates
 static_assertions = "1.1"  # Compile-time trait impl assertions for Gate 0b NodeIdBearing coverage matrix (Task 4)
 dhat = { version = "0.3", optional = true }

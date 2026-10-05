@@ -96,6 +96,15 @@ pub fn run_diff(
     // 1. Validate and resolve repository root
     let root = resolve_repo_root(path, cli)?;
 
+    // The plugin selection is resolved before anything is written: `sqry
+    // diff` refuses an override naming a plugin set other than the one the
+    // index records (an override naming the same set is accepted) and a
+    // manifest it cannot read, and those refusals used to come after both
+    // git worktrees were created. It is resolved before the identical-commit
+    // shortcut too, so identical and distinct refs are answered alike.
+    let resolved_plugins =
+        plugin_defaults::resolve_plugin_selection(cli, &root, PluginSelectionMode::Diff)?;
+
     // 2. Identical-OID fast-path: if both refs resolve to the same commit
     //    (e.g., `sqry diff HEAD HEAD`), the diff is provably empty. Skip
     //    worktree creation and graph builds, which on kernel-scale repos
@@ -132,8 +141,6 @@ pub fn run_diff(
     );
 
     // 3. Build graphs for both refs
-    let resolved_plugins =
-        plugin_defaults::resolve_plugin_selection(cli, &root, PluginSelectionMode::Diff)?;
     let config = BuildConfig::default();
 
     let base_graph = Arc::new(

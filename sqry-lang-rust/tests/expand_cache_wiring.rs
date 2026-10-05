@@ -470,3 +470,40 @@ fn missing_cargo_toml_degrades_gracefully() {
     );
     assert!(find_nodes_by_name(&snapshot, "widgets::Widget::derived_method").is_empty());
 }
+
+/// The Rust plugin reads the expand cache without creating it. A cache
+/// removed after the options were resolved used to be recreated, empty,
+/// by the parse itself (`ExpandCache::new`), so the build's own check
+/// after the parse found a directory and the graph silently lost every
+/// macro-generated symbol. The parse of one file over a missing cache
+/// directory must leave it missing (the build then refuses it).
+#[test]
+fn the_parse_never_creates_a_missing_expand_cache_directory() {
+    use sqry_core::graph::unified::build::StagingGraph;
+    use sqry_core::plugin::LanguagePlugin;
+
+    let fixture = Fixture::new();
+    let missing = fixture.cache_path.join("removed-after-resolution");
+    assert!(
+        !missing.exists(),
+        "precondition: the cache directory is gone"
+    );
+    let plugin = RustPlugin::default();
+    let file = fixture.crate_root.join("src/lib.rs");
+    let content = std::fs::read(&file).expect("read lib.rs");
+    let tree = plugin.parse_ast(&content).expect("parse lib.rs");
+    let mut staging = StagingGraph::new();
+    staging.set_macro_options(MacroBuildOptions {
+        expand_cache_dir: Some(missing.clone()),
+        ..MacroBuildOptions::default()
+    });
+    plugin
+        .graph_builder()
+        .expect("the Rust plugin builds graphs")
+        .build_graph(&tree, &content, &file, &mut staging)
+        .expect("a missing cache degrades this file, it does not fail it");
+    assert!(
+        !missing.exists(),
+        "the parse must not create the expand cache directory"
+    );
+}

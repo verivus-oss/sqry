@@ -555,8 +555,8 @@ fn run() -> Result<()> {
             metrics_format,
             cfg_flags,
             expand_cache,
+            no_macro_options,
             classpath,
-            no_classpath,
             classpath_depth,
             classpath_file,
             build_system,
@@ -574,10 +574,13 @@ fn run() -> Result<()> {
             *no_incremental,
             cache_dir.as_deref(),
             *metrics_format,
-            cfg_flags,
-            expand_cache.as_deref(),
+            &sqry_core::graph::unified::build::MacroOptionsRequest::try_from_flags(
+                cfg_flags,
+                expand_cache.as_deref(),
+                *no_macro_options,
+            )
+            .context("sqry index refused the macro build options; nothing was built")?,
             *classpath,
-            *no_classpath,
             *classpath_depth,
             classpath_file.as_deref(),
             build_system.as_deref(),
@@ -626,10 +629,8 @@ fn run() -> Result<()> {
             path,
             threads,
             stats,
-            no_incremental,
             cache_dir,
             classpath,
-            no_classpath,
             classpath_depth,
             classpath_file,
             build_system,
@@ -643,10 +644,8 @@ fn run() -> Result<()> {
                 update_path,
                 *threads,
                 *stats,
-                *no_incremental,
                 cache_dir.as_deref(),
                 *classpath,
-                *no_classpath,
                 *classpath_depth,
                 classpath_file.as_deref(),
                 build_system.as_deref(),
@@ -664,7 +663,6 @@ fn run() -> Result<()> {
             stats,
             build,
             classpath,
-            no_classpath,
             classpath_depth,
             classpath_file,
             build_system,
@@ -680,7 +678,6 @@ fn run() -> Result<()> {
                 *stats,
                 *build,
                 *classpath,
-                *no_classpath,
                 *classpath_depth,
                 classpath_file.clone(),
                 build_system.clone(),
@@ -1124,9 +1121,37 @@ struct SearchCommandArgs<'a> {
 fn handle_search_command(args: &SearchCommandArgs<'_>) -> Result<()> {
     let search_path = args.path.unwrap_or(args.cli.search_path());
 
-    // Validate index before execution if requested
-    if let Err(code) =
-        validate_index_if_requested(args.cli, search_path, args.validate, args.cli.auto_rebuild)
+    // Every argument is checked before anything is written: the alias name
+    // before the search runs and its history entry is recorded, and the
+    // search's own arguments before `--validate fail --auto-rebuild` may
+    // rebuild the index. A refused alias name ran nothing and wrote nothing.
+    // A refused search argument is the refusal the search itself gives
+    // without those flags, so it is answered the same way: recorded in the
+    // history as a failed search and worded as the search's own failure.
+    if let Some(alias_name) = args.save_as {
+        check_alias_name(alias_name)?;
+    }
+    if rebuild_may_precede_the_run(args.validate, args.cli.auto_rebuild)
+        && let Err(refused) = commands::check_search_arguments(
+            args.cli,
+            args.pattern,
+            args.cfg_filter,
+            args.macro_boundaries,
+            args.revision,
+        )
+    {
+        record_history(search_path, "search", args.history_argv, false);
+        return Err(refused.context("Search command failed"));
+    }
+
+    // Validate index before execution if requested. A revision search
+    // reads a revision the daemon holds, never the local index, so the local
+    // index is neither validated nor rebuilt for it: under `--validate fail
+    // --auto-rebuild` it used to be rebuilt, and the search then refused for
+    // want of the daemon.
+    if commands::daemon::revision_query_target_from_args(args.revision).is_none()
+        && let Err(code) =
+            validate_index_if_requested(args.cli, search_path, args.validate, args.cli.auto_rebuild)
     {
         std::process::exit(code);
     }
@@ -1201,8 +1226,36 @@ fn handle_query_command(
     // falling back to `cli.search_path()` (STEP_8 codex iter1 fix).
     let search_path = cli.resolve_subcommand_path(path)?;
 
-    // Validate index before execution if requested
-    if let Err(code) = validate_index_if_requested(cli, search_path, validate, cli.auto_rebuild) {
+    // Every argument is checked before anything is written, as for
+    // `search`: the alias name, and the query's own arguments when
+    // `--validate fail --auto-rebuild` may rebuild the index first. A
+    // refused query argument is recorded in the history as a failed query,
+    // as the query's own refusal of it is without those flags.
+    if let Some(alias_name) = save_as {
+        check_alias_name(alias_name)?;
+    }
+    if rebuild_may_precede_the_run(validate, cli.auto_rebuild)
+        && let Err(refused) = commands::check_query_arguments(
+            cli,
+            query,
+            search_path,
+            explain,
+            session,
+            no_parallel,
+            variables,
+            revision,
+        )
+    {
+        record_history(search_path, "query", history_argv, false);
+        return Err(refused);
+    }
+
+    // Validate index before execution if requested; not for a revision
+    // query, which reads a revision the daemon holds and never the local
+    // index (as for `search`).
+    if commands::daemon::revision_query_target_from_args(revision).is_none()
+        && let Err(code) = validate_index_if_requested(cli, search_path, validate, cli.auto_rebuild)
+    {
         std::process::exit(code);
     }
 
@@ -1236,6 +1289,21 @@ fn handle_query_command(
     Ok(())
 }
 
+/// `true` when [`validate_index_if_requested`] may rebuild and persist the
+/// index before the command runs (`--validate fail --auto-rebuild` over a
+/// stale index), so the command's arguments must be checked first.
+fn rebuild_may_precede_the_run(validate: ValidationMode, auto_rebuild: bool) -> bool {
+    matches!(validate, ValidationMode::Fail) && auto_rebuild
+}
+
+/// Refuse a `--save-as` name the alias store would refuse, before the
+/// command runs and records its history entry.
+fn check_alias_name(name: &str) -> Result<()> {
+    persistence::validate_alias_name(name)
+        .map_err(|err| anyhow::anyhow!("invalid --save-as alias name '{name}': {err}"))
+        .context("Failed to save alias; the command did not run")
+}
+
 /// Validate index staleness before query/search execution.
 ///
 /// Returns `Ok(())` if validation passes or is skipped.
@@ -1249,7 +1317,11 @@ fn validate_index_if_requested(
     use commands::graph::loader::{GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter};
     use std::path::Path;
 
-    const ORPHAN_THRESHOLD: f64 = 0.20;
+    /// The orphan ratio `--validate` trips above when
+    /// `--threshold-orphaned-files` is absent (surface parity W4, W4-D3).
+    const DEFAULT_ORPHAN_THRESHOLD: f64 = 0.20;
+    let configured_threshold = cli.threshold_orphaned_files;
+    let orphan_threshold = configured_threshold.unwrap_or(DEFAULT_ORPHAN_THRESHOLD);
 
     // Skip validation if not requested
     if matches!(validate, ValidationMode::Off) {
@@ -1293,8 +1365,8 @@ fn validate_index_if_requested(
         }
     }
 
-    // Calculate orphan ratio (avoid division by zero)
-    // Check against threshold (20%)
+    // Calculate orphan ratio (avoid division by zero) and compare it with
+    // the flag's threshold (default 20%).
     let orphan_ratio = if total_files > 0 {
         let orphaned_f = f64::from(u32::try_from(orphaned_files).unwrap_or(u32::MAX));
         let total_f = f64::from(u32::try_from(total_files).unwrap_or(u32::MAX));
@@ -1302,7 +1374,7 @@ fn validate_index_if_requested(
     } else {
         0.0
     };
-    let is_stale = orphan_ratio > ORPHAN_THRESHOLD;
+    let is_stale = orphan_ratio > orphan_threshold;
 
     match validate {
         ValidationMode::Fail if is_stale => {
@@ -1320,7 +1392,6 @@ fn validate_index_if_requested(
                     false,
                     None,
                     false,
-                    false,
                     crate::args::ClasspathDepthArg::Full,
                     None,
                     None,
@@ -1332,13 +1403,12 @@ fn validate_index_if_requested(
                     // auto-rebuild path always operates on an existing graph at
                     // `search_path`, so nested-index creation cannot apply.
                     false,
-                    // auto-rebuild does not carry `--cfg` / `--expand-cache`
-                    // (Phase 1a/1b): stale-index recovery rebuilds with today's
-                    // default behaviour.
-                    &[],
-                    None,
+                    // Surface parity W4 (W4-D7): the auto-rebuild leg carries no
+                    // flags of its own, so it reuses the macro options the
+                    // manifest records.
+                    &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
                 ) {
-                    eprintln!("Error: auto-rebuild failed: {err}");
+                    eprintln!("Error: auto-rebuild failed: {err:#}");
                     return Err(2);
                 }
                 return Ok(());
@@ -1365,7 +1435,6 @@ fn validate_index_if_requested(
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::fn_params_excessive_bools)] // CLI flags map directly to booleans.
 #[allow(unused_variables)] // Classpath params unused without jvm-classpath feature.
-#[allow(clippy::used_underscore_binding)] // underscore-prefixed flag mirrors CLI arg naming
 fn handle_index_command(
     cli: &Cli,
     path: Option<&str>,
@@ -1376,10 +1445,8 @@ fn handle_index_command(
     no_incremental: bool,
     cache_dir: Option<&str>,
     metrics_format: crate::args::MetricsFormat,
-    cfg_flags: &[String],
-    expand_cache: Option<&std::path::Path>,
+    macro_request: &sqry_core::graph::unified::build::MacroOptionsRequest,
     classpath: bool,
-    _no_classpath: bool,
     classpath_depth: crate::args::ClasspathDepthArg,
     classpath_file: Option<&std::path::Path>,
     build_system: Option<&str>,
@@ -1406,15 +1473,13 @@ fn handle_index_command(
             no_incremental,
             cache_dir,
             classpath,
-            _no_classpath,
             classpath_depth,
             classpath_file,
             build_system,
             force_classpath,
             no_build_tool,
             allow_nested,
-            cfg_flags,
-            expand_cache,
+            macro_request,
         )
         .context("Index command failed")?;
     }
@@ -1561,9 +1626,7 @@ const FLAGS_WITH_VALUES: &[&str] = &[
     "--fuzzy-field-distance",
     // Index validation (P1-14)
     "--validate",
-    "--threshold-dangling-refs",
     "--threshold-orphaned-files",
-    "--threshold-id-gaps",
     // Hybrid search
     "--context",
     "-C",

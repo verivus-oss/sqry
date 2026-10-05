@@ -203,14 +203,16 @@ and similar extensions for explicit "Rebuild Index" buttons).
 
 | Command | Trigger | Behaviour |
 |---------|---------|-----------|
-| `sqry.index` | Editor extension (e.g. "sqry: Rebuild Index" command palette entry) | Trigger an index rebuild for the active workspace. |
+| `sqry.index` | Editor extension (e.g. "sqry: Rebuild Index" command palette entry) | Rebuild (or, without `force` over an existing index, load) the index of a directory. Positional arguments: the directory (the session's root when absent; any workspace folder, a path under one, or the index root of a workspace folder's project, such as the git repository root a nested folder is indexed at), `force` (default `false`), and the reset of the macro options the index records (default `false`; the `sqry index --no-macro-options` of the editor, refused without `force` over an existing index). A refusal of the recorded macro options carries the arguments that drop them as `data.resetArguments`. |
 | `sqry.showCallers` | Code action `Find Callers of <name>` (`CodeActionKind::REFACTOR`, `is_preferred: true`) | Resolve the symbol at the cursor, run a references query with `include_declaration: false`, and return `{ command, context, symbol, results: { count, includeDeclaration, locations, nextPageToken } }`. |
 | `sqry.showReferences` | Code action `Show References for <name>` (`CodeActionKind::REFACTOR`) | Same as `showCallers` but with `include_declaration: true`. |
 | `sqry.explainSymbol` | Code action `Explain <name>` (`CodeActionKind::EMPTY`) | Resolve the symbol at the cursor and return `{ name, qualifiedName, language, signature, documentation }`. |
 
-All four commands take a single positional argument of shape
-`{ uri: string, position: { line: u32, character: u32 } }`. Unknown
-command names return `unsupported command: <name>`.
+`sqry.showCallers`, `sqry.showReferences` and `sqry.explainSymbol` take a
+single positional argument of shape
+`{ uri: string, position: { line: u32, character: u32 } }`; `sqry.index`
+takes the positional arguments its row names. Unknown command names
+return `unsupported command: <name>`.
 
 ---
 

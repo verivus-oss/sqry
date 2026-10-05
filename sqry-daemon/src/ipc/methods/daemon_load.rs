@@ -181,7 +181,17 @@ pub(crate) async fn handle(
         .await
         {
             Ok(Ok(graph)) => graph,
-            Ok(Err(daemon_err)) => return Err(MethodError::Daemon(daemon_err)),
+            Ok(Err(daemon_err)) => {
+                // The load failed, but the caller asked for the workspace
+                // to be watched: record the intent on the slot the failure
+                // left, so the `daemon/rebuild` that makes it resident
+                // starts the watcher (audit S2, D2E).
+                if let Some(ws) = ctx.manager.lookup(key) {
+                    ws.watch_wanted
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+                return Err(MethodError::Daemon(daemon_err));
+            }
             Err(join_err) if join_err.is_panic() => {
                 let reason = format_panic_payload(join_err);
                 return Err(MethodError::Daemon(DaemonError::WorkspaceBuildFailed {
@@ -197,7 +207,7 @@ pub(crate) async fn handle(
         }
 
         // Start the file watcher for this source root so subsequent
-        // edits trigger a debounced incremental rebuild. Best-effort:
+        // edits trigger a debounced rebuild. Best-effort:
         // `start_watching` logs (WARN) and never fails the load if the
         // watcher cannot be created (for example a non-git workspace).
         // Idempotent, so a repeated `daemon/load` for an already-watched

@@ -131,7 +131,7 @@ const DEFAULT_EXCLUDED_SOURCE_DIRS: &[&str] = &[
 
 const DEFAULT_EXCLUDED_SOURCE_DIR_PREFIXES: &[&str] = &["externals."];
 
-/// Rust-only, per-`index`-invocation macro / cfg build options.
+/// Rust-only macro / cfg build options of one graph build.
 ///
 /// This is a plain-data carrier owned by sqry-core (NOT by the Rust plugin) so
 /// that `BuildConfig` can hold it without sqry-core depending on
@@ -139,10 +139,17 @@ const DEFAULT_EXCLUDED_SOURCE_DIR_PREFIXES: &[&str] = &["externals."];
 /// core). Core carries the value opaquely; only the Rust builder interprets it,
 /// reading it off the per-file [`StagingGraph`] side channel at Pass 2.5.
 ///
-/// `Default` = today's behaviour (empty/none), so every `..BuildConfig::default()`
-/// construction site is unaffected. Phase 1a carries `cfg_flags` (`--cfg`);
-/// Phase 1b adds `expand_cache_dir` (`--expand-cache`).
-#[derive(Debug, Clone, Default)]
+/// The options are recorded in the graph manifest by the durable persistence
+/// transaction (`Manifest::macro_options`, surface parity W4, design W4-D6)
+/// and resolved once for every persisting builder by
+/// [`resolve_macro_options`](super::macro_options::resolve_macro_options)
+/// (design W4-D7): a rebuild on any surface (`sqry index --force`,
+/// `sqry update`, `sqry watch`, the daemon, the LSP, the MCP) reuses the
+/// recorded options unless its request replaces a component or resets both.
+/// `Default` (no cfg flag, no cache) is what a build with no record and no
+/// request gets; Phase 1a carries `cfg_flags` (`--cfg`), Phase 1b
+/// `expand_cache_dir` (`--expand-cache`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MacroBuildOptions {
     /// Raw `--cfg` predicate strings (e.g. `"unix"`, `"feature=serde"`).
     ///
@@ -160,6 +167,15 @@ pub struct MacroBuildOptions {
     /// execution-free: the index only reads and validates JSON, hashes source
     /// files, and parses `Cargo.toml`; it never runs `cargo` / `rustc`.
     pub expand_cache_dir: Option<std::path::PathBuf>,
+}
+
+impl MacroBuildOptions {
+    /// `true` when neither a cfg flag nor an expand cache is set (nothing
+    /// to record in the manifest).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.cfg_flags.is_empty() && self.expand_cache_dir.is_none()
+    }
 }
 
 /// Configuration for building the unified graph.
@@ -193,12 +209,13 @@ pub struct BuildConfig {
     /// to do when the budget is exceeded (fail or degrade to BFS).
     pub label_budget: LabelBudgetConfig,
 
-    /// Rust-only macro / cfg options for this `index` invocation.
+    /// Rust-only macro / cfg options for this build.
     ///
-    /// Empty by default (no behaviour change). Transient build-time input:
-    /// never serialised into the snapshot or the persisted build-config
-    /// manifest. Copied onto each per-file [`StagingGraph`] and read by the
-    /// Rust builder at Pass 2.5; ignored by the other 36 language plugins.
+    /// Empty by default. Copied onto each per-file [`StagingGraph`] and read
+    /// by the Rust builder at Pass 2.5; ignored by the other 36 language
+    /// plugins. Recorded in the manifest by
+    /// [`persist_durable_graph_transaction`] (surface parity W4, W4-D6) so
+    /// every later rebuild can reuse it.
     pub macro_options: MacroBuildOptions,
 }
 
@@ -446,6 +463,46 @@ pub fn build_unified_graph_with_progress_cancellable(
     build_unified_graph_inner(root, plugins, config, progress, cancellation)
 }
 
+/// Refuse a build whose expand cache directory is no longer a directory.
+///
+/// `resolve_macro_options` checked the directory when it resolved the
+/// options, but the directory can be removed between that check and the
+/// build, or during the parse. The Rust plugin opens the cache without
+/// creating it (`ExpandCache::open`), so a removed directory is not stood in
+/// for by a new, empty one; this check turns its absence into a build error
+/// instead of a graph silently missing every macro-generated symbol. `when`
+/// names the point of the check in the message. The full build and the
+/// incremental re-parse (`incremental_rebuild`) both check before and after
+/// they parse.
+pub(super) fn require_expand_cache_dir(options: &MacroBuildOptions, when: &str) -> GraphResult<()> {
+    let Some(dir) = options.expand_cache_dir.as_deref() else {
+        return Ok(());
+    };
+    match fs::metadata(dir) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(GraphBuilderError::IoError {
+            file: dir.to_path_buf(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::NotADirectory,
+                format!(
+                    "the expand cache directory this build was resolved with is no longer a \
+                     directory ({when}); the build is refused and nothing is written"
+                ),
+            ),
+        }),
+        Err(err) => Err(GraphBuilderError::IoError {
+            file: dir.to_path_buf(),
+            source: std::io::Error::new(
+                err.kind(),
+                format!(
+                    "the expand cache directory this build was resolved with is gone ({when}: \
+                     {err}); the build is refused and nothing is written"
+                ),
+            ),
+        }),
+    }
+}
+
 /// Internal implementation that returns the effective thread count alongside the graph.
 ///
 /// Used by [`build_and_persist_graph_with_progress`] to propagate the thread count
@@ -486,6 +543,10 @@ fn build_unified_graph_inner(
             reason: "No graph builders registered – cannot build code graph".to_string(),
         });
     }
+
+    // The expand cache the build was resolved with must still be there when
+    // the parse reads it; the reader never creates it.
+    require_expand_cache_dir(&config.macro_options, "before the parse")?;
 
     // Create progress tracker for this build
     let tracker = GraphBuildProgressTracker::new(progress);
@@ -931,6 +992,11 @@ fn build_unified_graph_inner(
     );
 
     let attempted = succeeded + parse_errors + timed_out;
+
+    // A directory removed during the parse left the files read after the
+    // removal without their cached symbols; the build is refused rather
+    // than finished narrower than the options it was resolved with.
+    require_expand_cache_dir(&config.macro_options, "after the parse")?;
 
     if attempted == 0 {
         log::warn!(
@@ -1699,11 +1765,42 @@ pub fn persist_and_analyze_graph(
 ///
 /// Ordering is part of the durability contract:
 ///
-/// 1. Remove any stale manifest first.
+/// 1. Move the old manifest aside first, and keep the old snapshot beside
+///    it.
 /// 2. Compact edges and write the canonical snapshot.
 /// 3. Persist graph analyses for the new identity.
 /// 4. Write `manifest.json` last as the commit point.
 ///
+/// A step that fails puts the old pair back before the error is returned
+/// (`PersistRollback`; a put-back that itself fails leaves its rollback
+/// set for recovery). Analyses a failed step wrote carry the identity of a
+/// manifest that was never committed, so readers ignore them
+/// (`AnalysisIdentity`). A crash or a kill mid-way can leave a rollback set
+/// and its marker, which [`recover_interrupted_persist`] resolves at the
+/// next hold of the root (decision D-i8-6 lists the cases).
+///
+/// Every persist of a root holds the root's persist lock ([`IndexWriteLock`],
+/// advisory, in `.sqry/graph/`) for its whole length and holds a ticket of
+/// this process's persist gate ([`PersistGate`]); the gate's close waits
+/// for every ticket (decision D-i8-6 records what both leave uncovered).
+///
+/// [`recover_interrupted_persist`]: crate::graph::unified::persistence::recover_interrupted_persist
+/// [`IndexWriteLock`]: crate::graph::unified::persistence::IndexWriteLock
+/// [`PersistGate`]: crate::graph::unified::persistence::PersistGate
+///
+/// The snapshot is written through [`save_to_path`], whose header carries
+/// no plugin versions: every index a production surface writes (CLI
+/// `sqry index` and `sqry update`, the daemon rebuild, the standalone MCP
+/// and the LSP, all of which come through here) has an empty
+/// `plugin_versions` header, so the manager a loader passes to
+/// `load_from_path` feeds a check (`validate_plugin_versions`) that
+/// iterates nothing. The roster a snapshot was built with is recorded in
+/// the manifest's `plugin_selection` block, and that block is what every
+/// surface classifies against (surface parity W1 round 2, design D13; the
+/// header field and its unused stamping writer are an owner question, not
+/// a property of this function).
+///
+/// [`save_to_path`]: crate::graph::unified::persistence::save_to_path
 /// # Errors
 ///
 /// Returns an error if any persistence, analysis, or manifest write step fails.
@@ -1716,8 +1813,8 @@ pub fn persist_durable_graph_transaction(
     use crate::graph::unified::analysis::{AnalysisIdentity, GraphAnalyses, compute_node_id_hash};
     use crate::graph::unified::persistence::manifest::write_manifest_bytes_atomic;
     use crate::graph::unified::persistence::{
-        BuildProvenance, GraphStorage, MANIFEST_SCHEMA_VERSION, Manifest, SNAPSHOT_FORMAT_VERSION,
-        save_to_path,
+        BuildProvenance, GraphStorage, IndexRemovedDuringPersist, IndexWriteLock,
+        MANIFEST_SCHEMA_VERSION, Manifest, SNAPSHOT_FORMAT_VERSION, save_to_path,
     };
     use crate::progress::IndexProgress;
     use chrono::Utc;
@@ -1733,36 +1830,51 @@ pub fn persist_durable_graph_transaction(
         effective_threads,
     } = request;
 
-    // Step 1: Ensure storage directories exist and remove old manifest
-    // Removing the manifest BEFORE writing the new snapshot ensures that
-    // readers see `storage.exists() == false` during the rebuild window.
-    // Without this, an interrupted rebuild (crash after snapshot write but
-    // before manifest write) would leave the old manifest paired with a
-    // new, potentially incompatible snapshot — violating the commit-point
-    // contract.
-    let storage = GraphStorage::new(root);
-    fs::create_dir_all(storage.graph_dir())
-        .with_context(|| format!("Failed to create {}", storage.graph_dir().display()))?;
+    // Step 0: Encode the macro options record before anything is written
+    // (surface parity W4, W4-D11). A directory the manifest cannot record as
+    // JSON text is refused here, before the old manifest is moved aside, so a
+    // refused build leaves the existing index exactly as it was; it is never
+    // recorded lossily.
+    let macro_options_record =
+        crate::graph::unified::persistence::MacroOptionsManifest::try_from_build_options(
+            &config.macro_options,
+        )
+        .with_context(|| {
+            format!(
+                "Refusing to persist the graph at {}: the macro build options cannot be recorded",
+                root.display()
+            )
+        })?;
 
-    if storage.exists() {
-        // Remove old manifest so readers don't see stale readiness.
-        // This MUST succeed before we overwrite the snapshot — otherwise a
-        // crash between snapshot write and manifest write leaves stale
-        // readiness (old manifest + new snapshot).  NotFound is harmless
-        // (race or already cleaned up); any other error is fatal.
-        match fs::remove_file(storage.manifest_path()) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!(
-                        "Failed to remove old manifest at {} — rebuild cannot proceed safely",
-                        storage.manifest_path().display()
-                    )
-                });
-            }
-        }
+    // Step 1: set the old pair aside. The old manifest is moved aside before
+    // the new snapshot is written, so the old manifest is not left beside a
+    // new snapshot (the commit-point contract; a reader waits for the lock
+    // instead of reading the window, decision D-i8-1). The old snapshot is
+    // kept beside it (a hard link, or a copy) for `PersistRollback`.
+    let storage = GraphStorage::new(root);
+    // A caller that took the persist lock before this (D-i8-2/D-i8-4/
+    // D-i8-5) persists under that hold, and nothing here creates the
+    // directory; a hold that is not on the lock file the path names is
+    // refused with the typed `IndexRemovedDuringPersist` (decision D-i8-6).
+    let caller_held = IndexWriteLock::held_any_by_this_thread(storage.graph_dir());
+    if caller_held && !IndexWriteLock::held_by_this_thread(storage.graph_dir()) {
+        return Err(IndexRemovedDuringPersist::new(storage.graph_dir()).into());
     }
+    let _in_flight = crate::graph::unified::persistence::PersistGate::global()
+        .enter()
+        .with_context(|| format!("Refusing to persist the graph at {}", root.display()))?;
+    let serialised = if caller_held {
+        IndexWriteLock::reenter(storage.graph_dir())
+            .ok_or_else(|| IndexRemovedDuringPersist::new(storage.graph_dir()))?
+    } else {
+        fs::create_dir_all(storage.graph_dir())
+            .with_context(|| format!("Failed to create {}", storage.graph_dir().display()))?;
+        IndexWriteLock::acquire(storage.graph_dir())?
+    };
+    let rollback = PersistRollback::begin(&storage)?;
+    crate::graph::unified::persistence::write_guard::run_mid_persist_hook(storage.graph_dir());
+    #[cfg(test)]
+    rollback_tests_seam::mid_persist(storage.graph_dir());
 
     // Step 2: Capture raw edge count before compaction changes it
     let raw_edge_count = graph.edge_count();
@@ -1906,6 +2018,10 @@ pub fn persist_durable_graph_transaction(
         confidence: graph.confidence().clone(),
         last_indexed_commit: get_git_head_commit(root),
         plugin_selection: plugin_selection.clone(),
+        // Surface parity W4 (W4-D6): record what this build was given so a
+        // rebuild on any surface can reuse it; `None` when it was given
+        // nothing, so the key stays out of the manifest. Encoded in Step 0.
+        macro_options: macro_options_record,
     };
 
     // Step 9: Serialize manifest to bytes and compute hash
@@ -1955,6 +2071,15 @@ pub fn persist_durable_graph_transaction(
             storage.manifest_path().display()
         )
     })?;
+    // Recorded on the lock file, so a persist waiting for the lock sees
+    // that an index was committed while it waited (decision D-i8-6).
+    if let Err(e) = serialised.record_commit() {
+        log::warn!(
+            "could not record the commit on the persist lock in {}: {e}",
+            storage.graph_dir().display()
+        );
+    }
+    rollback.commit();
 
     log::info!(
         "Manifest saved to {} (dedup edges: {}, raw edges: {})",
@@ -1978,6 +2103,289 @@ pub fn persist_durable_graph_transaction(
     };
 
     Ok((graph, build_result))
+}
+
+/// The old manifest and snapshot of an index while a durable persist
+/// replaces them ([`persist_durable_graph_transaction`]): set aside when the
+/// transaction begins and put back if it does not reach its commit point.
+///
+/// A marker (`.txn-begun.rollback-<tag>`) is written first and says the
+/// transaction has not committed; then the manifest is renamed aside (so
+/// readers see no index during the rebuild window, as the transaction
+/// always did) and the snapshot is hard linked aside (copied, through a
+/// temporary name, where links are not supported), so it stays in place
+/// for the fact-epoch read the new snapshot's write makes. At the commit
+/// point the marker is renamed to `.txn-committed.rollback-<tag>`, the
+/// set-aside files are removed and the marker last.
+///
+/// On drop without [`Self::commit`] the snapshot is put back first, and the
+/// manifest only once the snapshot is back, so the manifest reappears only
+/// beside the snapshot it describes; a snapshot written where none existed
+/// is removed. If the snapshot cannot be put back, the manifest stays aside
+/// with the marker: the index is absent, never torn, and the next hold of
+/// the root's persist lock puts the pair back
+/// ([`recover_interrupted_persist`]). The rollback names carry this
+/// process's id, the time and a counter, so two transactions never share
+/// one; the transaction runs under the root's persist lock, so a rollback
+/// set found by a later holder is always a leftover.
+///
+/// [`recover_interrupted_persist`]: crate::graph::unified::persistence::recover_interrupted_persist
+struct PersistRollback {
+    manifest_path: PathBuf,
+    snapshot_path: PathBuf,
+    manifest_aside: Option<PathBuf>,
+    snapshot_aside: Option<PathBuf>,
+    marker: Option<PathBuf>,
+    committed_marker: PathBuf,
+    snapshot_existed: bool,
+    committed: bool,
+}
+
+impl PersistRollback {
+    fn begin(storage: &crate::graph::unified::persistence::GraphStorage) -> Result<Self> {
+        use crate::graph::unified::persistence::write_guard::{
+            MARKER_BEGUN, MARKER_COMMITTED, ROLLBACK_MARK,
+        };
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let tag = format!(
+            "{ROLLBACK_MARK}{}-{now_secs}-{}",
+            std::process::id(),
+            SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        );
+        let aside = |path: &Path| {
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            storage.graph_dir().join(format!(".{name}{tag}"))
+        };
+        let manifest_existed = storage.exists();
+        let snapshot_existed = storage.snapshot_path().exists();
+        let marker = storage.graph_dir().join(format!("{MARKER_BEGUN}{tag}"));
+        write_synced(
+            &marker,
+            format!(
+                "begun snapshot_existed={} manifest_existed={}\n",
+                u8::from(snapshot_existed),
+                u8::from(manifest_existed)
+            )
+            .as_bytes(),
+        )
+        .with_context(|| {
+            format!(
+                "Failed to write the persist marker {}; rebuild cannot proceed safely",
+                marker.display()
+            )
+        })?;
+        let mut rollback = Self {
+            manifest_path: storage.manifest_path().to_path_buf(),
+            snapshot_path: storage.snapshot_path().to_path_buf(),
+            manifest_aside: None,
+            snapshot_aside: None,
+            marker: Some(marker),
+            committed_marker: storage.graph_dir().join(format!("{MARKER_COMMITTED}{tag}")),
+            snapshot_existed,
+            committed: false,
+        };
+        if manifest_existed {
+            let target = aside(storage.manifest_path());
+            match fs::rename(storage.manifest_path(), &target) {
+                Ok(()) => rollback.manifest_aside = Some(target),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "Failed to set aside the old manifest at {}; rebuild cannot proceed \
+                             safely",
+                            storage.manifest_path().display()
+                        )
+                    });
+                }
+            }
+        }
+        if snapshot_existed {
+            let target = aside(storage.snapshot_path());
+            let kept = fs::hard_link(storage.snapshot_path(), &target).or_else(|_| {
+                // A copy is not atomic: copy under a name recovery
+                // discards, then rename it into place.
+                let partial = storage
+                    .graph_dir()
+                    .join(format!(".snapshot.sqry.partial{tag}"));
+                // The copy reads the snapshot: only a regular file (reading
+                // a FIFO would wait for a writer).
+                if !fs::metadata(storage.snapshot_path()).is_ok_and(|m| m.is_file()) {
+                    return Err(std::io::Error::other("the snapshot is not a regular file"));
+                }
+                let copied = fs::copy(storage.snapshot_path(), &partial)
+                    .and_then(|_| fs::rename(&partial, &target));
+                if copied.is_err() {
+                    let _ = fs::remove_file(&partial);
+                }
+                copied
+            });
+            match kept {
+                Ok(()) => rollback.snapshot_aside = Some(target),
+                // Dropping `rollback` here puts the manifest back.
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!(
+                            "Failed to keep the old snapshot at {} for a rollback; rebuild \
+                             cannot proceed safely",
+                            storage.snapshot_path().display()
+                        )
+                    });
+                }
+            }
+        }
+        Ok(rollback)
+    }
+
+    /// The transaction reached its commit point: the old pair is not
+    /// needed. The marker says so first, so a crash while the set-aside
+    /// files are removed is never taken for an interrupted persist;
+    /// removing the files is best effort (a leftover is removed by the
+    /// next hold of the persist lock).
+    fn commit(mut self) {
+        self.committed = true;
+        let marker = self.marker.take();
+        let marker = match marker {
+            Some(begun) => match fs::rename(&begun, &self.committed_marker) {
+                Ok(()) => Some(self.committed_marker.clone()),
+                Err(e) => {
+                    log::warn!("could not mark {} committed: {e}", begun.display());
+                    Some(begun)
+                }
+            },
+            None => None,
+        };
+        for aside in [self.manifest_aside.take(), self.snapshot_aside.take()]
+            .into_iter()
+            .flatten()
+            .chain(marker)
+        {
+            if let Err(e) = fs::remove_file(&aside) {
+                log::warn!("could not remove {} after a persist: {e}", aside.display());
+            }
+        }
+    }
+}
+
+/// Write `bytes` to a new file at `path` and flush it to disk.
+fn write_synced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut file = fs::File::create(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
+}
+
+/// A rename the rollback puts a file back with. Tests inject a failure
+/// into the snapshot's put-back here ([`rollback_tests_seam`]).
+fn put_back(from: &Path, to: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    rollback_tests_seam::put_back_fault(to)?;
+    fs::rename(from, to)
+}
+
+impl Drop for PersistRollback {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+        // The snapshot first: the manifest goes back only beside the
+        // snapshot it describes.
+        let snapshot_back = if let Some(aside) = self.snapshot_aside.take() {
+            match put_back(&aside, &self.snapshot_path) {
+                Ok(()) => true,
+                Err(e) => {
+                    log::error!(
+                        "a failed persist could not put the old snapshot back from {}: {e}; \
+                         the index stays absent and the set-aside pair stays for recovery",
+                        aside.display()
+                    );
+                    false
+                }
+            }
+        } else if !self.snapshot_existed {
+            match fs::remove_file(&self.snapshot_path) {
+                Ok(()) => true,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+                Err(e) => {
+                    log::error!(
+                        "a failed persist could not remove the snapshot it wrote at {}: {e}",
+                        self.snapshot_path.display()
+                    );
+                    false
+                }
+            }
+        } else {
+            true
+        };
+        if !snapshot_back {
+            return;
+        }
+        if let Some(aside) = self.manifest_aside.take()
+            && let Err(e) = put_back(&aside, &self.manifest_path)
+        {
+            log::error!(
+                "a failed persist could not put the old manifest back from {}: {e}; the \
+                 set-aside manifest stays for recovery",
+                aside.display()
+            );
+            return;
+        }
+        if let Some(marker) = self.marker.take() {
+            let _ = fs::remove_file(marker);
+        }
+    }
+}
+
+/// Test seams of the persist transaction: a closure the transaction runs
+/// once the old pair is aside, and an injected failure of the snapshot's
+/// put-back. Both are per thread, so parallel tests do not see each other's.
+#[cfg(test)]
+mod rollback_tests_seam {
+    use std::cell::{Cell, RefCell};
+    use std::path::Path;
+
+    /// A closure run once the old pair is aside.
+    pub(super) type MidPersistHook = Box<dyn FnMut(&Path)>;
+
+    thread_local! {
+        static MID_PERSIST: RefCell<Option<MidPersistHook>> = RefCell::new(None);
+        static FAIL_SNAPSHOT_PUT_BACK: Cell<bool> = const { Cell::new(false) };
+    }
+
+    pub(super) fn set_mid_persist(hook: Option<MidPersistHook>) {
+        MID_PERSIST.with(|slot| *slot.borrow_mut() = hook);
+    }
+
+    pub(super) fn fail_snapshot_put_back(fail: bool) {
+        FAIL_SNAPSHOT_PUT_BACK.with(|cell| cell.set(fail));
+    }
+
+    pub(super) fn mid_persist(graph_dir: &Path) {
+        MID_PERSIST.with(|slot| {
+            if let Some(hook) = slot.borrow_mut().as_mut() {
+                hook(graph_dir);
+            }
+        });
+    }
+
+    pub(super) fn put_back_fault(to: &Path) -> std::io::Result<()> {
+        let snapshot = to.file_name().is_some_and(|name| name == "snapshot.sqry");
+        if snapshot && FAIL_SNAPSHOT_PUT_BACK.with(Cell::get) {
+            return Err(std::io::Error::other(
+                "injected EIO on the snapshot put-back",
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Build unified graph with progress, persist snapshot + manifest, and run analysis.
@@ -2049,6 +2457,19 @@ pub fn get_git_head_commit(path: &Path) -> Option<String> {
         }
     }
     None
+}
+
+/// How many files a build of `root` with `plugins` and `config` would hand
+/// to a plugin: the files the build's own walk finds that a plugin of the
+/// roster claims. For sizing a build before it runs (the daemon reserves
+/// memory for a rebuild under the persist lock with it, decision D-i8-5);
+/// it walks the tree, as the build does.
+#[must_use]
+pub fn count_buildable_files(root: &Path, plugins: &PluginManager, config: &BuildConfig) -> usize {
+    find_source_files(root, config)
+        .iter()
+        .filter(|path| plugins.plugin_for_path(path).is_some())
+        .count()
 }
 
 /// Find source files in the given directory.
@@ -3103,6 +3524,187 @@ mod tests {
         assert!(!build_result.root_path.is_empty(), "Should have root path");
     }
 
+    /// A graph builder that removes a directory the first time it runs, then
+    /// builds what `SimpleGraphBuilder` builds: the expand cache vanishing
+    /// during the parse.
+    struct CacheRemovingGraphBuilder {
+        dir: PathBuf,
+    }
+
+    impl GraphBuilder for CacheRemovingGraphBuilder {
+        fn build_graph(
+            &self,
+            tree: &Tree,
+            content: &[u8],
+            file: &Path,
+            staging: &mut StagingGraph,
+        ) -> GraphResult<()> {
+            let _ = fs::remove_dir_all(&self.dir);
+            SimpleGraphBuilder.build_graph(tree, content, file, staging)
+        }
+
+        fn language(&self) -> Language {
+            Language::Rust
+        }
+    }
+
+    fn expand_cache_config(dir: &Path) -> BuildConfig {
+        BuildConfig {
+            macro_options: MacroBuildOptions {
+                cfg_flags: vec![],
+                expand_cache_dir: Some(dir.to_path_buf()),
+            },
+            ..BuildConfig::default()
+        }
+    }
+
+    /// A build whose expand cache directory is gone before the parse is
+    /// refused naming the directory, and the directory is not recreated;
+    /// the same build with the directory present succeeds.
+    #[test]
+    fn a_build_refuses_an_expand_cache_removed_before_the_parse() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(temp_dir.path().join("test.rs"), "fn main() {}").expect("write");
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-simple",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(SimpleGraphBuilder)),
+        )));
+        let cache = temp_dir.path().join("expand-cache");
+
+        let err = build_unified_graph(temp_dir.path(), &plugins, &expand_cache_config(&cache))
+            .expect_err("a missing expand cache is refused");
+        match err
+            .downcast_ref::<GraphBuilderError>()
+            .expect("a GraphBuilderError")
+        {
+            GraphBuilderError::IoError { file, source } => {
+                assert_eq!(file, &cache);
+                assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
+            }
+            other => panic!("expected IoError, got {other:?}"),
+        }
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains(&cache.display().to_string())
+                && rendered.contains("before the parse"),
+            "{rendered}"
+        );
+        assert!(!cache.exists(), "the build did not recreate the directory");
+
+        fs::write(&cache, b"a file").expect("file");
+        let err = build_unified_graph(temp_dir.path(), &plugins, &expand_cache_config(&cache))
+            .expect_err("a file is not an expand cache");
+        assert!(
+            matches!(err.downcast_ref::<GraphBuilderError>(), Some(GraphBuilderError::IoError { source, .. }) if source.kind() == std::io::ErrorKind::NotADirectory),
+            "{err:?}"
+        );
+        fs::remove_file(&cache).expect("remove file");
+
+        fs::create_dir(&cache).expect("cache dir");
+        build_unified_graph(temp_dir.path(), &plugins, &expand_cache_config(&cache))
+            .expect("the build with its directory present succeeds");
+    }
+
+    /// A directory removed during the parse refuses the build after the
+    /// parse instead of finishing without the cached symbols.
+    #[test]
+    fn a_build_refuses_an_expand_cache_removed_during_the_parse() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(temp_dir.path().join("test.rs"), "fn main() {}").expect("write");
+        let cache = temp_dir.path().join("expand-cache");
+        fs::create_dir(&cache).expect("cache dir");
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-removing",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(CacheRemovingGraphBuilder { dir: cache.clone() })),
+        )));
+        let err = build_unified_graph(temp_dir.path(), &plugins, &expand_cache_config(&cache))
+            .expect_err("a cache removed during the parse is refused");
+        let rendered = err.to_string();
+        assert!(
+            matches!(err.downcast_ref::<GraphBuilderError>(), Some(GraphBuilderError::IoError { file, .. }) if file == &cache)
+                && rendered.contains("after the parse"),
+            "{err:?}"
+        );
+        assert!(!cache.exists(), "the build did not recreate the directory");
+    }
+
+    /// U2u (surface parity W4 round 2, design W4-D11): a caller that bypasses
+    /// `resolve_macro_options` and hands the persistence transaction an
+    /// expand cache directory that is not valid UTF-8 is refused before
+    /// anything is written. The existing index keeps its manifest and its
+    /// snapshot byte for byte, and no lossy record appears.
+    #[cfg(unix)]
+    #[test]
+    fn persistence_refuses_an_unrecordable_expand_cache_before_writing() {
+        use sha2::{Digest, Sha256};
+        use std::os::unix::ffi::OsStringExt;
+
+        let temp_dir = TempDir::new().expect("temp dir");
+        fs::write(
+            temp_dir.path().join("test.rs"),
+            "fn main() {} fn helper() {}",
+        )
+        .expect("write test file");
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-simple",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(SimpleGraphBuilder)),
+        )));
+
+        build_and_persist_graph(
+            temp_dir.path(),
+            &plugins,
+            &BuildConfig::default(),
+            "test:first",
+        )
+        .expect("the first index persists");
+        let storage = crate::graph::unified::persistence::GraphStorage::new(temp_dir.path());
+        let digest = |path: &Path| hex::encode(Sha256::digest(fs::read(path).expect("read")));
+        let manifest_before = digest(storage.manifest_path());
+        let snapshot_before = digest(storage.snapshot_path());
+
+        let mut name = b"expand-cache-".to_vec();
+        name.push(0xff);
+        let unrecordable = temp_dir.path().join(std::ffi::OsString::from_vec(name));
+        let config = BuildConfig {
+            macro_options: MacroBuildOptions {
+                cfg_flags: vec!["test".to_string()],
+                expand_cache_dir: Some(unrecordable.clone()),
+            },
+            ..BuildConfig::default()
+        };
+        let graph = build_unified_graph(temp_dir.path(), &plugins, &BuildConfig::default())
+            .expect("the graph builds");
+        let err = persist_and_analyze_graph(
+            graph,
+            temp_dir.path(),
+            &plugins,
+            &config,
+            "test:unrecordable",
+            None,
+            no_op_reporter(),
+            1,
+        )
+        .expect_err("an unrecordable expand cache directory must be refused");
+        let rendered = format!("{err:#}");
+        println!("{rendered}");
+        assert!(rendered.contains("not valid UTF-8"), "{rendered}");
+
+        let manifest_after = digest(storage.manifest_path());
+        let snapshot_after = digest(storage.snapshot_path());
+        println!("manifest sha256 {manifest_before} -> {manifest_after}");
+        println!("snapshot sha256 {snapshot_before} -> {snapshot_after}");
+        assert_eq!(manifest_after, manifest_before, "the manifest is untouched");
+        assert_eq!(snapshot_after, snapshot_before, "the snapshot is untouched");
+        let manifest = storage.load_manifest().expect("manifest still loads");
+        assert_eq!(manifest.macro_options, None, "no lossy record was written");
+    }
+
     /// Deduplicated `edge_count` is always <= `raw_edge_count`.
     #[test]
     fn test_build_result_edge_count_le_raw() {
@@ -3305,12 +3907,14 @@ mod tests {
         );
     }
 
-    /// Regression test: old manifest is removed at start of rebuild.
+    /// Regression test: a rebuild replaces the manifest.
     ///
-    /// Verifies that `build_and_persist_graph_with_progress()` removes any
-    /// existing manifest before writing the new snapshot. This prevents the
-    /// inconsistent state where an old manifest pairs with a new snapshot
-    /// after an interrupted rebuild.
+    /// Checks the outcome only: after a second build the manifest carries
+    /// the rebuild's `built_at` and provenance. The persist moves the old
+    /// manifest aside before it writes the new snapshot and puts it back if
+    /// a step fails (`PersistRollback`), so an old manifest never pairs with
+    /// a new snapshot; this test observes neither that order nor the
+    /// rollback.
     #[test]
     fn test_old_manifest_removed_during_rebuild() {
         use crate::graph::unified::persistence::GraphStorage;
@@ -3339,7 +3943,7 @@ mod tests {
         let original_manifest = storage.load_manifest().unwrap();
         let original_built_at = original_manifest.built_at.clone();
 
-        // Rebuild — during the build, the old manifest should be removed first
+        // Rebuild over the existing index.
         build_and_persist_graph(temp_dir.path(), &plugins, &config, "test:rebuild").unwrap();
 
         // Verify the manifest was replaced (different built_at timestamp)
@@ -3354,21 +3958,21 @@ mod tests {
         );
     }
 
-    /// Regression test: failed rebuild leaves index in non-ready state.
+    /// Regression test: a failed rebuild puts the old index back.
     ///
-    /// Exercises the real pipeline by making the analysis directory
-    /// non-writable after an initial build, then attempting a rebuild.
-    /// The pipeline should:
-    ///   1. Remove the old manifest (Step 2) — making `exists()` false.
-    ///   2. Write the new snapshot (Step 3).
-    ///   3. Fail at analysis persistence (Step 9) because the directory
-    ///      is not writable.
-    ///   4. Return an error — manifest is NEVER written.
-    ///
-    /// After the failed rebuild, `storage.exists()` must be false (old
-    /// manifest removed), even though the snapshot file was updated.
+    /// Exercises the real pipeline by replacing the analysis directory with
+    /// a regular file after an initial build, then rebuilding with a second
+    /// source file (so the new snapshot differs from the old). The rebuild
+    /// moves the old manifest aside, writes the new snapshot, and fails at
+    /// analysis persistence, before the manifest write. The transaction's
+    /// rollback then puts the old manifest and the old snapshot back byte
+    /// for byte, so the index is the one the rebuild started from
+    /// (integration round 7, audit S4; this test asserted the removed
+    /// manifest of the transaction before it). The control rebuilds once
+    /// the directory is restored and finds a different snapshot, so the
+    /// equality after the failure is not one of identical builds.
     #[test]
-    fn test_failed_rebuild_leaves_index_not_ready() {
+    fn test_failed_rebuild_puts_the_old_index_back() {
         use crate::graph::unified::persistence::GraphStorage;
 
         let temp_dir = tempfile::TempDir::new().unwrap();
@@ -3390,41 +3994,406 @@ mod tests {
             storage.exists(),
             "Manifest should exist after initial build"
         );
+        let old_manifest = std::fs::read(storage.manifest_path()).unwrap();
+        let old_snapshot = std::fs::read(storage.snapshot_path()).unwrap();
+
+        // A second source file, so the rebuild's snapshot differs.
+        std::fs::write(temp_dir.path().join("other.rs"), "fn other() {}").unwrap();
 
         // Replace the analysis directory with a regular file to force a
-        // failure at Step 9 (analysis persistence). `create_dir_all` will
-        // fail because a regular file exists where a directory is expected.
-        // This simulates the real failure window between snapshot write
-        // (Step 3) and manifest write (Step 10).
+        // failure at analysis persistence: `create_dir_all` fails because
+        // a regular file exists where a directory is expected. The failure
+        // lands between the snapshot write and the manifest write.
         let analysis_dir = storage.analysis_dir().to_path_buf();
         std::fs::remove_dir_all(&analysis_dir).unwrap();
         std::fs::write(&analysis_dir, b"blocker").unwrap();
 
-        // Attempt rebuild — should fail at analysis persistence
+        // Attempt rebuild; it should fail at analysis persistence
         let result =
             build_and_persist_graph(temp_dir.path(), &plugins, &config, "test:failed_rebuild");
 
-        // Restore analysis dir so TempDir cleanup succeeds
+        // Restore analysis dir so the control and TempDir cleanup succeed
         std::fs::remove_file(&analysis_dir).unwrap();
         std::fs::create_dir_all(&analysis_dir).unwrap();
 
-        // The build should have failed
         assert!(
             result.is_err(),
-            "Rebuild should fail when analysis dir is read-only"
+            "Rebuild should fail when the analysis directory cannot be created"
+        );
+        assert_eq!(
+            std::fs::read(storage.manifest_path()).ok(),
+            Some(old_manifest.clone()),
+            "After a failed rebuild the old manifest is back, byte for byte"
+        );
+        assert_eq!(
+            std::fs::read(storage.snapshot_path()).ok(),
+            Some(old_snapshot.clone()),
+            "After a failed rebuild the old snapshot is back, byte for byte"
         );
 
-        // The old manifest should have been removed (Step 2 ran before failure)
+        // Control: the same rebuild, with the directory restored, persists
+        // a different snapshot and a new manifest.
+        build_and_persist_graph(temp_dir.path(), &plugins, &config, "test:control").unwrap();
+        assert_ne!(
+            std::fs::read(storage.snapshot_path()).unwrap(),
+            old_snapshot,
+            "the rebuild's snapshot differs from the old one"
+        );
+        assert_ne!(
+            std::fs::read(storage.manifest_path()).unwrap(),
+            old_manifest,
+            "the rebuild's manifest differs from the old one"
+        );
+    }
+
+    /// An index built by the test plugin at `root`, with one source file.
+    fn rollback_fixture() -> (tempfile::TempDir, PluginManager, BuildConfig) {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp_dir.path().join("lib.rs"), "fn main() {}").unwrap();
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-simple",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(SimpleGraphBuilder)),
+        )));
+        let config = BuildConfig::default();
+        build_and_persist_graph(temp_dir.path(), &plugins, &config, "test:initial").unwrap();
+        // A second file, so a rebuild's snapshot differs from the first.
+        std::fs::write(temp_dir.path().join("other.rs"), "fn other() {}").unwrap();
+        (temp_dir, plugins, config)
+    }
+
+    fn rollback_names(graph_dir: &Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(graph_dir)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.contains(".rollback-"))
+            .collect();
+        names.sort();
+        names
+    }
+
+    /// Round 7 audit S4 (plant P01): when the old snapshot cannot be put
+    /// back, the old manifest is not put back beside the new snapshot. The
+    /// index is absent, the rollback set stays, and the next read puts the
+    /// old pair back. Before the repair the manifest went back regardless
+    /// and the pair was torn (the persist seat injected EIO on the rename).
+    #[test]
+    fn a_failed_snapshot_put_back_leaves_no_torn_pair_and_is_recovered() {
+        use crate::graph::unified::persistence::GraphStorage;
+
+        let (temp_dir, plugins, config) = rollback_fixture();
+        let storage = GraphStorage::new(temp_dir.path());
+        let old_manifest = std::fs::read(storage.manifest_path()).unwrap();
+        let old_snapshot = std::fs::read(storage.snapshot_path()).unwrap();
+
+        // Fail at analysis persistence (after the new snapshot is written),
+        // and fail the snapshot's put-back.
+        let analysis_dir = storage.analysis_dir().to_path_buf();
+        std::fs::remove_dir_all(&analysis_dir).unwrap();
+        std::fs::write(&analysis_dir, b"blocker").unwrap();
+        rollback_tests_seam::fail_snapshot_put_back(true);
+        let result = build_and_persist_graph(temp_dir.path(), &plugins, &config, "test:failed");
+        rollback_tests_seam::fail_snapshot_put_back(false);
+        std::fs::remove_file(&analysis_dir).unwrap();
+        std::fs::create_dir_all(&analysis_dir).unwrap();
+        assert!(result.is_err(), "the rebuild fails at analysis persistence");
+
         assert!(
-            !storage.exists(),
-            "After failed rebuild, manifest should have been removed — index is NOT ready"
+            !storage.manifest_path().exists(),
+            "the old manifest must not go back beside a snapshot it does not describe"
+        );
+        assert_ne!(
+            std::fs::read(storage.snapshot_path()).unwrap(),
+            old_snapshot,
+            "the new snapshot is still in place (its put-back failed)"
+        );
+        let left = rollback_names(storage.graph_dir());
+        assert_eq!(
+            left.len(),
+            3,
+            "the rollback set stays for recovery: {left:?}"
         );
 
-        // The snapshot was updated (Step 3 succeeded before failure)
+        // The next read puts the old pair back first.
         assert!(
-            storage.snapshot_exists(),
-            "Snapshot should still exist on disk (written before failure)"
+            storage.exists(),
+            "a read after the failure recovers the index"
         );
+        assert_eq!(
+            std::fs::read(storage.manifest_path()).unwrap(),
+            old_manifest
+        );
+        assert_eq!(
+            std::fs::read(storage.snapshot_path()).unwrap(),
+            old_snapshot
+        );
+        assert!(rollback_names(storage.graph_dir()).is_empty());
+    }
+
+    /// Round 7 audit B1 and the persist seat's SIGKILL series: a persist
+    /// killed after it set the old pair aside leaves no manifest; the next
+    /// read of the index puts the previous pair (and so its recorded
+    /// selection) back before anything reads it. Before the repair nothing
+    /// restored the set-aside manifest and every writer recorded
+    /// `fast_path_default`. The crash is reproduced exactly: the files of
+    /// the graph directory are copied at the hook that runs once the old
+    /// pair is aside, and put back in place of the committed result.
+    #[test]
+    fn a_killed_persist_is_put_back_before_the_index_is_read() {
+        use crate::graph::unified::persistence::GraphStorage;
+
+        let (temp_dir, plugins, config) = rollback_fixture();
+        let storage = GraphStorage::new(temp_dir.path());
+        let old_manifest = std::fs::read(storage.manifest_path()).unwrap();
+        let old_snapshot = std::fs::read(storage.snapshot_path()).unwrap();
+        let crash = tempfile::TempDir::new().unwrap();
+        let crash_dir = crash.path().to_path_buf();
+        rollback_tests_seam::set_mid_persist(Some(Box::new(move |graph_dir: &Path| {
+            for entry in std::fs::read_dir(graph_dir).unwrap().flatten() {
+                std::fs::copy(entry.path(), crash_dir.join(entry.file_name())).unwrap();
+            }
+        })));
+        build_and_persist_graph(temp_dir.path(), &plugins, &config, "test:killed").unwrap();
+        rollback_tests_seam::set_mid_persist(None);
+
+        // The directory as the kill left it.
+        let graph_dir = storage.graph_dir().to_path_buf();
+        for entry in std::fs::read_dir(&graph_dir).unwrap().flatten() {
+            std::fs::remove_file(entry.path()).unwrap();
+        }
+        for entry in std::fs::read_dir(crash.path()).unwrap().flatten() {
+            std::fs::copy(entry.path(), graph_dir.join(entry.file_name())).unwrap();
+        }
+        assert!(
+            !storage.manifest_path().exists(),
+            "the kill left no manifest"
+        );
+        assert!(
+            rollback_names(&graph_dir)
+                .iter()
+                .any(|name| name.starts_with(".txn-begun")),
+            "the kill left the marker of an uncommitted transaction"
+        );
+
+        let manifest = storage
+            .load_manifest()
+            .expect("the next load reads an index");
+        assert_eq!(
+            std::fs::read(storage.manifest_path()).unwrap(),
+            old_manifest
+        );
+        assert_eq!(
+            std::fs::read(storage.snapshot_path()).unwrap(),
+            old_snapshot
+        );
+        assert_eq!(manifest.build_provenance.build_command, "test:initial");
+        assert!(rollback_names(&graph_dir).is_empty(), "the set is removed");
+    }
+
+    /// Round 7 audit S5 (interleavings I2 and I7): two persists of one root
+    /// never interleave. The first is held once its old pair is aside; the
+    /// second, started then, must not reach that point until the first has
+    /// committed, and the pair at the end is whole. Two threads exclude
+    /// each other through the file lock exactly as two processes do (each
+    /// hold opens its own file description).
+    #[test]
+    fn two_persists_of_one_root_are_serialised_by_the_file_lock() {
+        use crate::graph::unified::persistence::GraphStorage;
+        use sha2::{Digest, Sha256};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, mpsc};
+
+        let (temp_dir, _plugins, _config) = rollback_fixture();
+        let root = temp_dir.path().to_path_buf();
+        let first_inside = Arc::new(AtomicBool::new(false));
+        let (inside_tx, inside_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let first = {
+            let (root, first_inside) = (root.clone(), Arc::clone(&first_inside));
+            std::thread::spawn(move || {
+                let flag = Arc::clone(&first_inside);
+                rollback_tests_seam::set_mid_persist(Some(Box::new(move |_: &Path| {
+                    flag.store(true, Ordering::Release);
+                    inside_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                    flag.store(false, Ordering::Release);
+                })));
+                build_and_persist_graph(
+                    &root,
+                    &rollback_plugins(),
+                    &BuildConfig::default(),
+                    "test:first",
+                )
+            })
+        };
+        inside_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        let overlapped = Arc::new(AtomicBool::new(false));
+        let second = {
+            let (root, first_inside, overlapped) = (
+                root.clone(),
+                Arc::clone(&first_inside),
+                Arc::clone(&overlapped),
+            );
+            std::thread::spawn(move || {
+                rollback_tests_seam::set_mid_persist(Some(Box::new(move |_: &Path| {
+                    if first_inside.load(Ordering::Acquire) {
+                        overlapped.store(true, Ordering::Release);
+                    }
+                })));
+                build_and_persist_graph(
+                    &root,
+                    &rollback_plugins(),
+                    &BuildConfig::default(),
+                    "test:second",
+                )
+            })
+        };
+        // Give the second persist time to arrive at the lock.
+        std::thread::sleep(Duration::from_millis(500));
+        release_tx.send(()).unwrap();
+        first.join().unwrap().expect("the first persist commits");
+        second.join().unwrap().expect("the second persist commits");
+        assert!(
+            !overlapped.load(Ordering::Acquire),
+            "the second persist set the pair aside while the first was mid-way"
+        );
+        let storage = GraphStorage::new(&root);
+        let manifest = storage.load_manifest().unwrap();
+        let snapshot = std::fs::read(storage.snapshot_path()).unwrap();
+        assert_eq!(
+            manifest.snapshot_sha256,
+            hex::encode(Sha256::digest(&snapshot)),
+            "the manifest describes the snapshot beside it"
+        );
+        assert_eq!(manifest.build_provenance.build_command, "test:second");
+        assert!(rollback_names(storage.graph_dir()).is_empty());
+    }
+
+    /// Round 7 audit S7 (plants P03, P04): a reader never touches a live
+    /// transaction's rollback set. While a persist is held mid-way, a read
+    /// of the index waits for it (decision D-i8-1: the set-aside window is
+    /// not "no index") and leaves the set alone; once the persist commits,
+    /// the read returns the committed manifest and no set is left.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_reader_never_touches_a_live_transactions_rollback_set() {
+        use crate::graph::unified::persistence::{GraphStorage, IndexWriteLock};
+        use std::sync::mpsc;
+
+        let (temp_dir, _plugins, _config) = rollback_fixture();
+        let root = temp_dir.path().to_path_buf();
+        let (inside_tx, inside_rx) = mpsc::channel::<()>();
+        let (release_tx, release_rx) = mpsc::channel::<()>();
+        let writer = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                rollback_tests_seam::set_mid_persist(Some(Box::new(move |_: &Path| {
+                    inside_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+                })));
+                build_and_persist_graph(
+                    &root,
+                    &rollback_plugins(),
+                    &BuildConfig::default(),
+                    "test:live",
+                )
+            })
+        };
+        inside_rx.recv_timeout(Duration::from_secs(30)).unwrap();
+        let storage = GraphStorage::new(&root);
+        let live = rollback_names(storage.graph_dir());
+        assert_eq!(live.len(), 3, "the live set: {live:?}");
+        let (read_tx, read_rx) = mpsc::channel::<(bool, Option<String>)>();
+        let reader = {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let storage = GraphStorage::new(&root);
+                let exists = storage.exists();
+                let command = storage
+                    .load_manifest()
+                    .ok()
+                    .map(|manifest| manifest.build_provenance.build_command);
+                read_tx.send((exists, command)).unwrap();
+            })
+        };
+        // The reader either waits for the persist lock (the kernel records
+        // it) or returns at once from the window (the defect).
+        let waited =
+            crate::graph::unified::persistence::write_guard::lock_waiters::wait_until_someone_waits(
+                storage.graph_dir(),
+                || reader.is_finished(),
+            );
+        assert!(
+            waited && read_rx.try_recv().is_err(),
+            "a reader read the live window instead of waiting for the persist"
+        );
+        assert_eq!(
+            rollback_names(storage.graph_dir()),
+            live,
+            "a reader touched the live transaction's rollback set"
+        );
+        assert!(
+            IndexWriteLock::try_acquire(storage.graph_dir())
+                .unwrap()
+                .is_none()
+        );
+        release_tx.send(()).unwrap();
+        writer.join().unwrap().expect("the live persist commits");
+        assert_eq!(
+            read_rx.recv_timeout(Duration::from_secs(30)).unwrap(),
+            (true, Some("test:live".to_string())),
+            "the waiting reader reads the committed index"
+        );
+        reader.join().unwrap();
+        assert!(rollback_names(storage.graph_dir()).is_empty());
+        assert_eq!(
+            storage
+                .load_manifest()
+                .unwrap()
+                .build_provenance
+                .build_command,
+            "test:live"
+        );
+    }
+
+    /// Decision D-i8-6 (third audit, item 2): a caller that took the
+    /// persist lock before the transaction (as the CLI, the registry helper
+    /// and the daemon do) and whose index directory was removed since must
+    /// not have the transaction recreate it. Before, the transaction ran
+    /// `create_dir_all`, took a fresh lock and published.
+    #[test]
+    fn a_transaction_under_a_stale_lock_recreates_nothing() {
+        use crate::graph::unified::persistence::{GraphStorage, IndexWriteLock};
+
+        let (temp_dir, plugins, config) = rollback_fixture();
+        let root = temp_dir.path().to_path_buf();
+        let storage = GraphStorage::new(&root);
+        let held = IndexWriteLock::acquire(storage.graph_dir()).unwrap();
+        std::fs::remove_dir_all(root.join(".sqry")).unwrap();
+        let result = build_and_persist_graph(&root, &plugins, &config, "test:stale");
+        drop(held);
+        let err = result.expect_err("a persist under a stale lock writes nothing");
+        // Typed, so a caller (the daemon) tells it from a failure (fourth
+        // audit, item 2).
+        assert!(
+            err.chain()
+                .any(|cause| cause
+                    .is::<crate::graph::unified::persistence::IndexRemovedDuringPersist>()),
+            "not the typed refusal: {err:#}"
+        );
+        assert!(!root.join(".sqry").exists(), "nothing was recreated");
+    }
+
+    fn rollback_plugins() -> PluginManager {
+        let mut plugins = PluginManager::new();
+        plugins.register_builtin(Box::new(TestPlugin::new(
+            "rust-simple",
+            RUST_TEST_EXTENSIONS,
+            Some(Box::new(SimpleGraphBuilder)),
+        )));
+        plugins
     }
 
     // ===== CSR Compaction Persistence Regression Tests =====

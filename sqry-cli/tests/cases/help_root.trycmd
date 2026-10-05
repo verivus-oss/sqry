@@ -152,9 +152,6 @@ Search Modes:
   -t, --text
           Force text search mode (skip semantic, use ripgrep)
 
-  -s, --semantic
-          Structural search over the graph (the default; opposite of --text)
-
       --context <CONTEXT>
           Number of context lines for text search results
           

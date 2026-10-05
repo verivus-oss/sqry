@@ -74,6 +74,7 @@ pub mod go_signature;
 pub mod helper;
 pub mod identity;
 pub mod incremental;
+pub mod macro_options;
 pub mod parallel_commit;
 pub mod pass3_intra;
 pub mod pass5_cross_language;
@@ -128,7 +129,7 @@ pub use entrypoint::{
     GRAPH_FILE_PROCESSING_PHASE, MacroBuildOptions, build_and_persist_graph,
     build_and_persist_graph_with_progress, build_unified_graph, build_unified_graph_cancellable,
     build_unified_graph_with_progress, build_unified_graph_with_progress_cancellable,
-    inferred_plugin_selection_manifest, persist_and_analyze_graph,
+    count_buildable_files, inferred_plugin_selection_manifest, persist_and_analyze_graph,
     persist_durable_graph_transaction,
 };
 pub use helper::{GraphBuildHelper, HelperStats};
@@ -136,6 +137,11 @@ pub use identity::{IdentityIndex, IdentityKey};
 pub use incremental::{
     IncrementalStats, add_edge_incremental, compute_reverse_dep_closure, incremental_rebuild,
     remove_file_nodes,
+};
+pub use macro_options::{
+    MacroOptionsError, MacroOptionsRequest, MacroOptionsSource, MacroRequestError,
+    ResolvedMacroOptions, UnreadableManifestRule, check_cfg_flag, expand_cache_missing_reason,
+    resolve_macro_options,
 };
 pub use parallel_commit::{
     ChunkCommitPlan, FilePlan, GlobalOffsets, Phase3Result, compute_commit_plan,

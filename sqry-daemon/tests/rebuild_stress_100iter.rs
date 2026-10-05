@@ -26,6 +26,10 @@
 //! Deterministic via fixed seed 0xC7D3_4B1E_7E55. Wall-clock target
 //! < 60s.
 
+// Every test here installs a `TestCapture`, which only the `test-hooks`
+// feature compiles (fifth audit, item 2).
+#![cfg(feature = "test-hooks")]
+
 mod support;
 
 use std::{

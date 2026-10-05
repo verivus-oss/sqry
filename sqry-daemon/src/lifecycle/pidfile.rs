@@ -690,7 +690,7 @@ mod tests {
     struct TestCfg {
         _tmp: TempDir,
         cfg: DaemonConfig,
-        _guard: std::sync::MutexGuard<'static, ()>,
+        _guard: crate::TestEnvGuard,
         prior_xdg: Option<String>,
     }
 

@@ -5,7 +5,8 @@
 //! - Edge addition: Add edges without full rebuild
 //! - Node removal: Remove specific nodes and their edges
 //! - Reverse-dependency closure over Pass 4 cross-file `Imports` edges
-//! - Incremental rebuild entrypoint (reserved; implemented in Task 4)
+//! - Incremental rebuild entrypoint (implemented in Task 4; no production
+//!   caller yet: every rebuild a user can start runs a full build)
 //!
 //! # Overview
 //!
@@ -340,8 +341,17 @@ pub fn compute_reverse_dep_closure(changed_files: &[FileId], graph: &CodeGraph) 
 ///
 /// Re-parses only the files in `closure` (computed via
 /// [`compute_reverse_dep_closure`]) and rebuilds their Pass 1–5 contributions
-/// on top of a clone of `current_graph`. Returns a new `CodeGraph` ready to
-/// be published via `ArcSwap::store` by the daemon's rebuild dispatcher.
+/// on top of a clone of `current_graph`. Returns a new `CodeGraph` a caller
+/// can publish (the daemon design publishes through `ArcSwap::store`).
+///
+/// # Callers
+///
+/// No production path calls this today: `sqry update`, `sqry watch` and
+/// every daemon rebuild, its incremental-triggered mode included, run a
+/// full build that parses every file. The tests (the §E equivalence
+/// harness, `incremental_macro_options`) are its only callers, so what it
+/// does for a changed file, macro options included, is not yet visible on
+/// any surface.
 ///
 /// # Parameters
 ///
@@ -568,15 +578,15 @@ pub fn incremental_rebuild<S: std::hash::BuildHasher>(
     config: &BuildConfig,
     cancellation: &CancellationToken,
 ) -> GraphResult<CodeGraph> {
-    // `config` is threaded through for signature parity with the daemon
-    // dispatcher (Task 6) — plugin-selection / cache-override overrides
-    // flow through `BuildConfig` in the full-build path and will be
-    // plumbed into the rebuild pipeline in a follow-up when the daemon
-    // exposes them. Today every rebuild inherits the full-build default
-    // plugin set via `PluginManager` so the config surface has no
-    // observable effect here. Keeping the parameter live at the Phase
-    // 3e boundary avoids a churny signature change when Task 6 lands.
-    let _ = config;
+    // `config.macro_options` reaches the re-parse (sub-step 4): the cfg
+    // flags and the expand cache the full build applied, which a caller
+    // would resolve from the manifest's record (`resolve_macro_options`), so
+    // an incremental rebuild of a changed file keeps the cfg activation and
+    // the materialised cache symbols instead of silently dropping them
+    // (surface parity W4). No production path calls this function yet (see
+    // its `# Callers`), so no surface shows the difference today. The plugin set comes from `PluginManager`; the rest of
+    // `config` (discovery limits, thread count, label budget) belongs to the
+    // full build's file walk and analyses, which this path does not run.
 
     // Pre-flight cancellation check. Inherited from Phase 3a: if a
     // dispatcher cancels a rebuild before it even gets scheduled, the
@@ -660,13 +670,19 @@ pub fn incremental_rebuild<S: std::hash::BuildHasher>(
     // ------------------------------------------------------------------
 
     let new_file_paths = phase3e_discover_new_file_paths(current_graph, changed_files);
+    // The expand cache the rebuild was resolved with must still be there
+    // when the re-parse reads it, and after; the reader never creates it, so
+    // a removed directory refuses the rebuild instead of narrowing the graph.
+    super::entrypoint::require_expand_cache_dir(&config.macro_options, "before the re-parse")?;
     let reparse_outcome = phase3c_reparse_closure(
         current_graph,
         closure,
         &new_file_paths,
         plugins,
+        &config.macro_options,
         cancellation,
     )?;
+    super::entrypoint::require_expand_cache_dir(&config.macro_options, "after the re-parse")?;
 
     // Phase 3c post-reparse / pre-commit observation hook — gated on
     // `test` / `rebuild-internals`. Fires IMMEDIATELY after sub-step 4
@@ -1012,6 +1028,10 @@ struct ReparseOutcome {
 /// path mapping in `current_graph` is immutable from this function's
 /// perspective (`current_graph` is a shared borrow).
 ///
+/// Every file is parsed with `macro_options`, the options the full build
+/// would apply (the caller's `BuildConfig::macro_options`), so a re-parsed
+/// file keeps its cfg activation and expand cache symbols.
+///
 /// Cancellation is polled at the TOP of every iteration (before the
 /// potentially-expensive `parse_file` call) so a cancelling dispatcher
 /// takes effect within one file even for very large closures. This
@@ -1025,6 +1045,7 @@ fn phase3c_reparse_closure<S: std::hash::BuildHasher>(
     closure: &HashSet<FileId, S>,
     new_file_paths: &[PathBuf],
     plugins: &PluginManager,
+    macro_options: &super::entrypoint::MacroBuildOptions,
     cancellation: &CancellationToken,
 ) -> GraphResult<ReparseOutcome> {
     // Build FileId -> PathBuf lookup from current_graph.indexed_files()
@@ -1083,16 +1104,9 @@ fn phase3c_reparse_closure<S: std::hash::BuildHasher>(
         // that all fire strictly before this loop, and also distinct
         // from the post-substep-4 check that fires strictly after.
         cancellation.check()?;
-        // Phase 1c follow-on: the incremental / daemon reparse path does not yet
-        // thread the workspace's effective macro / cfg options, so it reparses
-        // with defaults (empty = today's behaviour). This keeps incremental
-        // rebuilds producing the same graph they do today; `sqry index` is the
-        // only surface that applies `--cfg` for now.
-        match parse_file(
-            path.as_path(),
-            plugins,
-            &super::entrypoint::MacroBuildOptions::default(),
-        ) {
+        // The full build's options, so the re-parse keeps the cfg
+        // activation and the expand cache symbols (surface parity W4).
+        match parse_file(path.as_path(), plugins, macro_options) {
             Ok(ParsedFileOutcome::Parsed(pf)) => {
                 parsed.push((path, pf));
             }

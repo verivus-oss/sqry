@@ -1,5 +1,9 @@
 //! Task 8 Phase 8a — `daemon/load` + `daemon/unload` integration.
 
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
+
 mod support;
 
 use std::sync::Arc;
@@ -94,8 +98,7 @@ async fn daemon_load_invalid_path_returns_32602() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_same_key_load_runs_builder_once() {
-    use sqry_core::graph::CodeGraph;
-    use sqry_daemon::DaemonError;
+    use sqry_daemon::{BuiltGraph, DaemonError};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // Counting builder so we can assert exactly one underlying build
@@ -109,10 +112,10 @@ async fn concurrent_same_key_load_runs_builder_once() {
         hits: Arc<AtomicU64>,
     }
     impl sqry_daemon::WorkspaceBuilder for CountingBuilder {
-        fn build(&self, _workspace_root: &std::path::Path) -> Result<CodeGraph, DaemonError> {
+        fn build(&self, _workspace_root: &std::path::Path) -> Result<BuiltGraph, DaemonError> {
             self.hits.fetch_add(1, Ordering::AcqRel);
             std::thread::sleep(std::time::Duration::from_millis(50));
-            Ok(CodeGraph::new())
+            Ok(BuiltGraph::empty_fast_path())
         }
     }
     let hits = Arc::new(AtomicU64::new(0));

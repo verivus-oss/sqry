@@ -373,7 +373,7 @@ pub enum NestedIndexError {
          If this is intentional (e.g. a sub-project with its own graph), \
          re-run with --allow-nested.\n\
          Otherwise: cd to the project root ({boundary}) and run \
-         `sqry update` (incremental) or `sqry index --force` (rebuild).",
+         `sqry update` or `sqry index --force` to rebuild the index there.",
         ancestor_graph = ancestor_graph.display(),
         requested = requested.display(),
         boundary = boundary.display(),
@@ -559,7 +559,7 @@ pub enum ArtifactKind {
     /// `<root>/.sqry/` — parent of `Graph`. Listed separately so the
     /// dry-run can show "graph + cache + manifest" in one entry.
     GraphRoot,
-    /// `<root>/.sqry-cache` — incremental indexer cache.
+    /// `<root>/.sqry-cache`: the disk-persisted AST cache (`sqry cache`).
     Cache,
     /// `<root>/.sqry-prof` — profiler dumps (legacy / external).
     Prof,
@@ -619,21 +619,23 @@ mod ancestor_tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Sanity: discovery returns `None` for a deeply-nested empty
-    /// hierarchy (no markers, no graphs).
+    /// Sanity: discovery finds no graph in a deeply-nested empty project
+    /// (one marker at its root, no graphs). The marker bounds the walk, so
+    /// a `.sqry/graph` or marker above `TMPDIR` cannot change the outcome.
     #[test]
-    fn discover_returns_none_for_empty_hierarchy() {
+    fn discover_returns_boundary_only_for_an_empty_project() {
         let tmp = TempDir::new().unwrap();
+        std::fs::create_dir(tmp.path().join(".git")).unwrap();
         let leaf = tmp.path().join("a/b/c");
         std::fs::create_dir_all(&leaf).unwrap();
         let outcome = discover_workspace_root(&leaf);
-        // Either None (filesystem root above tmp has no marker) or
-        // BoundaryOnly (the filesystem root happens to host a
-        // marker like `.git`). Both are acceptable here; the test
-        // pins that GraphFound is NOT returned without a graph.
-        assert!(
-            !matches!(outcome, WorkspaceRootDiscovery::GraphFound { .. }),
-            "no .sqry/graph above leaf, expected None or BoundaryOnly, got {outcome:?}"
+        assert_eq!(
+            outcome,
+            WorkspaceRootDiscovery::BoundaryOnly {
+                boundary: tmp.path().canonicalize().unwrap(),
+                is_file_scope: false,
+            },
+            "no .sqry/graph inside the project"
         );
     }
 

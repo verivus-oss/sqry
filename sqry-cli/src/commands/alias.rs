@@ -40,11 +40,10 @@ pub fn run_alias(cli: &Cli, action: &AliasAction) -> Result<()> {
         } => run_export(cli, file, *local, *global),
         AliasAction::Import {
             file,
-            local,
             global,
             on_conflict,
             dry_run,
-        } => run_import(cli, file, *local, *global, *on_conflict, *dry_run),
+        } => run_import(cli, file, *global, *on_conflict, *dry_run),
     }
 }
 
@@ -191,6 +190,11 @@ fn run_delete(cli: &Cli, name: &str, local: bool, global: bool, force: bool) -> 
 
 /// Rename an alias
 fn run_rename(cli: &Cli, old_name: &str, new_name: &str, local: bool, global: bool) -> Result<()> {
+    // The new name is checked before the store is opened, which creates the
+    // global config directory when it is missing: a name the store refuses
+    // writes nothing. Whether the old name exists, or the new one is taken,
+    // depends on the store and is answered by the rename itself.
+    crate::persistence::validate_alias_name(new_name).map_err(AliasError::from)?;
     let config = PersistenceConfig::from_env();
     let index = open_shared_index(Some(Path::new(cli.search_path())), config)?;
     let manager = AliasManager::new(index);
@@ -278,20 +282,22 @@ fn run_export(cli: &Cli, file: &str, local_only: bool, global_only: bool) -> Res
 fn run_import(
     cli: &Cli,
     file: &str,
-    _local: bool,
     global: bool,
     on_conflict: ImportConflictArg,
     dry_run: bool,
 ) -> Result<()> {
+    // The file is read and parsed before the store is opened, which creates
+    // the global config directory when it is missing: a file that cannot be
+    // read or is not an alias export writes nothing, `--dry-run` or not.
+    let json = read_import_input(file)?;
+    let export = parse_alias_export_file(file, &json)?;
+    let scope = import_scope_from_flags(global);
+    let strategy = import_strategy_from_arg(on_conflict);
+
     let config = PersistenceConfig::from_env();
     let index = open_shared_index(Some(Path::new(cli.search_path())), config)?;
     let manager = AliasManager::new(index);
     let mut streams = OutputStreams::with_pager(cli.pager_config());
-
-    let scope = import_scope_from_flags(global);
-    let json = read_import_input(file)?;
-    let export = parse_alias_export_file(file, &json)?;
-    let strategy = import_strategy_from_arg(on_conflict);
 
     if dry_run {
         let preview = preview_import(&manager, &export, strategy)?;

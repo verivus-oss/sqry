@@ -40,6 +40,28 @@ pub struct WorkspaceSymbolResult {
     /// of [`Self::partial`] so consumers can distinguish "skipped
     /// member folder" from "skipped excluded path".
     pub excluded: bool,
+    /// The folders whose graph could not be used, each with its refusal,
+    /// in search order. They were left out of [`Self::items`]; the server
+    /// reports each to the client. Empty when every folder answered (the
+    /// handler answers an error, not this, when every folder is refused).
+    pub refused: Vec<RefusedFolder>,
+}
+
+/// A workspace folder `workspace/symbol` left out because its graph could
+/// not be used: a refused graph (an uncompiled plugin id, an unusable
+/// expand cache) or one the self-heal could not build.
+#[derive(Debug, Clone)]
+pub struct RefusedFolder {
+    /// The folder's root as searched.
+    pub root: std::path::PathBuf,
+    /// The refusal, the whole error chain.
+    pub message: String,
+    /// The refusal's `data.kind`, or `workspace_not_ready` for a refusal
+    /// that carries none (an internal error: the folder cannot be served).
+    /// The server's left-out log line names it, and an every-folder
+    /// refusal's `data` carries it per folder, so a partial answer and a
+    /// failed one name a folder's refusal alike.
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,12 +83,22 @@ struct ParsedQuery {
 ///
 /// This handler supports multi-project workspaces per `PROJECT_ROOT_SPEC.md`.
 /// It iterates over all workspace folders in the `ProjectManager` and aggregates
-/// results from each project.
+/// results from each project. A folder whose graph cannot be used (refused,
+/// or a self-heal build that failed) is left out and listed in
+/// [`WorkspaceSymbolResult::refused`]: the other folders still answer, and
+/// the refusal is shown to the client ([`SessionManager::note_refusal`]).
+/// A folder with no index is built when it is first read (the session's
+/// auto-build), so it contributes its symbols, or, when that build fails,
+/// it is left out as a refused folder like any other. Only when every
+/// searched folder is refused does the request fail: one folder's refusal
+/// is returned as it is (LSP `RequestFailed` with its `data.kind`, or the
+/// internal error it is), several folders' as one `RequestFailed` naming
+/// each folder and its refusal.
 ///
 /// # Errors
 ///
-/// Returns an error when the search operation fails or when response conversion
-/// to LSP types fails.
+/// Returns an error when every searched folder is refused, or when the
+/// page token cannot be encoded.
 #[allow(clippy::too_many_lines)] // Aggregates multi-project search, filtering, and paging in one flow.
 pub fn handle(
     session: &SessionManager,
@@ -122,7 +154,7 @@ pub fn handle(
         search_query.as_ref(),
         &language_filter,
         &query_terms,
-    );
+    )?;
 
     if search_outcome.items.is_empty() {
         return Ok(Some(WorkspaceSymbolResult {
@@ -136,6 +168,7 @@ pub fn handle(
             query: parsed.query,
             partial,
             excluded,
+            refused: search_outcome.refused,
         }));
     }
 
@@ -167,6 +200,7 @@ pub fn handle(
         query: parsed.query,
         partial,
         excluded,
+        refused: search_outcome.refused,
     }))
 }
 
@@ -177,6 +211,7 @@ struct SearchRoots {
 struct SearchOutcome {
     items: Vec<WorkspaceSymbolItem>,
     used_index: bool,
+    refused: Vec<RefusedFolder>,
 }
 
 fn empty_workspace_result() -> WorkspaceSymbolResult {
@@ -191,6 +226,7 @@ fn empty_workspace_result() -> WorkspaceSymbolResult {
         query: String::new(),
         partial: false,
         excluded: false,
+        refused: Vec::new(),
     }
 }
 
@@ -221,13 +257,29 @@ fn collect_workspace_symbols(
     search_query: &str,
     language_filter: &HashSet<String>,
     query_terms: &[String],
-) -> SearchOutcome {
+) -> Result<SearchOutcome> {
     let executor = session.executor();
     let mut all_items = Vec::new();
+    // Each folder's refusal, kept whole until it is known whether any
+    // folder answered: one folder alone refused is returned as it is.
+    let mut refusals: Vec<(std::path::PathBuf, std::path::PathBuf, anyhow::Error)> = Vec::new();
 
     for root in &search_roots.roots {
-        let Some(results) = run_query(session, executor.as_ref(), search_query, root) else {
-            continue;
+        let results = match run_query(session, executor.as_ref(), search_query, root) {
+            Ok(Some(results)) => results,
+            Ok(None) => continue,
+            Err((graph_root, refusal)) => {
+                // A refused folder must not cost the others their answer
+                // (round 8: a `?` here failed the request for every folder
+                // when any one was refused).
+                log::warn!(
+                    "workspace/symbol: leaving out {root}: {refusal}",
+                    root = root.display(),
+                    refusal = crate::handlers::render_error_chain(&refusal)
+                );
+                refusals.push((root.clone(), graph_root, refusal));
+                continue;
+            }
         };
 
         // Convert QueryResults to WorkspaceSymbolItems
@@ -240,53 +292,137 @@ fn collect_workspace_symbols(
         );
     }
 
-    SearchOutcome {
+    if !refusals.is_empty() && refusals.len() == search_roots.roots.len() {
+        return Err(every_folder_refused(refusals));
+    }
+
+    let refused = refusals
+        .into_iter()
+        .map(|(root, graph_root, refusal)| {
+            session.note_refusal(&graph_root, &refusal);
+            refused_folder(root, &refusal)
+        })
+        .collect();
+
+    Ok(SearchOutcome {
         items: all_items,
         used_index: true, // Always uses CodeGraph
+        refused,
+    })
+}
+
+/// The `data.kind` of a refusal that carries one.
+fn refusal_kind(refusal: &anyhow::Error) -> Option<String> {
+    match refusal.downcast_ref::<super::LspHandlerError>() {
+        Some(super::LspHandlerError::RequestFailed {
+            data: Some(data), ..
+        }) => data
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        _ => None,
     }
 }
 
+fn refused_folder(root: std::path::PathBuf, refusal: &anyhow::Error) -> RefusedFolder {
+    RefusedFolder {
+        message: crate::handlers::render_error_chain(refusal),
+        kind: refusal_kind(refusal).unwrap_or_else(|| "workspace_not_ready".to_string()),
+        root,
+    }
+}
+
+/// The error for a request whose every searched folder was refused. One
+/// folder's refusal is returned as it is, so a single root answers exactly
+/// as every other handler does over the same refusal. Several folders'
+/// refusals become one LSP `RequestFailed` naming each folder and its
+/// refusal in search order, with the first folder's kind and root in
+/// `data` (and every folder, with its root, kind and refusal, in
+/// `data.folders`, in search order); a refusal with no kind of its own (an
+/// internal error, such as a workspace folder deleted since the client
+/// named it) is `workspace_not_ready`, since the folder cannot be served
+/// ([`RefusedFolder::kind`]).
+fn every_folder_refused(
+    mut refusals: Vec<(std::path::PathBuf, std::path::PathBuf, anyhow::Error)>,
+) -> anyhow::Error {
+    if refusals.len() == 1 {
+        let (_, _, refusal) = refusals.remove(0);
+        return refusal;
+    }
+    let folders: Vec<RefusedFolder> = refusals
+        .iter()
+        .map(|(root, _, refusal)| refused_folder(root.clone(), refusal))
+        .collect();
+    let message = format!(
+        "workspace/symbol: every workspace folder was refused: {}",
+        folders
+            .iter()
+            .map(|folder| format!("{}: {}", folder.root.display(), folder.message))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
+    let data = serde_json::json!({
+        "kind": folders[0].kind,
+        "root": folders[0].root.display().to_string(),
+        "folders": folders
+            .iter()
+            .map(|folder| serde_json::json!({
+                "root": folder.root.display().to_string(),
+                "kind": folder.kind,
+                "message": folder.message,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    anyhow::Error::new(super::LspHandlerError::RequestFailed {
+        message,
+        data: Some(data),
+    })
+}
+
+/// Search one folder. The error carries the root the graph was acquired at
+/// (where the refusal notice is kept) and the refusal. `Ok(None)` is a
+/// search that failed after the graph was acquired (logged); a folder with
+/// no graph would also be `Ok(None)`, but the session builds a folder with
+/// no index when it reads it ([`SessionManager::graph_for_path_at`]), so
+/// that arm is unreachable today.
 fn run_query(
     session: &SessionManager,
     executor: &sqry_core::query::QueryExecutor,
     search_query: &str,
     root: &Path,
-) -> Option<QueryResults> {
+) -> std::result::Result<Option<QueryResults>, (std::path::PathBuf, anyhow::Error)> {
     // SGA06 — acquire the graph through the shared `FilesystemGraphProvider`
     // pipeline before running the workspace-symbol predicate. Each workspace
     // root produces its own `Arc<CodeGraph>` (or `None` when the index is
     // missing), so unindexed roots silently skip rather than tripping the
-    // executor's own `get_or_load_graph` fallback.
-    let graph = match session.graph_for_path(root) {
-        Ok(Some(graph)) => graph,
-        Ok(None) => {
+    // executor's own `get_or_load_graph` fallback. A root whose graph cannot
+    // be acquired is returned to the caller with its refusal (S4, round 7:
+    // it used to be logged and answered as if the root held no symbol).
+    let graph = match session.graph_for_path_at(root) {
+        (_, Ok(Some(graph))) => graph,
+        (_, Ok(None)) => {
             log::debug!(
                 "workspace/symbol: no graph at {root}, skipping",
                 root = root.display()
             );
-            return None;
+            return Ok(None);
         }
-        Err(e) => {
-            log::warn!(
-                "workspace/symbol: failed to acquire graph at {root}: {error}",
-                root = root.display(),
-                error = e
-            );
-            return None;
-        }
+        (graph_root, Err(refusal)) => return Err((graph_root, refusal)),
     };
 
-    match executor.execute_on_preloaded_graph(graph, search_query, root, None) {
-        Ok(result) => Some(result),
-        Err(e) => {
-            log::warn!(
-                "workspace/symbol: failed to search project at {root}: {error}",
-                root = root.display(),
-                error = e
-            );
-            None
-        }
-    }
+    Ok(
+        match executor.execute_on_preloaded_graph(graph, search_query, root, None) {
+            Ok(result) => Some(result),
+            Err(e) => {
+                log::warn!(
+                    "workspace/symbol: failed to search project at {root}: {error}",
+                    root = root.display(),
+                    error = e
+                );
+                None
+            }
+        },
+    )
 }
 
 /// Convert `QueryResults` to `WorkspaceSymbolItems` using `CodeGraph` data
@@ -1154,5 +1290,101 @@ mod tests {
         assert!(result.query.is_empty());
         assert!(!result.partial);
         assert!(!result.excluded);
+    }
+
+    // ── every_folder_refused ─────────────────────────────────────────────────
+
+    /// A refusal as a handler answers it: `RequestFailed` with `kind`.
+    fn request_failed(message: &str, kind: &str) -> anyhow::Error {
+        anyhow::Error::new(crate::handlers::LspHandlerError::RequestFailed {
+            message: message.to_string(),
+            data: Some(serde_json::json!({ "kind": kind, "root": "/elsewhere" })),
+        })
+    }
+
+    /// Round 9 (surfaces round four, finding 5; plants L-OWN1, L-OWN2,
+    /// L-OWN3 and L-OWN12): the every-folder refusal names the folders in
+    /// search order, in its message and in `data.folders`; `data.kind` and
+    /// `data.root` are the first folder's; each entry carries its folder's
+    /// root, kind and refusal; and a refusal with no kind of its own is
+    /// `workspace_not_ready`. The first and the last folder's kinds differ,
+    /// so taking either for the other shows.
+    #[test]
+    fn every_folder_refused_names_each_folder_in_search_order() {
+        use std::path::PathBuf;
+
+        let refusals = vec![
+            (
+                PathBuf::from("/ws/first"),
+                PathBuf::from("/ws/first"),
+                anyhow::anyhow!("failed to resolve project for '/ws/first'"),
+            ),
+            (
+                PathBuf::from("/ws/second"),
+                PathBuf::from("/ws/second"),
+                request_failed(
+                    "unknown plugin ids: r9-uncompiled",
+                    "workspace_incompatible_graph",
+                ),
+            ),
+            (
+                PathBuf::from("/ws/third"),
+                PathBuf::from("/ws"),
+                request_failed("cfg flag \" test \" names no predicate", "validation_error"),
+            ),
+        ];
+        let err = every_folder_refused(refusals);
+        let Some(crate::handlers::LspHandlerError::RequestFailed { message, data }) =
+            err.downcast_ref::<crate::handlers::LspHandlerError>()
+        else {
+            panic!("expected RequestFailed, got {err:?}");
+        };
+        assert_eq!(
+            message,
+            "workspace/symbol: every workspace folder was refused: /ws/first: failed to resolve \
+             project for '/ws/first'; /ws/second: unknown plugin ids: r9-uncompiled; /ws/third: \
+             cfg flag \" test \" names no predicate"
+        );
+        assert_eq!(
+            data.as_ref().expect("data"),
+            &serde_json::json!({
+                "kind": "workspace_not_ready",
+                "root": "/ws/first",
+                "folders": [
+                    {
+                        "root": "/ws/first",
+                        "kind": "workspace_not_ready",
+                        "message": "failed to resolve project for '/ws/first'",
+                    },
+                    {
+                        "root": "/ws/second",
+                        "kind": "workspace_incompatible_graph",
+                        "message": "unknown plugin ids: r9-uncompiled",
+                    },
+                    {
+                        "root": "/ws/third",
+                        "kind": "validation_error",
+                        "message": "cfg flag \" test \" names no predicate",
+                    },
+                ],
+            })
+        );
+    }
+
+    /// One folder alone refused is returned as it is, so a single root
+    /// answers exactly as every other handler does over the same refusal.
+    #[test]
+    fn every_folder_refused_returns_a_lone_refusal_as_it_is() {
+        let err = every_folder_refused(vec![(
+            std::path::PathBuf::from("/ws"),
+            std::path::PathBuf::from("/ws"),
+            anyhow::anyhow!("an internal error"),
+        )]);
+        assert!(
+            err.downcast_ref::<crate::handlers::LspHandlerError>()
+                .is_none(),
+            "{err:?}"
+        );
+        assert_eq!(err.to_string(), "an internal error");
     }
 }

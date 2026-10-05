@@ -126,13 +126,11 @@ pub fn run_graph(
             from_lang,
             to_lang,
             edge_type,
-            min_confidence,
         } => run_cross_language_unified(
             &unified_graph,
             from_lang.as_deref(),
             to_lang.as_deref(),
             edge_type.as_deref(),
-            *min_confidence,
             format,
             verbose,
         ),
@@ -898,9 +896,9 @@ impl sqry_core::graph::unified::TraversalStrategy for LanguageFilterStrategy<'_>
     fn should_enqueue(
         &mut self,
         node_id: UnifiedNodeId,
-        _from: UnifiedNodeId,
-        _edge: &sqry_core::graph::unified::edge::EdgeKind,
-        _depth: u32,
+        _enqueue_from: UnifiedNodeId,
+        _enqueue_edge: &sqry_core::graph::unified::edge::EdgeKind,
+        _enqueue_depth: u32,
     ) -> bool {
         if self.language_filter.is_empty() {
             return true;
@@ -1344,7 +1342,7 @@ fn write_call_chain_depth_output(
     format: &str,
 ) -> Result<()> {
     if format == "json" {
-        print_call_chain_depth_unified_json(results, snapshot, show_chain, verbose)
+        print_call_chain_depth_unified_json(results, snapshot, verbose)
     } else {
         print_call_chain_depth_unified_text(results, snapshot, show_chain, verbose);
         Ok(())
@@ -1547,7 +1545,6 @@ fn print_call_chain_list(
 fn print_call_chain_depth_unified_json(
     results: &[UnifiedDepthResult],
     snapshot: &sqry_core::graph::unified::concurrent::GraphSnapshot,
-    _show_chain: bool,
     verbose: bool,
 ) -> Result<()> {
     use serde_json::json;
@@ -2130,7 +2127,6 @@ fn run_cross_language_unified(
     from_lang: Option<&str>,
     to_lang: Option<&str>,
     edge_type: Option<&str>,
-    _min_confidence: f64,
     format: &str,
     verbose: bool,
 ) -> Result<()> {
@@ -2185,9 +2181,6 @@ fn run_cross_language_unified(
 
         cross_lang_edges.push((src_id, tgt_id, kind.clone(), src_lang, tgt_lang));
     }
-
-    // min_confidence filtering is skipped here — EdgeKind doesn't carry
-    // per-edge confidence metadata in the unified graph model.
 
     // Output in requested format
     match format {

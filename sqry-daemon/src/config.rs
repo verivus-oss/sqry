@@ -69,8 +69,11 @@ pub const ESTIMATE_STAGING_PER_FILE_BYTES: u64 = 4_096;
 ///
 /// Consumed by the Task 7 [`crate::rebuild::RebuildDispatcher`] when
 /// populating [`crate::workspace::WorkingSetInputs::new_graph_final_estimate`]
-/// for incremental rebuilds — the final-size estimate is
+/// for an iteration the scheduler runs in incremental mode: the final-size
+/// estimate is
 /// `prior.heap_bytes() + closure.len() * ESTIMATE_FINAL_PER_FILE_BYTES`.
+/// The mode only sizes the estimate; the iteration itself builds and
+/// durably persists the whole graph, as a full one does.
 ///
 /// Like [`ESTIMATE_STAGING_PER_FILE_BYTES`], this is a heuristic
 /// starting value rather than a fixture-tuned constant. Calibration
@@ -304,13 +307,17 @@ pub struct DaemonConfig {
     #[serde(default = "default_debounce_ms")]
     pub debounce_ms: u64,
 
-    /// If > `incremental_threshold` files changed in one window, full-rebuild
-    /// instead of incremental-rebuild.
+    /// If > `incremental_threshold` files changed in one window, the
+    /// rebuild is scheduled as full rather than incremental. Both modes
+    /// build and durably persist the whole graph (the core's
+    /// `incremental_rebuild` has no production caller); the mode sizes the
+    /// working-set estimate and is recorded in the build command.
     #[serde(default = "default_incremental_threshold")]
     pub incremental_threshold: usize,
 
     /// If the reverse-dep closure covers > `closure_limit_percent`% of the
-    /// graph's files, full-rebuild instead of incremental-rebuild.
+    /// graph's files, the rebuild is scheduled as full rather than
+    /// incremental (both build the whole graph, as above).
     #[serde(default = "default_closure_limit_percent")]
     pub closure_limit_percent: u32,
 
@@ -1059,15 +1066,23 @@ struct RevisionGraphConfigHashInputs {
 /// containers, and CI runners). See Codex Task 5 iter-1 review MAJOR
 /// finding (`docs/reviews/sqryd-daemon/2026-04-18/task-5-scaffold_iter1_request_review.md`).
 fn runtime_dir() -> PathBuf {
+    runtime_dir_from(|name| env::var_os(name))
+}
+
+/// [`runtime_dir`] over a lookup of the environment, so a test can read the
+/// order of the fallbacks without changing the process environment (a test
+/// that removed `TMPDIR` sent every temporary directory another test made
+/// meanwhile to `/tmp`).
+fn runtime_dir_from(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> PathBuf {
     if cfg!(windows)
-        && let Some(local) = env::var_os("LOCALAPPDATA")
+        && let Some(local) = lookup("LOCALAPPDATA")
     {
         return PathBuf::from(local).join("sqry");
     }
-    if let Some(xdg) = env::var_os("XDG_RUNTIME_DIR") {
+    if let Some(xdg) = lookup("XDG_RUNTIME_DIR") {
         return PathBuf::from(xdg).join("sqry");
     }
-    if let Some(tmp) = env::var_os("TMPDIR") {
+    if let Some(tmp) = lookup("TMPDIR") {
         return PathBuf::from(tmp).join(user_scoped_dir_name());
     }
     PathBuf::from("/tmp").join(user_scoped_dir_name())
@@ -1382,6 +1397,9 @@ mod tests {
 
     #[test]
     fn defaults_match_plan_table() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         assert_eq!(cfg.memory_limit_mb, 2_048);
         assert_eq!(cfg.idle_timeout_minutes, 30);
@@ -1410,12 +1428,20 @@ mod tests {
 
     #[test]
     fn memory_limit_bytes_is_mb_times_megabyte() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         assert_eq!(cfg.memory_limit_bytes(), 2_048 * 1024 * 1024);
     }
 
     #[test]
     fn parses_minimal_toml() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let text = r"
             memory_limit_mb = 4096
             idle_timeout_minutes = 60
@@ -1445,6 +1471,11 @@ mod tests {
 
     #[test]
     fn parses_all_knobs_with_defaults_filled_in() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Empty TOML body — every field defaulted.
         let cfg = DaemonConfig::from_toml_str("").expect("parse");
         assert_eq!(cfg.memory_limit_mb, DEFAULT_MEMORY_LIMIT_MB);
@@ -1461,6 +1492,15 @@ mod tests {
 
     #[test]
     fn rejects_unknown_fields() {
+        // `deny_unknown_fields` refuses this text before any field default
+        // runs, so the parse reads no variable. The lock is held because the
+        // env-lock gate follows `from_toml_str` to `DaemonConfig`'s derived
+        // `deserialize`, whose defaults read the environment
+        // (`default_log_file_setting` through `runtime_dir`), and cannot see
+        // that this parse fails first.
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let text = "totally_bogus_knob = 42";
         let err = DaemonConfig::from_toml_str(text).expect_err("unknown field must fail");
         // `anyhow::Error::context` buries the offending field name in the
@@ -1474,6 +1514,9 @@ mod tests {
 
     #[test]
     fn validation_rejects_zero_memory_limit() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig {
             memory_limit_mb: 0,
             ..DaemonConfig::default()
@@ -1483,6 +1526,9 @@ mod tests {
 
     #[test]
     fn validation_rejects_closure_limit_out_of_range() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let low = DaemonConfig {
             closure_limit_percent: 0,
             ..DaemonConfig::default()
@@ -1497,6 +1543,9 @@ mod tests {
 
     #[test]
     fn validation_rejects_compaction_threshold_out_of_range() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let zero = DaemonConfig {
             interner_compaction_threshold: 0.0,
             ..DaemonConfig::default()
@@ -1516,6 +1565,9 @@ mod tests {
 
     #[test]
     fn validation_rejects_zero_debounce_and_zero_log_size() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let debounce = DaemonConfig {
             debounce_ms: 0,
             ..DaemonConfig::default()
@@ -1530,6 +1582,9 @@ mod tests {
 
     #[test]
     fn validation_rejects_max_shim_connections_out_of_range() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let zero = DaemonConfig {
             max_shim_connections: 0,
             ..DaemonConfig::default()
@@ -1549,6 +1604,9 @@ mod tests {
 
     #[test]
     fn validation_rejects_tool_timeout_out_of_range() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let zero = DaemonConfig {
             tool_timeout_secs: 0,
             ..DaemonConfig::default()
@@ -1568,6 +1626,14 @@ mod tests {
 
     #[test]
     fn load_from_missing_path_is_an_error() {
+        // The missing file is refused before anything is parsed, so no
+        // field default runs and no variable is read. The lock is held
+        // because the env-lock gate follows `load_from_path` to the parse
+        // and its environment-reading defaults (`default_log_file_setting`
+        // through `runtime_dir`), and cannot see that the read fails first.
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let err = DaemonConfig::load_from_path(Path::new("/nonexistent/sqryd.toml"))
             .expect_err("missing file is an error for explicit path");
         match err {
@@ -1580,6 +1646,9 @@ mod tests {
 
     #[test]
     fn socket_path_uses_runtime_dir_when_unspecified() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let p = cfg.socket_path();
         if cfg!(unix) {
@@ -1593,6 +1662,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lock_and_pid_use_runtime_dir_when_no_custom_socket() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Default config: no custom socket path, so lock/pid keep the
         // runtime-dir-rooted `sqryd.{pid,lock}` layout unchanged.
         let cfg = DaemonConfig::default();
@@ -1611,6 +1683,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn lock_and_pid_colocate_beside_custom_socket() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // A custom socket `/run/user/1000/priv/foo.sock` must place its lock
         // and pidfile in the socket's parent using the socket's file stem, so
         // two private-socket daemons in the same directory never collide on a
@@ -1647,6 +1722,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn validate_socket_path_accepts_default_and_boundary_lengths() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Default (short runtime-dir) path always fits.
         DaemonConfig::default()
             .validate_socket_path()
@@ -1672,6 +1750,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn validate_socket_path_rejects_over_long_path_with_typed_error() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // One byte over the limit yields a typed Config error (not a raw bind
         // failure / ready-timeout), and the message names both the actual
         // length and the platform limit (issue #519 part a).
@@ -1767,73 +1848,86 @@ mod tests {
         // `USER`/`USERNAME`/`XDG_RUNTIME_DIR` are all unset. The fix
         // switched the fallback to a `libc::getuid()`-derived suffix
         // so every user gets their own socket/pid/lock namespace.
+        //
+        // The fallback order is read through `runtime_dir_from`, so the
+        // test changes no process environment variable: removing `TMPDIR`
+        // here once sent every temporary directory a concurrent test made
+        // to `/tmp`. The lock is still held: `runtime_dir_from` names
+        // `user_scoped_dir_name`, whose non-Unix arm reads `USERNAME`, and
+        // the last check reads the process environment.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
-
-        // Stash and clear every env var that the runtime_dir() chain
-        // would otherwise read ahead of the UID-based fallback.
-        let prior_user = env::var_os("USER");
-        let prior_username = env::var_os("USERNAME");
-        let prior_xdg = env::var_os("XDG_RUNTIME_DIR");
-        let prior_tmpdir = env::var_os("TMPDIR");
-        // SAFETY: serialised by ENV_LOCK; restored before the guard drops.
-        unsafe {
-            env::remove_var("USER");
-            env::remove_var("USERNAME");
-            env::remove_var("XDG_RUNTIME_DIR");
-            env::remove_var("TMPDIR");
-        }
-
-        let cfg = DaemonConfig::default();
-        let socket = cfg.socket_path();
-        let pid = cfg.pid_path();
-        let lock = cfg.lock_path();
-
-        // Restore the prior environment before any assertion so a
-        // failing assertion does not poison sibling tests.
-        // SAFETY: guarded by ENV_LOCK.
-        unsafe {
-            if let Some(v) = prior_user {
-                env::set_var("USER", v);
-            }
-            if let Some(v) = prior_username {
-                env::set_var("USERNAME", v);
-            }
-            if let Some(v) = prior_xdg {
-                env::set_var("XDG_RUNTIME_DIR", v);
-            }
-            if let Some(v) = prior_tmpdir {
-                env::set_var("TMPDIR", v);
-            }
-        }
-
         // SAFETY: `libc::getuid` is infallible; see the inline comment
         // on `user_scoped_dir_name` above.
         let uid = unsafe { libc::getuid() };
-        let expected = format!("/tmp/sqry-{uid}");
+        let scoped = format!("sqry-{uid}");
+        let with = |set: &'static [(&'static str, &'static str)]| {
+            move |name: &str| {
+                set.iter()
+                    .find(|(key, _)| *key == name)
+                    .map(|(_, value)| std::ffi::OsString::from(value))
+            }
+        };
         assert_eq!(
-            socket.parent().and_then(Path::to_str),
-            Some(expected.as_str()),
-            "socket_path must be UID-scoped: socket = {socket:?}",
+            runtime_dir_from(with(&[])),
+            Path::new("/tmp").join(&scoped),
+            "with nothing set the runtime dir is /tmp/sqry-<uid>"
         );
         assert_eq!(
-            pid.parent().and_then(Path::to_str),
-            Some(expected.as_str()),
-            "pid_path must be UID-scoped: pid = {pid:?}",
+            runtime_dir_from(with(&[("TMPDIR", "/custom-tmp")])),
+            Path::new("/custom-tmp").join(&scoped),
+            "TMPDIR is UID-scoped too"
+        );
+        // The scope comes from the UID, never from a user name: the lookup
+        // is asked for `XDG_RUNTIME_DIR` and `TMPDIR` and nothing else, so no
+        // `USER` or `USERNAME` it could hold changes the answer.
+        let asked = std::cell::RefCell::new(Vec::new());
+        let recorded = runtime_dir_from(|name: &str| {
+            asked.borrow_mut().push(name.to_string());
+            None
+        });
+        assert_eq!(recorded, Path::new("/tmp").join(&scoped));
+        assert_eq!(
+            asked.into_inner(),
+            vec!["XDG_RUNTIME_DIR".to_string(), "TMPDIR".to_string()],
+            "the fallback asks for the runtime and temporary directories only"
         );
         assert_eq!(
-            lock.parent().and_then(Path::to_str),
-            Some(expected.as_str()),
-            "lock_path must be UID-scoped: lock = {lock:?}",
+            runtime_dir_from(with(&[
+                ("XDG_RUNTIME_DIR", "/run/user/7"),
+                ("TMPDIR", "/custom-tmp")
+            ])),
+            Path::new("/run/user/7/sqry"),
+            "XDG_RUNTIME_DIR comes first"
         );
-        // And the directory name is never the literal "default".
         assert!(
-            !expected.ends_with("sqry-default"),
+            !scoped.ends_with("default"),
             "runtime dir must never fall back to the shared /tmp/sqry-default path",
         );
+
+        // The socket, pidfile and lockfile sit in the runtime dir the
+        // process environment selects.
+        let cfg = DaemonConfig::default();
+        let expected = runtime_dir();
+        for (what, path) in [
+            ("socket", cfg.socket_path()),
+            ("pid", cfg.pid_path()),
+            ("lock", cfg.lock_path()),
+        ] {
+            assert_eq!(
+                path.parent(),
+                Some(expected.as_path()),
+                "{what} path must sit in the runtime dir: {path:?}",
+            );
+        }
     }
 
     #[test]
     fn round_trip_via_toml_preserves_workspace_entries() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Author a TOML string → parse → re-emit → re-parse — the two
         // parses must produce the same workspace list.
         let text = r#"
@@ -1858,6 +1952,9 @@ mod tests {
 
     #[test]
     fn u2_defaults_match_spec() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         assert_eq!(
             cfg.auto_start_ready_timeout_secs, 10,
@@ -1992,6 +2089,9 @@ mod tests {
 
     #[test]
     fn validate_rejects_out_of_range_derived_save_timeout() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Zero would race `tokio::time::timeout` at 0 ms, dropping the
         // derived cache on every publish (the failure this fix exists to
         // prevent); past one hour is treated as a misconfiguration.
@@ -2014,6 +2114,9 @@ mod tests {
 
     #[test]
     fn u2_validate_auto_start_ready_timeout_range() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Zero is rejected.
         let zero = DaemonConfig {
             auto_start_ready_timeout_secs: 0,
@@ -2044,6 +2147,9 @@ mod tests {
 
     #[test]
     fn u2_validate_log_keep_rotations_range() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Zero is rejected.
         let zero = DaemonConfig {
             log_keep_rotations: 0,
@@ -2074,6 +2180,11 @@ mod tests {
 
     #[test]
     fn u2_from_toml_str_round_trip_new_fields() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let text = r#"
             auto_start_ready_timeout_secs = 45
             log_keep_rotations = 10
@@ -2087,6 +2198,11 @@ mod tests {
 
     #[test]
     fn u2_from_toml_str_new_fields_default_when_absent() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // None of the new fields are present — they must fall back to defaults.
         let text = r"memory_limit_mb = 1024";
         let cfg = DaemonConfig::from_toml_str(text).expect("parse");
@@ -2100,6 +2216,11 @@ mod tests {
 
     #[test]
     fn rws03_revision_artifact_config_defaults_when_absent() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::from_toml_str("memory_limit_mb = 1024").expect("parse");
         assert_eq!(
             cfg.revision_artifacts.max_disk_bytes,
@@ -2117,6 +2238,11 @@ mod tests {
 
     #[test]
     fn rws03_revision_artifact_config_parses_from_toml() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let text = r#"
             [revision_artifacts]
             max_disk_bytes = 1048576
@@ -2131,6 +2257,9 @@ mod tests {
 
     #[test]
     fn rws03_revision_artifact_config_validation_rejects_zeroes() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let zero_budget = DaemonConfig {
             revision_artifacts: RevisionArtifactConfig {
                 max_disk_bytes: 0,
@@ -2161,6 +2290,11 @@ mod tests {
 
     #[test]
     fn rws08_managed_worktree_config_defaults_when_absent() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::from_toml_str("memory_limit_mb = 1024").expect("parse");
         assert_eq!(cfg.managed_worktrees.root, None);
         assert_eq!(
@@ -2181,6 +2315,11 @@ mod tests {
 
     #[test]
     fn rws08_managed_worktree_config_parses_from_toml() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let text = r#"
             [managed_worktrees]
             root = "/tmp/sqry-managed-worktrees"
@@ -2210,6 +2349,9 @@ mod tests {
 
     #[test]
     fn rws08_managed_worktree_config_validation_rejects_empty_prefix_policy() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let no_prefixes = DaemonConfig {
             managed_worktrees: ManagedWorktreeConfig {
                 safe_branch_prefixes: Vec::new(),
@@ -2231,6 +2373,11 @@ mod tests {
 
     #[test]
     fn rws10_revision_artifact_repo_budget_defaults_parses_and_validates() {
+        // Parsing fills an absent field from a default that reads the
+        // environment (`default_log_file_setting` through `runtime_dir`).
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::from_toml_str(
             r"
             [revision_artifacts]
@@ -2251,6 +2398,9 @@ mod tests {
 
     #[test]
     fn rws03_graph_config_hash_is_stable_and_changes_on_inputs() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let first = DaemonConfig::default();
         let second = DaemonConfig::default();
         assert_eq!(
@@ -2273,6 +2423,9 @@ mod tests {
 
     #[test]
     fn u2_install_user_service_defaults_false_and_is_tolerated_by_validate() {
+        let _env = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // install_user_service is a no-op bool; validate must not reject any
         // value for it (both true and false are permanently valid).
         let with_true = DaemonConfig {

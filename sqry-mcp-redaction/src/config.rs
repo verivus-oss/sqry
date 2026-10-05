@@ -159,6 +159,73 @@ pub fn redaction_max_depth() -> usize {
         .clamp(MIN_REDACTION_MAX_DEPTH, MAX_REDACTION_MAX_DEPTH)
 }
 
+/// A redaction preset, by name.
+///
+/// Every surface that turns a preset name into a redaction reads it through
+/// [`RedactionPreset::parse`], so the name means the same everywhere: one of
+/// [`RedactionPreset::NAMES`], with its surrounding whitespace trimmed, in
+/// any letter case (`Strict`, ` minimal `). Any other value is no preset;
+/// what a surface does with it is its own, and none reads it as "no
+/// redaction" (`sqry-mcp` and `sqryd` refuse to start, decision D-i8-20).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RedactionPreset {
+    /// [`RedactionConfig::none`].
+    None,
+    /// [`RedactionConfig::minimal`].
+    Minimal,
+    /// [`RedactionConfig::relative`].
+    Relative,
+    /// [`RedactionConfig::standard`].
+    Standard,
+    /// [`RedactionConfig::strict`].
+    Strict,
+}
+
+impl RedactionPreset {
+    /// Every preset name, as the documentation lists them.
+    pub const NAMES: [&'static str; 5] = ["none", "minimal", "relative", "standard", "strict"];
+
+    /// The preset `name` names: trimmed, in any letter case. `None` for any
+    /// other value, the empty string included.
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        let name = name.trim();
+        [
+            Self::None,
+            Self::Minimal,
+            Self::Relative,
+            Self::Standard,
+            Self::Strict,
+        ]
+        .into_iter()
+        .find(|preset| preset.name().eq_ignore_ascii_case(name))
+    }
+
+    /// The preset's canonical (lowercase) name.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Relative => "relative",
+            Self::Standard => "standard",
+            Self::Strict => "strict",
+        }
+    }
+
+    /// The preset's configuration, with no environment override.
+    #[must_use]
+    pub fn config(self) -> RedactionConfig {
+        match self {
+            Self::None => RedactionConfig::none(),
+            Self::Minimal => RedactionConfig::minimal(),
+            Self::Relative => RedactionConfig::relative(),
+            Self::Standard => RedactionConfig::standard(),
+            Self::Strict => RedactionConfig::strict(),
+        }
+    }
+}
+
 /// Security mode for redaction.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SecurityMode {
@@ -474,7 +541,7 @@ impl RedactionConfig {
     ///
     /// | Variable | Values | Default | Description |
     /// |----------|--------|---------|-------------|
-    /// | `SQRY_REDACTION_PRESET` | `none`, `minimal`, `relative`, `standard`, `strict` | `standard` | Base preset |
+    /// | `SQRY_REDACTION_PRESET` | `none`, `minimal`, `relative`, `standard`, `strict` (trimmed, any letter case; any other value reads as `standard`, with a warning) | `standard` | Base preset |
     /// | `SQRY_REDACT_PATHS` | `0`, `1` | per preset | Redact absolute paths |
     /// | `SQRY_REDACT_WORKSPACE` | `0`, `1` | per preset | Redact workspace_path |
     /// | `SQRY_REDACT_URIS` | `0`, `1` | per preset | Redact file:// URIs |
@@ -490,21 +557,17 @@ impl RedactionConfig {
     pub fn from_env() -> Self {
         let preset = std::env::var("SQRY_REDACTION_PRESET")
             .ok()
-            .and_then(|s| match s.to_lowercase().as_str() {
-                "none" => Some(Self::none()),
-                "minimal" => Some(Self::minimal()),
-                "relative" => Some(Self::relative()),
-                "standard" => Some(Self::standard()),
-                "strict" => Some(Self::strict()),
-                _ => {
+            .and_then(|s| {
+                let preset = RedactionPreset::parse(&s);
+                if preset.is_none() {
                     log::warn!(
                         "Invalid SQRY_REDACTION_PRESET '{}', falling back to 'standard'",
                         s
                     );
-                    None
                 }
+                preset
             })
-            .unwrap_or_else(Self::standard);
+            .map_or_else(Self::standard, RedactionPreset::config);
 
         let parse_bool = |key: &str, default: bool| -> bool {
             std::env::var(key)
@@ -570,18 +633,22 @@ impl RedactionConfig {
     /// environment variable overrides (`SQRY_REDACT_PATHS`, `SQRY_REDACT_CODE`, etc.).
     ///
     /// Unlike [`from_env()`](Self::from_env), this does NOT read `SQRY_REDACTION_PRESET`
-    /// from the environment — the caller supplies the preset name directly. This is useful
+    /// from the environment: the caller supplies the preset name directly. This is useful
     /// when the preset comes from a config file rather than an env var.
+    ///
+    /// The name is read by [`RedactionPreset::parse`] (trimmed, any letter
+    /// case). Any other name reads as `standard`, with a warning, never as
+    /// no redaction; a caller that must refuse an unknown name parses it
+    /// first.
     #[must_use]
     pub fn from_preset_with_env(preset_name: &str) -> Self {
-        let preset = match preset_name {
-            "none" => Self::none(),
-            "minimal" => Self::minimal(),
-            "relative" => Self::relative(),
-            "strict" => Self::strict(),
-            // Default to standard for unknown presets
-            _ => Self::standard(),
-        };
+        let preset = RedactionPreset::parse(preset_name).map_or_else(
+            || {
+                log::warn!("Unknown redaction preset '{preset_name}', falling back to 'standard'");
+                Self::standard()
+            },
+            RedactionPreset::config,
+        );
 
         let parse_bool = |key: &str, default: bool| -> bool {
             std::env::var(key)
@@ -737,6 +804,39 @@ mod tests {
         let standard = RedactionConfig::standard();
         assert_eq!(default.security_mode, standard.security_mode);
         assert_eq!(default.redact_code_context, standard.redact_code_context);
+    }
+
+    /// Round 8 (D-i8-20): a preset name is read trimmed and in any letter
+    /// case, and any other value is no preset; `from_preset_with_env` reads
+    /// a miscased name as that preset (it read `Strict` as `standard`) and
+    /// an unknown one as `standard`, never as no redaction.
+    #[test]
+    fn preset_names_are_trimmed_and_read_in_any_letter_case() {
+        for (text, preset) in [
+            ("none", RedactionPreset::None),
+            ("Minimal", RedactionPreset::Minimal),
+            (" relative ", RedactionPreset::Relative),
+            ("STANDARD", RedactionPreset::Standard),
+            ("Strict\n", RedactionPreset::Strict),
+        ] {
+            assert_eq!(RedactionPreset::parse(text), Some(preset), "{text:?}");
+            assert_eq!(RedactionPreset::parse(preset.name()), Some(preset));
+        }
+        for text in ["", "  ", "bogus", "strictest", "min imal", "none-"] {
+            assert_eq!(RedactionPreset::parse(text), None, "{text:?}");
+        }
+        assert_eq!(
+            RedactionPreset::NAMES
+                .map(|name| RedactionPreset::parse(name).map(RedactionPreset::name)),
+            RedactionPreset::NAMES.map(Some)
+        );
+        let strict = RedactionConfig::from_preset_with_env("Strict");
+        assert!(strict.hash_filenames && strict.redact_documentation);
+        let none = RedactionConfig::from_preset_with_env(" NONE ");
+        assert_eq!(none.security_mode, SecurityMode::Passthrough);
+        let unknown = RedactionConfig::from_preset_with_env("bogus");
+        assert_eq!(unknown.security_mode, SecurityMode::Whitelist);
+        assert!(unknown.redact_absolute_paths && unknown.redact_code_context);
     }
 
     #[test]

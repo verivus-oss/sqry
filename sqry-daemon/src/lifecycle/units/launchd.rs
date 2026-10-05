@@ -356,6 +356,9 @@ mod tests {
     /// The plist must contain the correct label string.
     #[test]
     fn launchd_plist_contains_label_and_keepalive() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let plist = generate_plist(&cfg, &stable_opts());
 
@@ -377,6 +380,9 @@ mod tests {
     /// `foreground` sub-command.
     #[test]
     fn launchd_plist_contains_program_arguments() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let plist = generate_plist(&cfg, &stable_opts());
 
@@ -395,6 +401,9 @@ mod tests {
     /// tilde-prefixed paths would prevent log files from being created.
     #[test]
     fn launchd_plist_contains_standard_out_and_err_paths() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let plist = generate_plist(&cfg, &stable_opts());
 
@@ -432,6 +441,9 @@ mod tests {
     /// prevent the daemon from `chdir`-ing to its data directory on startup.
     #[test]
     fn launchd_plist_contains_working_directory() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let plist = generate_plist(&cfg, &stable_opts());
 
@@ -460,6 +472,9 @@ mod tests {
     /// When `dirs::home_dir()` returns `None` this test is skipped.
     #[test]
     fn launchd_plist_runtime_paths_are_absolute_when_home_available() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Only run this assertion when a real home directory is available.
         if resolve_home().is_none() {
             return;
@@ -503,6 +518,9 @@ mod tests {
     /// `EnvironmentVariables` must include `RUST_BACKTRACE=1`.
     #[test]
     fn launchd_plist_contains_rust_backtrace_env() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let plist = generate_plist(&cfg, &stable_opts());
 
@@ -519,6 +537,9 @@ mod tests {
     /// The plist must include a version comment stamp.
     #[test]
     fn launchd_plist_contains_version_stamp() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let plist = generate_plist(&cfg, &stable_opts());
         let version = env!("CARGO_PKG_VERSION");
@@ -534,6 +555,9 @@ mod tests {
     /// `<plist>` element must be opened and closed.
     #[test]
     fn launchd_plist_is_well_formed_xml() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let plist = generate_plist(&cfg, &stable_opts());
 
@@ -573,6 +597,9 @@ mod tests {
     /// sentinel strings that `generate_plist()` emits.
     #[test]
     fn launchd_plist_snapshot() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let plist = generate_plist(&cfg, &stable_opts());
         let version = env!("CARGO_PKG_VERSION");
@@ -656,6 +683,9 @@ mod tests {
     /// plist filename when a home directory is available.
     #[test]
     fn default_install_path_ends_with_expected_filename() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Skip this test when running in a rootless container with no HOME dir.
         if let Some(path) = default_install_path() {
             assert!(
@@ -669,6 +699,9 @@ mod tests {
     /// produce a non-empty binary path in the plist.
     #[test]
     fn launchd_plist_with_current_exe_fallback_does_not_panic() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let opts = InstallOptions {
             exe_path: None,
@@ -691,6 +724,9 @@ mod tests {
     /// Unix/macOS) and future user-supplied paths via `--exe-path`.
     #[test]
     fn launchd_plist_xml_escapes_special_chars_in_exe_path() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         // A path with all five XML-significant characters.
         let opts = InstallOptions {
@@ -752,6 +788,9 @@ mod tests {
     /// regression guard for the iter-4 fix.
     #[test]
     fn launchd_plist_xml_escapes_runtime_paths() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         // Inject a fake home path with XML-significant characters.
         // This is an unusual but syntactically valid Unix path.

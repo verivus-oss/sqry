@@ -39,7 +39,8 @@
 //! 1. **Create**: On first file routed to an index_root
 //! 2. **Initialize**: Empty graph, caches, watchers
 //! 3. **Build**: Full index scan
-//! 4. **Update**: Incremental updates on file changes
+//! 4. **Update**: none in the Project itself; file watching lives in the LSP
+//!    layer, and every rebuild parses every file
 //! 5. **Destroy**: On workspace removal or shutdown
 
 pub mod manager;

@@ -152,8 +152,8 @@ fn installed_cli_feature_surface_matrix() {
         ("root search", &["process", "."]),
         ("search", &["search", "process", "."]),
         (
-            "semantic search",
-            &["--semantic", "--limit", "5", "process", "."],
+            "structural search (the default)",
+            &["--limit", "5", "process", "."],
         ),
         ("text search", &["--text", "--limit", "5", "process", "."]),
         ("query", &["query", "kind:function", "."]),

@@ -384,11 +384,13 @@ where
                 reader,
                 writer,
                 Arc::clone(&ctx.manager),
+                Arc::clone(&ctx.dispatcher),
                 Arc::clone(&ctx.workspace_builder),
                 Arc::clone(&ctx.tool_executor),
                 ctx.cpu_executor.clone(),
                 tool_timeout,
                 ctx.daemon_version,
+                Arc::clone(&ctx.mcp_redaction),
                 ctx.shutdown.clone(),
             )
             .await

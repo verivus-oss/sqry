@@ -197,6 +197,26 @@ public = [
     # every failing run minted a new issue.
     "scripts/ci/file-fuzz-issue.sh",
     "scripts/ci/test-file-fuzz-issue.sh",
+    # ci.yml's agent-skills-and-installer job. The parity checker proves every
+    # copy of a vendored skill still matches its source and that the tree holds
+    # no symlinks, which sanitize-for-oss.sh fails closed on. The installer
+    # suite is scripts/install.sh's only execution coverage. ci.yml ships to
+    # the mirror, so both scripts must exist there too.
+    #
+    # "ci.yml names it" is NOT on its own a reason to ship a script. The test
+    # must ship exactly when its SUBJECT does, and both of these subjects
+    # (scripts/install.sh, the vendored agent-skills) are public. Shipping a
+    # test whose subject is excluded is what broke the mirror once:
+    # test_prepare_link_check.py was listed here while its subject,
+    # benchmarks/swebench/prepare.sh, sits in [selection.crates].excluded, so
+    # the sanitized tree ran a test that FATALs on a file it can never have.
+    # internal-checks.yml's step now asserts the pairing in both directions
+    # instead (it moved out of ci.yml, which ships).
+    "scripts/ci/check_release_version.py",
+    "scripts/ci/test_release_version.py",
+    "scripts/ci/check_agent_skills_parity.py",
+    "scripts/ci/test_agent_skills_parity.py",
+    "scripts/ci/test_install_sh.py",
     # Phase A C indirect-call precision: build-time perf gate enforcing
     # SPEC §5.2's +15% SAME-COMMIT MARGINAL budget on the linux-driver-subset
     # fixture (2026-07-06 remethodology, verivus-oss/sqry#280; drives the
@@ -223,6 +243,11 @@ public = [
 
 [selection.dirs]
 public = [
+    # Consumer agent skills plus the plugin manifests that register sqry-mcp and
+    # sqry-lsp beside them. This tree is the source of truth; verivus-oss/sqry-skills
+    # is a publish target. Shipping it here is what lets a release carry the skills
+    # without a second repository (verivus-oss/sqry#801).
+    "agent-skills/",
     "crates/",
     "third-party/",
     "test-fixtures/",

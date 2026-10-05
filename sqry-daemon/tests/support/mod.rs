@@ -14,7 +14,12 @@
 #![allow(dead_code)]
 
 pub mod editor_patterns;
+// The IPC test server and client run over a Unix domain socket.
+#[cfg(unix)]
 pub mod ipc;
+// The round 7 rebuild-path fixtures drive the test hooks.
+#[cfg(all(unix, feature = "test-hooks"))]
+pub mod rebuild_fixtures;
 
 use std::{
     fs,
@@ -28,8 +33,12 @@ use std::{
 use sqry_core::{graph::unified::build::BuildConfig, project::ProjectRootMode};
 use sqry_daemon::{
     DaemonConfig, DaemonError, RebuildDispatcher, WorkspaceKey, WorkspaceManager,
-    workspace::{WorkingSetInputs, WorkspaceBuilder, working_set_estimate},
+    workspace::{
+        BuiltGraph, WorkingSetInputs, WorkspaceBuilder, WorkspaceRosterResolver,
+        working_set_estimate,
+    },
 };
+use sqry_plugin_registry::RosterSource;
 use tempfile::TempDir;
 
 /// Initialize a small Git repository with a `main` branch and one Rust file.
@@ -86,12 +95,13 @@ impl std::fmt::Debug for RealGraphBuilder {
 }
 
 impl WorkspaceBuilder for RealGraphBuilder {
-    fn build(&self, workspace_root: &Path) -> Result<sqry_core::graph::CodeGraph, DaemonError> {
+    fn build(&self, workspace_root: &Path) -> Result<BuiltGraph, DaemonError> {
         sqry_core::graph::unified::build::build_unified_graph(
             workspace_root,
             &self.plugins,
             &self.cfg,
         )
+        .map(|graph| BuiltGraph::with_manager(graph, &self.plugins, RosterSource::Fallback))
         .map_err(|e| DaemonError::WorkspaceBuildFailed {
             root: workspace_root.to_path_buf(),
             reason: format!("test build: {e}"),
@@ -137,7 +147,7 @@ impl WatcherHarness {
         let dispatcher = RebuildDispatcher::new(
             Arc::clone(&manager),
             Arc::clone(&config),
-            Arc::clone(&plugins),
+            Arc::new(WorkspaceRosterResolver::new()),
         );
 
         let key = WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
@@ -233,7 +243,7 @@ impl DispatchHarness {
         let dispatcher = RebuildDispatcher::new(
             Arc::clone(&manager),
             Arc::clone(&config),
-            Arc::clone(&plugins),
+            Arc::new(WorkspaceRosterResolver::new()),
         );
 
         let key = WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
@@ -277,7 +287,7 @@ impl std::fmt::Debug for AlwaysFailBuilder {
 }
 
 impl WorkspaceBuilder for AlwaysFailBuilder {
-    fn build(&self, workspace_root: &Path) -> Result<sqry_core::graph::CodeGraph, DaemonError> {
+    fn build(&self, workspace_root: &Path) -> Result<BuiltGraph, DaemonError> {
         Err(DaemonError::WorkspaceBuildFailed {
             root: workspace_root.to_path_buf(),
             reason: "AlwaysFailBuilder: synthetic failure for classify_for_serve tests".to_string(),

@@ -39,6 +39,9 @@ fn pending(
         },
         enqueued_at,
         git_state_at_enqueue: None,
+        macro_request: sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
+        waiters: sqry_daemon::RebuildWaiters::default(),
+        requester: sqry_daemon::workspace::RebuildRequester::Watcher,
     }
 }
 
@@ -376,6 +379,9 @@ fn pending_with_git_state(
         },
         enqueued_at: Instant::now(),
         git_state_at_enqueue,
+        macro_request: sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
+        waiters: sqry_daemon::RebuildWaiters::default(),
+        requester: sqry_daemon::workspace::RebuildRequester::Watcher,
     }
 }
 

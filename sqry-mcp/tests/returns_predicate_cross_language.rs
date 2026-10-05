@@ -331,37 +331,14 @@ fn init_caches() {
     });
 }
 
-/// Locate the `sqry` CLI binary built next to the test binary in
-/// `target/{debug,release}/sqry`. Mirrors the resolver used by
-/// `sqry-mcp/tests/installed_feature_surface_e2e.rs`.
+/// Locate the `sqry` binary for testing.
+///
+/// Delegates to the one resolver, `sqry_core::test_support::binaries::sqry_binary`
+/// (surface parity W4, design W4-D13), which reads `SQRY_E2E_SQRY_BIN`, then
+/// `CARGO_BIN_EXE_sqry`, then `CARGO_TARGET_DIR` and the workspace `target`,
+/// debug before release, and panics naming every variable and candidate.
 fn sqry_bin() -> PathBuf {
-    if let Ok(path) = std::env::var("SQRY_E2E_SQRY_BIN") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return path;
-        }
-    }
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace = manifest_dir.parent().expect("workspace root");
-    let exe_suffix = std::env::consts::EXE_SUFFIX;
-    let binary_name = if exe_suffix.is_empty() {
-        "sqry".to_string()
-    } else {
-        format!("sqry{exe_suffix}")
-    };
-
-    let debug_path = workspace.join("target/debug").join(&binary_name);
-    if debug_path.is_file() {
-        return debug_path;
-    }
-    let release_path = workspace.join("target/release").join(&binary_name);
-    if release_path.is_file() {
-        return release_path;
-    }
-    panic!(
-        "Could not find sqry binary. Tried target/debug/{binary_name} and target/release/{binary_name}. \
-         Run `cargo build --bin sqry` first or set SQRY_E2E_SQRY_BIN."
-    );
+    sqry_core::test_support::binaries::sqry_binary()
 }
 
 /// Materialize the language fixture under a fresh `TempDir` and return

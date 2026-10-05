@@ -34,6 +34,8 @@ use serde_json::{Value, json};
 
 use crate::error::RpcError;
 use crate::pagination::decode_cursor;
+/// The `rebuild_index` wire parameters, shared with the standalone server.
+pub use crate::tools::params::RebuildIndexParams;
 use crate::tools::params::{
     ChangeTypeParam, ComplexityMetricsParams, CycleTypeParam, DependencyImpactParams,
     DirectCalleesParams, DirectCallersParams, EdgeKindParam, ExportGraphParams, FindCyclesParams,
@@ -677,4 +679,46 @@ pub fn params_to_show_dependencies_args(params: Value) -> Result<ShowDependencie
         max_results,
         pagination,
     })
+}
+
+/// The `rebuild_index` arguments read the way the standalone server reads
+/// them: through [`RebuildIndexParams`], which refuses unknown fields and
+/// wrong types. A daemon-hosted `rebuild_index` that parses its arguments
+/// here refuses what the standalone server refuses: a misspelled macro
+/// field such as `cfg_flag` is an error, not an option silently dropped.
+///
+/// # Errors
+///
+/// The `serde_json` error naming the unknown field or the wrong type.
+pub fn parse_rebuild_index_params(
+    arguments: &Value,
+) -> Result<RebuildIndexParams, serde_json::Error> {
+    serde_json::from_value(arguments.clone())
+}
+
+#[cfg(test)]
+mod rebuild_index_params_tests {
+    use super::*;
+
+    #[test]
+    fn rebuild_index_params_refuse_unknown_fields_and_accept_the_schema() {
+        let err = parse_rebuild_index_params(&json!({ "path": "/ws", "cfg_flag": ["test"] }))
+            .expect_err("an unknown field is refused");
+        assert!(
+            err.to_string().contains("unknown field `cfg_flag`"),
+            "{err}"
+        );
+        let params = parse_rebuild_index_params(&json!({
+            "path": "/ws",
+            "force": true,
+            "cfg_flags": ["test"],
+            "expand_cache": "cache",
+            "reset_macro_options": true,
+        }))
+        .expect("every schema field is accepted");
+        assert_eq!(params.cfg_flags, Some(vec!["test".to_string()]));
+        assert_eq!(params.expand_cache.as_deref(), Some("cache"));
+        assert!(params.force && params.reset_macro_options);
+        assert!(parse_rebuild_index_params(&json!({ "force": "yes" })).is_err());
+    }
 }

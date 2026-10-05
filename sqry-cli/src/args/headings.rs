@@ -73,9 +73,6 @@ pub const SEARCH_INPUT: &str = "Search Input";
 /// Watch command configuration
 pub const WATCH_CONFIGURATION: &str = "Watch Configuration";
 
-/// Update command configuration
-pub const UPDATE_CONFIGURATION: &str = "Update Configuration";
-
 /// Repair command options
 pub const REPAIR_OPTIONS: &str = "Repair Options";
 

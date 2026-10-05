@@ -1,5 +1,9 @@
 //! Task 8 Phase 8a — `daemon/load` canonicalization policy tests.
 
+// The IPC test server and client run over a Unix domain socket
+// (`support::ipc`), so this binary is Unix-only.
+#![cfg(unix)]
+
 mod support;
 
 use serde_json::json;

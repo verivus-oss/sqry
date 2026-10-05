@@ -1,12 +1,13 @@
-//! Incremental indexing with hash-based change detection.
+//! Hash-based file change detection.
 //!
-//! This module provides fast file change detection using `XXHash64` (~10GB/s hashing speed)
-//! to enable incremental re-indexing. Only files that have changed since the last index
-//! are re-parsed, achieving 10-100x speedup for re-indexing operations.
+//! This module provides fast file change detection using `XXHash64` (~10GB/s hashing
+//! speed). No build reads it: its only production caller is `sqry index --cache-dir`,
+//! which saves a [`HashIndex`] of the files it parsed, and every build, `sqry update`,
+//! `sqry watch` and the daemon included, parses every file again.
 //!
 //! # Architecture
 //!
-//! The incremental indexing system uses a 3-level change detection strategy:
+//! The change detection uses a 3-level strategy:
 //!
 //! 1. **Existence check**: Is the file still there?
 //! 2. **Metadata check**: Has size or mtime changed?
@@ -362,8 +363,8 @@ impl HashIndex {
     /// maximum cached size is controlled by `content_cache_max_bytes`; when set
     /// to `None` the cache is unbounded.
     ///
-    /// This is called after successfully parsing a file to enable fast
-    /// incremental updates on the next change.
+    /// Meant to be called after a file is parsed, so a later change can be
+    /// diffed against it; no build path calls it today.
     ///
     /// # Size Limit
     ///

@@ -54,8 +54,12 @@
 //!     - Always: touch `runtime_dir/sqryd.ready` (diagnostic, non-authoritative).
 //! 16. `server.run().await`.
 //! 17. RAII Drop order: `IpcServer` drops (stops accepting; socket file
-//!     remains on disk in configured-path mode), pidfile removed + lock
-//!     released by `PidfileLock::Drop`.
+//!     remains on disk in configured-path mode); the `PidfileLock` is kept
+//!     until the process exits: `run` waits for every durable persist in
+//!     flight, shuts the runtime down with a bounded wait
+//!     ([`finish_runtime`]), and only then removes the pidfile and releases
+//!     the lock, so `sqry daemon stop` reports a stop once the process can
+//!     write nothing more.
 //!
 //! # Detach path (§C.3.2)
 //!
@@ -85,7 +89,6 @@
 
 use std::{path::PathBuf, process::ExitCode, sync::Arc, time::Duration};
 
-#[cfg(unix)]
 use std::path::Path;
 
 use clap::{Parser, Subcommand};
@@ -95,7 +98,7 @@ use tracing::{error, info, warn};
 
 use crate::{
     DaemonConfig, DaemonError, DaemonResult, IpcServer, RealWorkspaceBuilder, RebuildDispatcher,
-    WorkspaceManager,
+    WorkspaceManager, WorkspaceRosterResolver,
     lifecycle::{
         log_rotate::install_tracing,
         notify::{is_under_systemd, notify_ready},
@@ -105,7 +108,6 @@ use crate::{
     },
 };
 
-#[cfg(unix)]
 use crate::lifecycle::pidfile::PidfileLock;
 
 // ---------------------------------------------------------------------------
@@ -283,6 +285,8 @@ pub struct Start {
 /// loading, lifecycle setup, or the selected daemon subcommand fails.
 pub fn run() -> DaemonResult<()> {
     let cli = SqrydCli::parse();
+    #[cfg(feature = "test-hooks")]
+    install_test_persist_pause();
     // `A_cancellation.md` §5 + GT-6: cap the blocking thread pool at
     // 64 so a storm of timed-out tool calls (which leave their
     // `spawn_blocking` body running cooperatively until the
@@ -308,7 +312,7 @@ pub fn run() -> DaemonResult<()> {
 
     let command = cli.command.unwrap_or(Command::Start(Start::default()));
 
-    match command {
+    let result = match command {
         Command::Start(start) => rt.block_on(run_start(start, config_path, log_level)),
         Command::Foreground => rt.block_on(run_start(Start::default(), config_path, log_level)),
         Command::Stop { timeout_secs } => {
@@ -326,6 +330,76 @@ pub fn run() -> DaemonResult<()> {
         #[cfg(target_os = "windows")]
         Command::InstallWindows => run_install_windows(config_path, log_level),
         Command::PrintConfig => run_print_config(config_path.as_ref(), log_level),
+    };
+    finish_runtime(
+        rt,
+        SHUTDOWN_BLOCKING_GRACE,
+        sqry_core::graph::unified::persistence::PersistGate::global(),
+    );
+    // The pidfile lock is released last, as the process exits, so a
+    // `sqry daemon stop` that waits for it reports a stop only once no
+    // write of this process can still land.
+    release_held_until_exit();
+    result
+}
+
+/// Shut the daemon's runtime down at exit.
+///
+/// First the persist gate is closed and every durable persist in flight is
+/// waited for, without a bound: a persist is never abandoned mid-way (it
+/// finishes and its index is whole), and one that has not begun is refused
+/// before it writes anything. Then the runtime is shut down with a bounded
+/// wait, because what can still be running is safe to abandon: a file
+/// watcher's blocking loop (the IPC server stopped every watcher, so it
+/// exits within one poll) or a rebuild's build phase, which writes nothing
+/// and can no longer reach a persist. Issue #902: dropping the runtime
+/// instead would wait for every blocking task without bound.
+pub(crate) fn finish_runtime(
+    rt: tokio::runtime::Runtime,
+    grace: std::time::Duration,
+    persists: &sqry_core::graph::unified::persistence::PersistGate,
+) {
+    persists.close_and_wait();
+    rt.shutdown_timeout(grace);
+}
+
+/// How long the daemon process waits at exit, after every durable persist
+/// in flight has finished, for other blocking work (a watcher's last poll,
+/// an abandoned build phase) before it exits anyway.
+pub const SHUTDOWN_BLOCKING_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Values the daemon keeps until the process exits (its pidfile lock).
+static HELD_UNTIL_EXIT: parking_lot::Mutex<Vec<PidfileLock>> = parking_lot::Mutex::new(Vec::new());
+
+/// Keep `lock` until [`release_held_until_exit`] runs, after the runtime's
+/// shutdown, so the lock outlives every write the process makes.
+fn hold_until_exit(lock: PidfileLock) {
+    HELD_UNTIL_EXIT.lock().push(lock);
+}
+
+/// Release what [`hold_until_exit`] kept: the pidfile is removed and its
+/// lock released.
+fn release_held_until_exit() {
+    let held = std::mem::take(&mut *HELD_UNTIL_EXIT.lock());
+    drop(held);
+}
+
+/// Test hook (`test-hooks` builds only): when `SQRYD_TEST_MID_PERSIST_PAUSE_MS`
+/// is set, every durable persist pauses that long once it has set the old
+/// pair aside, so a process-level test can stop or kill the daemon in the
+/// middle of a persist.
+#[cfg(feature = "test-hooks")]
+fn install_test_persist_pause() {
+    fn pause(_graph_dir: &std::path::Path) {
+        if let Some(ms) = std::env::var("SQRYD_TEST_MID_PERSIST_PAUSE_MS")
+            .ok()
+            .and_then(|ms| ms.parse::<u64>().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
+    }
+    if std::env::var_os("SQRYD_TEST_MID_PERSIST_PAUSE_MS").is_some() {
+        sqry_core::graph::unified::persistence::write_guard::set_mid_persist_hook(pause);
     }
 }
 
@@ -429,14 +503,16 @@ async fn run_start_foreground(
     signal_ready(&cfg, server.socket_path());
 
     // Step 16 -- Run.
-    server.run().await?;
+    let ran = server.run().await;
 
-    // Step 17 -- RAII Drop: signal_guard, then pidfile_lock.
+    // Step 17 -- RAII Drop: signal_guard; the pidfile lock is held until
+    // the process exits (`run` releases it after the runtime's shutdown),
+    // so a persist still finishing keeps the daemon's identity.
     info!("sqryd shutdown complete");
     drop(signal_guard);
-    drop(pidfile_lock);
+    hold_until_exit(pidfile_lock);
 
-    Ok(())
+    ran
 }
 
 // ---------------------------------------------------------------------------
@@ -732,7 +808,7 @@ async fn run_start_spawned_by_client_unix(
     // flock acquired by the parent.  The grandchild is the sole user of this
     // FD in this process.  adopt() takes ownership; caller must NOT close
     // lock_fd separately.
-    let _pidfile_lock = unsafe { PidfileLock::adopt(lock_fd, pidfile_path, lockfile_path) };
+    let pidfile_lock = unsafe { PidfileLock::adopt(lock_fd, pidfile_path, lockfile_path) };
 
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -741,7 +817,10 @@ async fn run_start_spawned_by_client_unix(
     );
 
     // Steps 2-16 -- run the foreground startup path passing the ready-pipe FD.
-    run_start_foreground_inner(cfg, log_level, ready_pipe_fd).await
+    let ran = run_start_foreground_inner(cfg, log_level, ready_pipe_fd).await;
+    // Held until the process exits, as in the foreground path.
+    hold_until_exit(pidfile_lock);
+    ran
 }
 
 /// Inner foreground path shared by the grandchild (`--spawned-by-client`)
@@ -847,10 +926,16 @@ async fn run_stop(
         "waiting for daemon socket to become unreachable"
     );
 
+    // The daemon holds its pidfile lock until it exits, after every
+    // durable persist in flight has finished, so the stop is complete only
+    // once the socket is gone and the lock is free.
+    let lock_path = cfg.lock_path();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
     loop {
-        if !crate::lifecycle::detach::try_connect_path(&socket_path).await {
-            info!("daemon socket gone -- stop complete");
+        if !crate::lifecycle::detach::try_connect_path(&socket_path).await
+            && daemon_lock_is_free(&lock_path)
+        {
+            info!("daemon socket gone and pidfile lock released -- stop complete");
             return Ok(());
         }
         if std::time::Instant::now() >= deadline {
@@ -860,6 +945,24 @@ async fn run_stop(
             });
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// Whether no process holds the daemon's pidfile lock at `lock_path`; a
+/// lock file that does not exist is free. Takes the lock without blocking
+/// and releases it at once.
+fn daemon_lock_is_free(lock_path: &Path) -> bool {
+    let file = match std::fs::OpenOptions::new().read(true).open(lock_path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(_) => return false,
+    };
+    match file.try_lock() {
+        Ok(()) => {
+            let _ = file.unlock();
+            true
+        }
+        Err(_) => false,
     }
 }
 
@@ -1251,7 +1354,12 @@ fn build_daemon_components(
     Arc<dyn crate::workspace::WorkspaceBuilder>,
     Arc<QueryExecutor>,
 ) {
-    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+    // Surface parity W1: one resolver chooses the build roster per workspace
+    // root from its manifest (fast-path fallback for a root with no index)
+    // and owns the full compiled load roster; the dispatcher and the
+    // builder share it so a daemon rebuild records the same selection the
+    // manifest already carries.
+    let roster = Arc::new(WorkspaceRosterResolver::new());
     let manager = WorkspaceManager::new(cfg);
 
     // PF03B: install the production derived-cache writer hook BEFORE the
@@ -1266,10 +1374,16 @@ fn build_daemon_components(
     );
 
     let dispatcher =
-        RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(cfg), Arc::clone(&plugins));
+        RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(cfg), Arc::clone(&roster));
     let builder: Arc<dyn crate::workspace::WorkspaceBuilder> =
-        Arc::new(RealWorkspaceBuilder::new(Arc::clone(&plugins)));
-    let executor = Arc::new(QueryExecutor::new());
+        Arc::new(RealWorkspaceBuilder::new(Arc::clone(&roster)));
+    // The shared tool executor only evaluates queries over graphs the
+    // daemon already holds; its plugin manager is consulted for plugin
+    // field-name registration, not to decide which nodes exist, so the
+    // full compiled roster is the correct executor roster (design D6).
+    let executor = Arc::new(QueryExecutor::with_plugin_manager(
+        sqry_plugin_registry::create_plugin_manager_all(),
+    ));
     (manager, dispatcher, builder, executor)
 }
 
@@ -1338,7 +1452,7 @@ fn preload_pinned_workspaces(
         }
 
         // Start the file watcher for the pre-loaded workspace so edits
-        // trigger a debounced incremental rebuild without an explicit
+        // trigger a debounced rebuild without an explicit
         // `sqry daemon rebuild`. Best-effort: `start_watching` logs and
         // never aborts startup on watcher failure (verivus-oss/sqry#461).
         dispatcher.start_watching(&key);
@@ -1507,6 +1621,78 @@ fn write_pid_file_grandchild(pidfile_path: &std::path::Path) -> DaemonResult<()>
 mod tests {
     use super::*;
 
+    /// Issue B1 (round 7 audit): the shutdown waits for a durable persist in
+    /// flight, however long it runs past the bounded grace. Before the
+    /// repair `rt.shutdown_timeout` abandoned it after the grace and the
+    /// process exited with the old manifest set aside.
+    #[test]
+    fn finish_runtime_waits_for_a_persist_in_flight_past_the_grace() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let gate = Arc::new(sqry_core::graph::unified::persistence::PersistGate::new());
+        let finished = Arc::new(AtomicBool::new(false));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        {
+            let (gate, finished) = (Arc::clone(&gate), Arc::clone(&finished));
+            rt.spawn_blocking(move || {
+                let _ticket = gate.enter().unwrap();
+                entered_tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                finished.store(true, Ordering::Release);
+            });
+        }
+        entered_rx.recv().unwrap();
+        finish_runtime(rt, std::time::Duration::from_millis(100), &gate);
+        assert!(
+            finished.load(Ordering::Acquire),
+            "the runtime's shutdown returned before the persist in flight finished"
+        );
+        assert!(
+            gate.enter().is_err(),
+            "a persist that had not begun is refused once the shutdown starts"
+        );
+    }
+
+    /// The bounded half of the shutdown (mutation L08: dropping the runtime
+    /// in place of `shutdown_timeout` waits without bound): blocking work
+    /// that is not a persist (a watcher's loop, a build phase) is abandoned
+    /// after the grace, so the process exits.
+    #[test]
+    fn finish_runtime_abandons_other_blocking_work_after_the_grace() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+        let release = Arc::new(AtomicBool::new(false));
+        {
+            let release = Arc::clone(&release);
+            rt.spawn_blocking(move || {
+                while !release.load(Ordering::Acquire) {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+            });
+        }
+        let gate = Arc::new(sqry_core::graph::unified::persistence::PersistGate::new());
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let shutdown = std::thread::spawn(move || {
+            finish_runtime(rt, std::time::Duration::from_millis(200), &gate);
+            done_tx.send(()).unwrap();
+        });
+        let returned = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+        release.store(true, Ordering::Release);
+        shutdown.join().unwrap();
+        assert!(
+            returned.is_ok(),
+            "the runtime's shutdown waited past its grace for a stuck blocking task"
+        );
+    }
+
     // ---- print_config -------------------------------------------------------
 
     /// `run_print_config` must serialize the effective config as canonical TOML.
@@ -1514,6 +1700,9 @@ mod tests {
     /// same field values.
     #[test]
     fn print_config_emits_canonical_toml() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let cfg = DaemonConfig::default();
         let toml_str = toml::to_string_pretty(&cfg)
             .expect("DaemonConfig must serialise to TOML without error");
@@ -1535,7 +1724,15 @@ mod tests {
     /// `run_print_config` with no config path must succeed (all defaults).
     #[test]
     fn run_print_config_succeeds_with_defaults() {
+        // Surface parity W4 round 2 (W4-D14): `run_print_config(None, ..)`
+        // reads every `SQRY_DAEMON_*` override, and the config tests plant
+        // malformed values under the crate lock, so this test holds the
+        // same lock for its whole body.
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         // Clear any lingering SQRY_DAEMON_CONFIG.
+        // SAFETY: serialised by TEST_ENV_LOCK, held for the whole body.
         unsafe { std::env::remove_var("SQRY_DAEMON_CONFIG") };
 
         let result = run_print_config(None, None);
@@ -1552,6 +1749,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn install_systemd_user_prints_to_stdout() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         use crate::lifecycle::units::systemd::generate_user_unit;
         let cfg = DaemonConfig::default();
         let opts = InstallOptions::default();
@@ -1568,10 +1768,18 @@ mod tests {
     }
 
     // ---- clap CLI parsing ---------------------------------------------------
+    //
+    // `SqrydCli`'s `--config` carries `env = "SQRY_DAEMON_CONFIG"`, so clap
+    // reads that variable while it builds the command, in every
+    // `try_parse_from` below. Two tests remove it under the crate lock, so
+    // each parse holds the lock too.
 
     /// `sqryd` with no args must parse without error (command is None or Start).
     #[test]
     fn default_command_is_start_foreground() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd"]).expect("parse must succeed");
         match cli.command {
             None => {}
@@ -1586,6 +1794,9 @@ mod tests {
     /// `sqryd start` must parse to `Start { detach: false }`.
     #[test]
     fn start_without_detach_is_foreground() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd", "start"]).expect("parse");
         assert!(matches!(
             cli.command,
@@ -1599,6 +1810,9 @@ mod tests {
     /// `sqryd start --detach` must parse to `Start { detach: true }`.
     #[test]
     fn start_with_detach_flag_is_parsed() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd", "start", "--detach"]).expect("parse");
         assert!(matches!(
             cli.command,
@@ -1612,6 +1826,9 @@ mod tests {
     /// `sqryd start --detach --spawned-by-client` must parse correctly.
     #[test]
     fn start_spawned_by_client_is_hidden_but_parseable() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd", "start", "--detach", "--spawned-by-client"])
             .expect("parse");
         assert!(matches!(
@@ -1626,6 +1843,9 @@ mod tests {
     /// `sqryd foreground` must parse.
     #[test]
     fn foreground_subcommand_parses() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd", "foreground"]).expect("parse");
         assert!(matches!(cli.command, Some(Command::Foreground)));
     }
@@ -1633,6 +1853,9 @@ mod tests {
     /// `sqryd stop --timeout-secs 30` must parse with the custom timeout.
     #[test]
     fn stop_with_timeout_parses() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli =
             SqrydCli::try_parse_from(["sqryd", "stop", "--timeout-secs", "30"]).expect("parse");
         assert!(matches!(
@@ -1644,6 +1867,9 @@ mod tests {
     /// `sqryd status --json` must parse with `json = true`.
     #[test]
     fn status_with_json_flag_parses() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd", "status", "--json"]).expect("parse");
         assert!(matches!(cli.command, Some(Command::Status { json: true })));
     }
@@ -1651,6 +1877,9 @@ mod tests {
     /// `sqryd print-config` must parse.
     #[test]
     fn print_config_subcommand_parses() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd", "print-config"]).expect("parse");
         assert!(matches!(cli.command, Some(Command::PrintConfig)));
     }
@@ -1658,6 +1887,9 @@ mod tests {
     /// `sqryd --config /tmp/test.toml print-config` must capture the global flag.
     #[test]
     fn global_config_flag_is_parsed() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd", "--config", "/tmp/test.toml", "print-config"])
             .expect("parse");
         assert_eq!(
@@ -1671,6 +1903,9 @@ mod tests {
     /// `sqryd status` (without --json) must parse with `json = false`.
     #[test]
     fn status_without_json_flag_defaults_to_false() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd", "status"]).expect("parse");
         assert!(matches!(cli.command, Some(Command::Status { json: false })));
     }
@@ -1678,6 +1913,9 @@ mod tests {
     /// `sqryd stop` with no `--timeout-secs` must default to 15.
     #[test]
     fn stop_defaults_to_15_second_timeout() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let cli = SqrydCli::try_parse_from(["sqryd", "stop"]).expect("parse");
         assert!(matches!(
             cli.command,
@@ -1710,7 +1948,18 @@ mod tests {
         use std::io::Write as _;
         use tempfile::NamedTempFile;
 
+        // Surface parity W4 round 2 (W4-D14): `load_config` applies every
+        // `SQRY_DAEMON_*` override and this test reads the environment after
+        // it; the config tests plant malformed values under the crate lock,
+        // so without the lock this test failed intermittently on a correct
+        // tree. The lock is held for the whole body: the removal, the load
+        // and both assertions.
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // Clear any pre-existing env var so the assertion below is meaningful.
+        // SAFETY: serialised by TEST_ENV_LOCK, held for the whole body.
         unsafe { std::env::remove_var("SQRY_DAEMON_CONFIG") };
 
         // Write a minimal valid daemon TOML to a temp file.
@@ -1759,6 +2008,9 @@ mod tests {
     /// manual `sqry daemon rebuild` (verivus-oss/sqry#461).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn preload_pinned_workspace_starts_file_watcher() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         use crate::config::WorkspaceConfig;
         use crate::workspace::WorkspaceManager;
 
@@ -1775,14 +2027,14 @@ mod tests {
             ..DaemonConfig::default()
         });
 
-        let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+        let roster = Arc::new(WorkspaceRosterResolver::new());
         // `new_without_reaper` keeps the test free of the background reaper
         // task; the pre-load path under test does not depend on it.
         let manager = WorkspaceManager::new_without_reaper(Arc::clone(&cfg));
         let dispatcher =
-            RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&cfg), Arc::clone(&plugins));
+            RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&cfg), Arc::clone(&roster));
         let builder: Arc<dyn crate::workspace::WorkspaceBuilder> =
-            Arc::new(RealWorkspaceBuilder::new(Arc::clone(&plugins)));
+            Arc::new(RealWorkspaceBuilder::new(Arc::clone(&roster)));
 
         assert_eq!(
             dispatcher.watchers_len(),
@@ -1803,6 +2055,9 @@ mod tests {
     /// is started for it. Guards against over-eager wiring.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn preload_skips_non_pinned_workspace() {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         use crate::config::WorkspaceConfig;
         use crate::workspace::WorkspaceManager;
 
@@ -1819,12 +2074,12 @@ mod tests {
             ..DaemonConfig::default()
         });
 
-        let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
+        let roster = Arc::new(WorkspaceRosterResolver::new());
         let manager = WorkspaceManager::new_without_reaper(Arc::clone(&cfg));
         let dispatcher =
-            RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&cfg), Arc::clone(&plugins));
+            RebuildDispatcher::new(Arc::clone(&manager), Arc::clone(&cfg), Arc::clone(&roster));
         let builder: Arc<dyn crate::workspace::WorkspaceBuilder> =
-            Arc::new(RealWorkspaceBuilder::new(Arc::clone(&plugins)));
+            Arc::new(RealWorkspaceBuilder::new(Arc::clone(&roster)));
 
         preload_pinned_workspaces(&cfg, &manager, &dispatcher, &builder);
 

@@ -2203,7 +2203,13 @@ pub struct ComplexityMetricsParams {
 }
 
 /// `rebuild_index` params.
+///
+/// Unknown fields are refused (`additionalProperties: false` in the
+/// schema): a misspelled macro field (`cfg_flag`, `expandCache`) would
+/// otherwise be dropped and the rebuild would run with the recorded options
+/// while the caller believed it had replaced them.
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct RebuildIndexParams {
     #[serde(default = "default_path")]
     pub path: String,
@@ -2211,6 +2217,37 @@ pub struct RebuildIndexParams {
     /// Force rebuild
     #[serde(default = "default_true")]
     pub force: bool,
+
+    /// Active cfg flags for Rust conditional-compilation analysis (e.g.
+    /// `["test", "feature=serde"]`). Replaces the flags the index manifest
+    /// records (an empty list clears them); omitted, the recorded flags are
+    /// reused. An empty or blank flag names no predicate and is refused, and
+    /// so is a flag with leading or trailing whitespace (` test`), which
+    /// would be recorded and matched as given. Pure data, no code is
+    /// executed. Needs `force=true` when an index already exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg_flags: Option<Vec<String>>,
+
+    /// Directory of a pre-generated macro expand cache (`sqry cache
+    /// expand`). Replaces the directory the manifest records; omitted, the
+    /// recorded one is reused. A relative directory resolves against the
+    /// directory `path` names (`path` itself when it is a directory, its
+    /// parent when it is a file), never against the server's working
+    /// directory. Any existing directory is accepted, that one included
+    /// (`.`), and the manifest records its canonical path. Refused: an empty
+    /// string; a directory that does not exist or is not a directory; a
+    /// directory whose canonical path is not valid UTF-8 (the manifest
+    /// records it as JSON text); and, on Windows, a relative path with a
+    /// drive prefix or a root (`C:cache`, `\cache`). Execution-free: only
+    /// JSON is read. Needs `force=true` when an index already exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expand_cache: Option<String>,
+
+    /// Drop the macro options the manifest records before applying
+    /// `cfg_flags` and `expand_cache`. Needs `force=true` when an index
+    /// already exists.
+    #[serde(default)]
+    pub reset_macro_options: bool,
 }
 
 /// `expand_cache_status` params.

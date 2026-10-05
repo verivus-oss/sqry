@@ -80,10 +80,19 @@
 //! - [`verbosity`]: Core logging initialization and environment variable parsing
 //! - [`artifacts`]: File-based log capture with collision-resistant naming
 //! - [`plugin_factory`]: Pre-configured PluginManager with all built-in language plugins
+//! - [`binaries`]: The one resolver for the `sqry` binary a test drives as a
+//!   subprocess (surface parity W4, design W4-D13)
+//! - [`rust_liveness`]: What a build of a Rust crate compiles, a non-test
+//!   build or a test build, over tree-sitter parses of its sources, for the
+//!   derived tests that read code facts out of parsed source (surface parity
+//!   W4 round 3, design W4-D18)
 
 pub mod artifacts;
+pub mod binaries;
 pub mod plugin_factory;
+pub mod rust_liveness;
 pub mod verbosity;
 
 // Re-export commonly used items
+pub use binaries::sqry_binary;
 pub use verbosity::init;

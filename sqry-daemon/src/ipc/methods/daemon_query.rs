@@ -41,6 +41,7 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
     let tool_timeout = Duration::from_secs(ctx.config.tool_timeout_secs);
     let verdict = tool_core::acquire_and_execute(
         Arc::clone(&ctx.manager),
+        &ctx.dispatcher,
         Arc::clone(&ctx.workspace_builder),
         Arc::clone(&ctx.tool_executor),
         &ctx.cpu_executor,
@@ -152,14 +153,23 @@ fn validate_request(req: &QueryRequest) -> Result<(), MethodError> {
     Ok(())
 }
 
+/// The executor `daemon/query` evaluates with. Its plugin manager is
+/// consulted for plugin field-name registration, not to decide which nodes
+/// exist (the graph was built by the workspace builder with the manifest
+/// roster), so the full compiled roster is the correct executor roster
+/// (surface parity W1, design D6): a `lang:json` query over a graph that
+/// has json nodes must see them on this surface exactly as on the CLI.
+fn query_executor_for_daemon() -> QueryExecutor {
+    QueryExecutor::with_plugin_manager(sqry_plugin_registry::create_plugin_manager_all())
+}
+
 fn run_query_on_graph(
     graph: &Arc<CodeGraph>,
     req: &QueryRequest,
     workspace_root: &Path,
     cancel: &sqry_core::query::cancellation::CancellationToken,
 ) -> anyhow::Result<QueryResult> {
-    let executor =
-        QueryExecutor::with_plugin_manager(sqry_plugin_registry::create_plugin_manager());
+    let executor = query_executor_for_daemon();
     // Cancellable variant so a deadline-flipped token reaches the
     // evaluator's per-batch poll. `None` is the `variables` argument, not a
     // token (issue #503 Phase 1). This helper takes the token in place
@@ -220,5 +230,33 @@ fn query_match_to_search_item(
         end_line: query_match.end_line(),
         end_column: query_match.end_column(),
         score: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// T14 (surface parity W1, D6): the `daemon/query` executor carries the
+    /// full compiled roster, including the high-cost `json` plugin the
+    /// fast-path build default excludes.
+    #[test]
+    fn daemon_query_executor_uses_the_full_roster() {
+        let executor = query_executor_for_daemon();
+        assert!(
+            executor.plugin_manager().plugin_by_id("json").is_some(),
+            "daemon/query executor must register json"
+        );
+        let fast_path = sqry_plugin_registry::create_plugin_manager();
+        assert!(
+            fast_path.plugin_by_id("json").is_none(),
+            "the fast-path build default still excludes json; only the executor roster is full"
+        );
+        assert_eq!(
+            executor.plugin_manager().plugins().len(),
+            sqry_plugin_registry::create_plugin_manager_all()
+                .plugins()
+                .len()
+        );
     }
 }

@@ -8,6 +8,12 @@
 //! envelope shape is itself covered by the round-trip tests in
 //! `sqry-daemon-protocol::protocol::tests`.
 
+// Only `roster_status` uses the shared support module, whose IPC client is a
+// Unix socket client: the gate keeps the other tests in this file compiling
+// on Windows, as they did before `roster_status` arrived.
+#[cfg(all(unix, feature = "test-hooks"))]
+mod support;
+
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -388,4 +394,155 @@ fn workspace_index_status_serializes_short_and_full_into_json() {
         json["workspace_id_full"].as_str(),
         Some(id.as_full_hex().as_str()),
     );
+}
+
+// ---------------------------------------------------------------------------
+// T5b (surface parity W1): `daemon/status` reports the resident roster and
+// whether it diverges from the workspace manifest.
+// ---------------------------------------------------------------------------
+
+// `WorkspaceRosterResolver::pinned` is compiled only under `test-hooks`, so
+// this module is gated the same way `rebuild_guard.rs` is; the pre-existing
+// tests above stay in the default-feature run.
+#[cfg(all(unix, feature = "test-hooks"))]
+mod roster_status {
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use serde_json::json;
+    use sqry_core::graph::unified::build::{BuildConfig, build_and_persist_graph_with_progress};
+    use sqry_core::graph::unified::persistence::PluginSelectionManifest;
+    use sqry_core::progress::no_op_reporter;
+    use sqry_daemon::{
+        DaemonConfig, RealWorkspaceBuilder, RosterRecord, WorkspaceBuilder, WorkspaceRosterResolver,
+    };
+    use sqry_plugin_registry::{RosterSource, create_plugin_manager, create_plugin_manager_all};
+    use tempfile::TempDir;
+
+    use super::support::ipc::{TestIpcClient, TestServer, expect_success};
+
+    fn write_mixed_fixture(root: &Path) {
+        std::fs::create_dir_all(root.join("src")).expect("src dir");
+        std::fs::write(root.join("src").join("lib.rs"), b"pub fn alpha() {}\n")
+            .expect("write lib.rs");
+        std::fs::write(
+            root.join("config.json"),
+            br#"{"name": "fixture", "on": true}"#,
+        )
+        .expect("write config.json");
+    }
+
+    fn index_with_include_all(root: &Path) {
+        let plugins = create_plugin_manager_all();
+        let ids: Vec<String> = plugins
+            .plugins()
+            .iter()
+            .map(|plugin| plugin.metadata().id.to_string())
+            .collect();
+        build_and_persist_graph_with_progress(
+            root,
+            &plugins,
+            &BuildConfig::default(),
+            "test:include_all",
+            Some(PluginSelectionManifest {
+                active_plugin_ids: ids,
+                high_cost_mode: Some("include_all".to_string()),
+            }),
+            no_op_reporter(),
+        )
+        .expect("include_all index persists");
+    }
+
+    async fn status_row_for(
+        resolver: Arc<WorkspaceRosterResolver>,
+        root: &Path,
+    ) -> serde_json::Value {
+        let builder: Arc<dyn WorkspaceBuilder> =
+            Arc::new(RealWorkspaceBuilder::new(Arc::clone(&resolver)));
+        let server =
+            TestServer::with_builder_config_and_roster(builder, DaemonConfig::default(), resolver)
+                .await;
+        let mut client = TestIpcClient::connect(&server.path).await;
+        client.hello(1).await;
+        let path = root.to_string_lossy().to_string();
+        expect_success(
+            &client
+                .request("daemon/load", json!({ "index_root": &path }))
+                .await,
+        );
+        let status_resp = client.request("daemon/status", json!({})).await;
+        let status = expect_success(&status_resp);
+        let row = status["result"]["workspaces"]
+            .as_array()
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|row| row["index_root"].as_str() == Some(path.as_str()))
+            })
+            .cloned()
+            .expect("workspace row present");
+        drop(client);
+        server.stop().await;
+        row
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn daemon_status_reports_a_resident_roster_narrower_than_the_manifest() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().canonicalize().expect("canonical root");
+        write_mixed_fixture(&root);
+        index_with_include_all(&root);
+
+        let fast = Arc::new(create_plugin_manager());
+        let record = RosterRecord::from_manager(&fast, RosterSource::Fallback);
+        let resolver = Arc::new(WorkspaceRosterResolver::pinned(fast, record));
+        let row = status_row_for(resolver, &root).await;
+
+        let roster = &row["plugin_roster"];
+        assert!(!roster.is_null(), "plugin_roster must be present: {row}");
+        assert_eq!(roster["source"], json!("fallback"));
+        assert!(
+            !roster["active_plugin_ids"]
+                .as_array()
+                .expect("ids array")
+                .iter()
+                .any(|id| id == "json"),
+            "the pinned fast-path roster lacks json: {roster}"
+        );
+        assert_eq!(
+            roster["diverges_from_manifest"]["missing_plugin_ids"],
+            json!(["json"]),
+            "row: {row}"
+        );
+        assert_eq!(
+            roster["diverges_from_manifest"]["extra_plugin_ids"],
+            json!([]),
+            "row: {row}"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn daemon_status_reports_no_divergence_when_the_roster_matches() {
+        let tmp = TempDir::new().expect("tempdir");
+        let root = tmp.path().canonicalize().expect("canonical root");
+        write_mixed_fixture(&root);
+        index_with_include_all(&root);
+
+        let row = status_row_for(Arc::new(WorkspaceRosterResolver::new()), &root).await;
+        let roster = &row["plugin_roster"];
+        assert!(!roster.is_null(), "plugin_roster must be present: {row}");
+        assert_eq!(roster["source"], json!("persisted_manifest"));
+        assert_eq!(roster["high_cost_mode"], json!("include_all"));
+        assert!(
+            roster["active_plugin_ids"]
+                .as_array()
+                .expect("ids array")
+                .iter()
+                .any(|id| id == "json"),
+            "the resolved roster carries json: {roster}"
+        );
+        assert!(
+            roster.get("diverges_from_manifest").is_none(),
+            "a matching roster must carry no divergence block: {roster}"
+        );
+    }
 }

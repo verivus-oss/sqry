@@ -56,6 +56,7 @@ pub(crate) mod legacy_v10;
 pub(crate) mod legacy_v13;
 pub mod manifest;
 pub mod snapshot;
+pub mod write_guard;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -68,13 +69,20 @@ pub use format::{
     MAGIC_BYTES_V15, MAGIC_BYTES_V16, MAGIC_BYTES_V17, VERSION,
 };
 pub use manifest::{
-    BuildProvenance, ConfigProvenance, ConfigProvenanceBuilder, MANIFEST_SCHEMA_VERSION, Manifest,
-    ManifestCheck, OverrideEntry, OverrideSource, PluginSelectionManifest, SNAPSHOT_FORMAT_VERSION,
-    compute_config_checksum, default_provenance, try_load_manifest,
+    BuildProvenance, ConfigProvenance, ConfigProvenanceBuilder, ExpandCachePathNotUtf8,
+    MANIFEST_SCHEMA_VERSION, MacroOptionsManifest, Manifest, ManifestCheck, OverrideEntry,
+    OverrideSource, PluginSelectionManifest, SNAPSHOT_FORMAT_VERSION, compute_config_checksum,
+    default_provenance, try_load_manifest,
 };
 pub use snapshot::{
     PersistenceError, check_config_drift, load_from_bytes, load_from_path, load_header_from_path,
     save_to_path, save_to_path_with_provenance, validate_snapshot, verify_snapshot_bytes,
+};
+pub use write_guard::{
+    IndexRemovedDuringPersist, IndexWriteLock, LOCK_IDENTITY_RETRIES, LockWait,
+    PERSIST_LOCK_FILE_NAME, PersistGate, RecoveryOutcome, UnstableLockFile,
+    close_persists_and_wait, holds_committed_index, holds_index_content,
+    recover_interrupted_persist,
 };
 
 // ============================================================================
@@ -211,9 +219,27 @@ impl GraphStorage {
     }
 
     /// Checks if a unified graph exists (manifest file exists).
+    ///
+    /// When the manifest is missing and a persist that was interrupted (a
+    /// crash, a kill) left the previous pair under its rollback names, the
+    /// pair is put back first ([`write_guard::recover_interrupted_persist`],
+    /// under the persist lock), so no reader or writer decides anything from
+    /// a manifest a dead transaction moved aside. When a persist is in
+    /// flight on another holder instead, this waits for it to commit or roll
+    /// back, so its set-aside window never reads as no index (decision
+    /// D-i8-1). [`Self::load_manifest`] and [`Self::try_load_manifest`] do
+    /// the same.
     #[must_use]
     pub fn exists(&self) -> bool {
+        self.recover_interrupted_persist();
         self.manifest_path.exists()
+    }
+
+    /// Put back the pair an interrupted persist left set aside, when the
+    /// manifest is missing and no persist is in flight. Failures are
+    /// logged; the caller then sees no index, as it would have.
+    fn recover_interrupted_persist(&self) {
+        write_guard::recover_for_reader(&self.graph_dir, &self.manifest_path);
     }
 
     /// Checks if the snapshot file exists.
@@ -228,6 +254,7 @@ impl GraphStorage {
     ///
     /// Returns an error if the manifest file cannot be read or parsed.
     pub fn load_manifest(&self) -> std::io::Result<Manifest> {
+        self.recover_interrupted_persist();
         Manifest::load(&self.manifest_path)
     }
 
@@ -240,9 +267,12 @@ impl GraphStorage {
     /// to apply the correct policy:
     ///
     /// - `ManifestCheck::Present(m)` — manifest exists and parsed.
-    /// - `ManifestCheck::Missing` — file not on disk (e.g. during rebuild
-    ///   window). Callers should treat the graph as stale and either wait,
-    ///   trigger a rebuild, or refuse to serve unverified snapshots.
+    /// - `ManifestCheck::Missing`: the file is not on disk. No index, a manifest
+    ///   removed by hand, or a cut-short persist recovery could not put
+    ///   back (a live persist's set-aside window is waited out, not
+    ///   reported, decision D-i8-1). Callers should treat the graph as stale
+    ///   and either trigger a rebuild or refuse to serve unverified
+    ///   snapshots.
     /// - `ManifestCheck::Corrupt(e)` — file exists but is unreadable or
     ///   invalid JSON; same policy as Missing (rebuild).
     ///
@@ -250,6 +280,7 @@ impl GraphStorage {
     /// result means no snapshot is served without verification.
     #[must_use]
     pub fn try_load_manifest(&self) -> ManifestCheck {
+        self.recover_interrupted_persist();
         manifest::try_load_manifest(&self.manifest_path)
     }
 

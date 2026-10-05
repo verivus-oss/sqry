@@ -26,24 +26,31 @@ pub mod loaded;
 pub mod manager;
 pub mod persisted_state;
 pub mod revision;
+pub mod roster;
 pub mod staleness;
 pub mod state;
 pub mod status;
 
 pub use admission::{AdmissionState, RetainedEntry, WorkingSetInputs, working_set_estimate};
-pub use builder::{EmptyGraphBuilder, FailingGraphBuilder, RealWorkspaceBuilder, WorkspaceBuilder};
+pub use builder::{
+    BuiltGraph, EmptyGraphBuilder, FailingGraphBuilder, RealWorkspaceBuilder, WorkspaceBuilder,
+};
 pub use hook::{
     NoOpHook, QueryDbHook, RecordingHook, SharedHook, SqrydHook, noop_hook, spawn_hook,
 };
-pub use loaded::{LoadedWorkspace, PendingRebuild};
+pub use loaded::{LoadedWorkspace, PendingRebuild, RebuildRequester, RebuildWaiters};
 pub(crate) use manager::clone_err;
-pub use manager::{RebuildReservation, ServeVerdict, WorkspaceManager};
+pub use manager::{LoadOrigin, RebuildReservation, ServeVerdict, WorkspaceManager};
 pub use persisted_state::{
     PersistedState, PersistedStateError, load_persisted_state, parse_persisted_state,
 };
 pub use revision::{
     ResidentQueryGuard, ResidentRevisionHandle, ResidentRevisionLoad, ResidentRevisionRegistry,
 };
+pub use roster::{
+    ManifestCheck, ManifestVerdict, ResolvedRoster, RosterRecord, WorkspaceRosterResolver,
+    plugin_selection_warning_for, shared_load_roster,
+};
 pub use staleness::{BACKOFF_SCHEDULE, StalenessVerdict, backoff_delay_for, classify_staleness};
 pub use state::{OldGraphToken, WorkspaceKey, WorkspaceState, wire_workspace_id_from_core};
-pub use status::{DaemonStatus, MemoryStatus, WorkspaceStatus};
+pub use status::{DaemonStatus, MemoryStatus, RosterDivergence, RosterStatus, WorkspaceStatus};

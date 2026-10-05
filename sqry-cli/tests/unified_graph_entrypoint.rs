@@ -491,7 +491,25 @@ fn test_entrypoint_determinism() {
 
 #[test]
 fn test_entrypoint_parity_with_cli_loader() {
-    use sqry_cli::commands::graph::loader::{GraphLoadConfig, load_unified_graph};
+    // Clap's deep subcommand tree can overflow the default 8 MB debug-mode
+    // thread stack when parsing `Cli`; run the body on a 16 MB stack, the
+    // same wrapper the other `Cli::parse_from` tests use.
+    let result = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(entrypoint_parity_with_cli_loader_body)
+        .expect("spawn test thread")
+        .join();
+    if let Err(panic) = result {
+        std::panic::resume_unwind(panic);
+    }
+}
+
+fn entrypoint_parity_with_cli_loader_body() {
+    use clap::Parser;
+    use sqry_cli::args::Cli;
+    use sqry_cli::commands::graph::loader::{
+        GraphLoadConfig, load_unified_graph_for_cli, no_op_reporter,
+    };
 
     let root = get_fixture_path();
     let plugins = create_plugin_manager();
@@ -499,11 +517,23 @@ fn test_entrypoint_parity_with_cli_loader() {
 
     let core_graph = build_unified_graph(root, &plugins, &build_config).expect("Core build failed");
 
+    // The manifest-driven CLI loader is the only CLI loader (surface parity
+    // W1 removed the two unused `create_plugin_manager_all()` wrappers).
+    // The fixture has no index, so the read-only selection resolves to the
+    // same fast-path default the core build above used.
+    let cli = Cli::try_parse_from([
+        "sqry",
+        "query",
+        "kind:function",
+        root.to_str().expect("fixture path is utf-8"),
+    ])
+    .expect("cli parses");
     let load_config = GraphLoadConfig {
         force_build: true,
         ..Default::default()
     };
-    let cli_graph = load_unified_graph(root, &load_config).expect("CLI load failed");
+    let cli_graph = load_unified_graph_for_cli(root, &load_config, &cli, no_op_reporter())
+        .expect("CLI load failed");
 
     let core_snapshot = core_graph.snapshot();
     let cli_snapshot = cli_graph.snapshot();

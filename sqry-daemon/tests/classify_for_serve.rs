@@ -20,6 +20,7 @@ use sqry_daemon::{
     WorkspaceManager, WorkspaceState,
     workspace::{WorkingSetInputs, working_set_estimate},
 };
+use sqry_plugin_registry::RosterSource;
 
 fn make_manager(stale_cap_hours: u32) -> Arc<WorkspaceManager> {
     let config = Arc::new(DaemonConfig {
@@ -135,13 +136,28 @@ fn classify_for_serve_returns_build_failed_when_no_prior_good() {
     assert_eq!(ws.load_state(), WorkspaceState::Failed);
     assert!(ws.last_good_at.read().is_none());
 
-    let err = manager
+    // Round 7 (DAEMON_FOLLOWUP): the slot holds no generation, so the
+    // classifier says so in the same read, with the typed recorded failure,
+    // instead of flattening it to a build failure's text.
+    let verdict = manager
         .classify_for_serve(&key, SystemTime::now())
-        .expect_err("no prior good must error");
-    assert!(
-        matches!(err, DaemonError::WorkspaceBuildFailed { .. }),
-        "expected WorkspaceBuildFailed, got {err:?}"
-    );
+        .expect("a Failed slot with nothing to serve is classified");
+    match verdict {
+        sqry_daemon::ServeVerdict::FailedWithoutGraph {
+            had_been_loaded,
+            last_error,
+        } => {
+            assert!(!had_been_loaded);
+            assert!(
+                matches!(
+                    last_error.as_deref(),
+                    Some(DaemonError::WorkspaceBuildFailed { .. })
+                ),
+                "the recorded failure, typed: {last_error:?}"
+            );
+        }
+        other => panic!("expected FailedWithoutGraph, got {other:?}"),
+    }
 }
 
 #[test]
@@ -238,4 +254,88 @@ fn workspace_stale_expired_error_data_contains_last_good_at_rfc3339() {
         rendered.starts_with("202"),
         "must start with 20xx year: {rendered}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// T13 (surface parity W1): the verdicts carry the roster record that was
+// published with the graph, and a servable workspace without a record is
+// refused rather than served with a guessed roster.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn classify_for_serve_fresh_and_stale_verdicts_carry_the_roster_record() {
+    let harness = support::DispatchHarness::with_debounce(50);
+    let ws = harness.manager.lookup(&harness.key).expect("loaded");
+    let published = ws
+        .roster()
+        .expect("get_or_load publishes a record beside the graph");
+    // `RealGraphBuilder` builds with the fast-path manager and records its
+    // ids with `Fallback` provenance.
+    assert_eq!(published.source, RosterSource::Fallback);
+    let fast_ids: Vec<String> = sqry_plugin_registry::create_plugin_manager()
+        .plugins()
+        .iter()
+        .map(|plugin| plugin.metadata().id.to_string())
+        .collect();
+    assert_eq!(published.active_plugin_ids, fast_ids);
+
+    let verdict = harness
+        .manager
+        .classify_for_serve(&harness.key, SystemTime::now())
+        .expect("Loaded classifies Fresh");
+    match verdict {
+        ServeVerdict::Fresh { roster, .. } => {
+            assert!(
+                Arc::ptr_eq(&roster, &published),
+                "Fresh must carry the published record, not a copy from elsewhere"
+            );
+        }
+        other => panic!("expected Fresh, got {other:?}"),
+    }
+
+    ws.store_state(WorkspaceState::Failed);
+    let now = SystemTime::now();
+    ws.set_last_good_at_for_test(Some(now - Duration::from_secs(2 * 3600)));
+    let verdict = harness
+        .manager
+        .classify_for_serve(&harness.key, now)
+        .expect("Failed within cap classifies Stale");
+    match verdict {
+        ServeVerdict::Stale {
+            roster, age_hours, ..
+        } => {
+            assert_eq!(age_hours, 2);
+            assert!(
+                Arc::ptr_eq(&roster, &published),
+                "Stale must carry the record of the last-good graph"
+            );
+        }
+        other => panic!("expected Stale, got {other:?}"),
+    }
+}
+
+/// Every publish path stores the record before it swaps the graph; a
+/// servable workspace without one is a publish-path bug, and the manager
+/// refuses it with `Internal` instead of serving a graph it cannot describe.
+#[cfg(feature = "test-hooks")]
+#[test]
+fn classify_for_serve_refuses_a_servable_workspace_without_a_record() {
+    let manager = make_manager(24);
+    let key = register_key();
+    manager.insert_workspace_without_roster_for_test(key.clone(), WorkspaceState::Loaded);
+
+    let err = manager
+        .classify_for_serve(&key, SystemTime::now())
+        .expect_err("a Loaded workspace without a record must not be served");
+    match &err {
+        DaemonError::Internal(inner) => {
+            let text = inner.to_string();
+            assert!(
+                text.contains("no roster record"),
+                "the refusal must name the missing record: {text}"
+            );
+        }
+        other => panic!("expected DaemonError::Internal, got {other:?}"),
+    }
+    assert_eq!(err.jsonrpc_code(), Some(-32603));
 }

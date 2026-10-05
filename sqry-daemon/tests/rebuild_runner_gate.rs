@@ -36,6 +36,7 @@
 //! tasks use the `Notify` "obtain `notified()` future first, then
 //! trigger, then await" handshake to avoid lost wakeups.
 
+use sqry_daemon::WorkspaceRosterResolver;
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
@@ -70,8 +71,15 @@ impl std::fmt::Debug for RealGraphBuilder {
 }
 
 impl WorkspaceBuilder for RealGraphBuilder {
-    fn build(&self, root: &Path) -> Result<sqry_core::graph::CodeGraph, DaemonError> {
+    fn build(&self, root: &Path) -> Result<sqry_daemon::BuiltGraph, DaemonError> {
         sqry_core::graph::unified::build::build_unified_graph(root, &self.plugins, &self.cfg)
+            .map(|graph| {
+                sqry_daemon::BuiltGraph::with_manager(
+                    graph,
+                    &self.plugins,
+                    sqry_plugin_registry::RosterSource::Fallback,
+                )
+            })
             .map_err(|e| DaemonError::WorkspaceBuildFailed {
                 root: root.to_path_buf(),
                 reason: format!("test build: {e}"),
@@ -96,7 +104,7 @@ fn make_harness() -> Harness {
     let dispatcher = RebuildDispatcher::new(
         Arc::clone(&manager),
         Arc::clone(&config),
-        Arc::clone(&plugins),
+        Arc::new(WorkspaceRosterResolver::new()),
     );
 
     let key = WorkspaceKey::new(root.clone(), ProjectRootMode::GitRoot, 0);
@@ -456,6 +464,9 @@ async fn cancelled_workspace_gate_returns_evicted_and_drops_parked() {
         changes: single_file_changes(PathBuf::from("stranded.rs")),
         enqueued_at: std::time::Instant::now(),
         git_state_at_enqueue: None,
+        macro_request: sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
+        waiters: sqry_daemon::RebuildWaiters::default(),
+        requester: sqry_daemon::workspace::RebuildRequester::Watcher,
     });
     ws.rebuild_cancelled.store(true, Ordering::Release);
 
@@ -479,6 +490,40 @@ async fn cancelled_workspace_gate_returns_evicted_and_drops_parked() {
     assert!(
         !ws.rebuild_in_flight.load(Ordering::Acquire),
         "in_flight must be released by the gate path"
+    );
+
+    ws.rebuild_cancelled.store(false, Ordering::Release);
+}
+
+// Integration of W1 and W4: a request parked when the workspace is evicted
+// learns that from its own outcome instead of waiting out a timeout.
+#[tokio::test]
+async fn cancelled_workspace_gate_tells_parked_waiters_evicted() {
+    let h = make_harness();
+    let ws = h.manager.lookup(&h.key).expect("present");
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    *ws.rebuild_lane.lock().await = Some(PendingRebuild {
+        changes: single_file_changes(PathBuf::from("stranded.rs")),
+        enqueued_at: std::time::Instant::now(),
+        git_state_at_enqueue: None,
+        macro_request: sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
+        waiters: sqry_daemon::RebuildWaiters::one(sender),
+        requester: sqry_daemon::workspace::RebuildRequester::Watcher,
+    });
+    ws.rebuild_cancelled.store(true, Ordering::Release);
+
+    let result = h.dispatcher.handle_changes(&h.key, empty_changes()).await;
+    assert!(
+        matches!(result, Err(DaemonError::WorkspaceEvicted { .. })),
+        "cancelled workspace must surface WorkspaceEvicted, got {result:?}"
+    );
+    let delivered = receiver
+        .await
+        .expect("the gate delivers before dropping the entry");
+    assert!(
+        matches!(delivered, Err(DaemonError::WorkspaceEvicted { .. })),
+        "the parked waiter must be told the workspace was evicted, got {delivered:?}"
     );
 
     ws.rebuild_cancelled.store(false, Ordering::Release);
@@ -535,4 +580,71 @@ async fn unloaded_workspace_surfaces_evicted_from_lookup() {
         0,
         "evicted-workspace path must not run any pipeline iteration"
     );
+}
+
+// W4-S10's window, held deterministically: a request that parks after the
+// drain decision and before the cancellation gate takes the lane. The lane is
+// a `tokio::sync::Mutex`, which hands the lock to waiters in the order they
+// queued, so the test holds the lane while the runner queues at its drain
+// decision and a request queues behind it. On release the runner takes the
+// empty lane first, the request parks next (the runner role is still held),
+// and the gate, which has consumed the cancellation, takes the request as the
+// entry it drops. The request must be told `WorkspaceEvicted`; with the
+// gate's delivery to a dropped entry removed, its sender is dropped instead
+// and it reads `Internal`.
+#[cfg(feature = "test-hooks")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_request_parked_between_the_drain_decision_and_the_gate_is_told_evicted() {
+    use sqry_core::graph::unified::build::MacroOptionsRequest;
+    let h = make_harness();
+    let ws = h.manager.lookup(&h.key).expect("present");
+    let capture = Arc::new(sqry_daemon::TestCapture::default());
+    h.dispatcher
+        .install_test_capture(Arc::clone(&capture))
+        .unwrap();
+    capture.arm_post_publish_hold();
+
+    let d = Arc::clone(&h.dispatcher);
+    let k = h.key.clone();
+    let runner = tokio::spawn(async move { d.handle_changes(&k, empty_changes()).await });
+    tokio::time::timeout(Duration::from_secs(60), capture.wait_until_post_publish())
+        .await
+        .expect("the runner's iteration publishes");
+    // A cancellation that lands after the iteration's last check, as a
+    // `daemon/cancel_rebuild` does while the runner role is held.
+    ws.rebuild_cancelled.store(true, Ordering::Release);
+
+    let lane = ws.rebuild_lane.lock().await;
+    capture.release_post_publish();
+    // The runner queues on the lane at its drain decision ...
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let d2 = Arc::clone(&h.dispatcher);
+    let k2 = h.key.clone();
+    let parked = tokio::spawn(async move {
+        d2.handle_changes_with_macro_options(&k2, empty_changes(), MacroOptionsRequest::empty())
+            .await
+    });
+    // ... and the request queues behind it.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    drop(lane);
+
+    let outcome = parked.await.expect("the request's task");
+    let delivered = tokio::time::timeout(Duration::from_secs(30), outcome.wait())
+        .await
+        .expect("the parked request is answered");
+    assert!(
+        matches!(delivered, Err(DaemonError::WorkspaceEvicted { .. })),
+        "a request dropped by the gate must be told the workspace was cancelled, got {delivered:?}"
+    );
+    let runner_result = runner.await.expect("runner task");
+    assert!(
+        runner_result.is_ok(),
+        "the runner's own iteration published, and its result stands: {runner_result:?}"
+    );
+    assert!(
+        ws.rebuild_lane.lock().await.is_none(),
+        "the gate dropped it"
+    );
+    assert!(!ws.rebuild_in_flight.load(Ordering::Acquire));
+    assert!(!ws.rebuild_cancelled.load(Ordering::Acquire), "consumed");
 }

@@ -170,6 +170,11 @@ vendor/
 # Benchmark artifacts
 benchmarks/structural/repos/
 benchmarks/swebench/image/bin/
+# image/skills/ is staged by prepare.sh with `cp -r` from agent-skills/skills/,
+# in the same step that fills image/bin/ above. It was committed while bin/ was
+# not, which made six generated files into six copies that could drift, and a
+# CI gate had to police them. Regenerated artifacts cannot drift.
+benchmarks/swebench/image/skills/
 benchmarks/swebench/results/
 
 # HuggingFace cache (anywhere)
@@ -205,3 +210,10 @@ tools/naming-audit/Cargo.lock
 docs/reviews/issue-*/**/*-diff.txt
 docs/reviews/issue-*/**/*-tests.txt
 docs/reviews/issue-*/**/*-full.txt
+
+# Surface parity battery scratch: the driver puts its build directory
+# (.rv-target) and its default output (.rv-scratch) inside the worktree, then
+# requires `git status --porcelain` to be empty, so a fresh clone needs both
+# ignored for a run to start.
+.rv-scratch/
+.rv-target/

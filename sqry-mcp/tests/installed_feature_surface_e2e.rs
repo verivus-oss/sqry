@@ -43,27 +43,14 @@ fn setup_fixture() -> Result<TempDir> {
     Ok(temp)
 }
 
+/// Locate the `sqry` binary for testing.
+///
+/// Delegates to the one resolver, `sqry_core::test_support::binaries::sqry_binary`
+/// (surface parity W4, design W4-D13), which reads `SQRY_E2E_SQRY_BIN`, then
+/// `CARGO_BIN_EXE_sqry`, then `CARGO_TARGET_DIR` and the workspace `target`,
+/// debug before release, and panics naming every variable and candidate.
 fn sqry_bin() -> PathBuf {
-    if let Ok(path) = std::env::var("SQRY_E2E_SQRY_BIN") {
-        let path = PathBuf::from(path);
-        if path.is_file() {
-            return path;
-        }
-    }
-
-    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let workspace = manifest_dir.parent().expect("workspace root");
-    let candidate = workspace.join("target/debug/sqry");
-    if candidate.is_file() {
-        return candidate;
-    }
-
-    let release_candidate = workspace.join("target/release/sqry");
-    if release_candidate.is_file() {
-        return release_candidate;
-    }
-
-    panic!("Could not find sqry binary. Set SQRY_E2E_SQRY_BIN or run `cargo build --bin sqry`.");
+    sqry_core::test_support::binaries::sqry_binary()
 }
 
 fn assert_success(name: &str, output: &Output) {

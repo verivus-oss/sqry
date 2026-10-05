@@ -66,7 +66,7 @@ use sqry_daemon_protocol::LogicalWorkspaceWire;
 #[derive(Clone)]
 pub(crate) struct HandlerContext {
     pub manager: Arc<WorkspaceManager>,
-    /// Drives incremental rebuilds and owns the per-workspace file
+    /// Drives the rebuilds and owns the per-workspace file
     /// watchers. The `daemon/load` handler calls
     /// [`RebuildDispatcher::start_watching`] on it after each successful
     /// `get_or_load` so edits auto-trigger a debounced rebuild.
@@ -93,6 +93,9 @@ pub(crate) struct HandlerContext {
     pub shutdown: CancellationToken,
     pub config: Arc<DaemonConfig>,
     pub daemon_version: &'static str,
+    /// How the daemon-hosted MCP redacts its responses (decision D-i7-5),
+    /// handed to each MCP shim connection's handler.
+    pub mcp_redaction: Arc<crate::mcp_host::redaction::McpRedaction>,
 }
 
 impl std::fmt::Debug for HandlerContext {
@@ -318,7 +321,7 @@ pub(crate) async fn dispatch(
         "daemon/unload" => daemon_unload::handle(ctx, req.params),
         "daemon/stop" => daemon_stop::handle(ctx, req.params),
         "daemon/rebuild" => daemon_rebuild::handle(ctx, req.params).await,
-        "daemon/cancel_rebuild" => daemon_cancel_rebuild::handle(ctx, req.params),
+        "daemon/cancel_rebuild" => daemon_cancel_rebuild::handle(ctx, req.params).await,
         // issue-238 tier-2 — `daemon/search` routes through the shared
         // GraphAcquirer boundary so post-eviction reload works. See
         // `daemon_search` module docs for the parity contract.
@@ -380,4 +383,119 @@ pub(crate) fn internal_error_response(id: Option<JsonRpcId>, reason: &str) -> Js
         "Internal error",
         Some(json!({ "reason": reason })),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::{Value, json};
+
+    use super::{JsonRpcPayload, MethodError};
+    use crate::error::DaemonError;
+
+    /// The IPC wire of each `MethodError` shape: code, message and
+    /// `error.data`. An exhaustive `match` with no wildcard arm, so a new
+    /// shape does not compile until it is classified (F8's method-layer
+    /// half; the `DaemonError` half is `tests/error_surface_table.rs`).
+    fn expect(err: &MethodError) -> (i32, String, Value) {
+        match err {
+            MethodError::MethodNotFound(method) => (
+                -32601,
+                "Method not found".into(),
+                json!({ "method": method }),
+            ),
+            MethodError::InvalidParams(source) => (
+                -32602,
+                "Invalid params".into(),
+                json!({ "reason": source.to_string() }),
+            ),
+            MethodError::InvalidParamsStructured {
+                message,
+                kind,
+                retryable,
+                retry_after_ms,
+                details,
+            } => (
+                -32602,
+                message.clone(),
+                json!({
+                    "kind": kind,
+                    "retryable": retryable,
+                    "retry_after_ms": retry_after_ms,
+                    "details": details,
+                }),
+            ),
+            MethodError::InvalidRequest(reason) => (
+                -32600,
+                "Invalid Request".into(),
+                json!({ "reason": reason }),
+            ),
+            // A daemon error with a code of its own is answered with it,
+            // its text and its data; one without (the lifecycle errors,
+            // `Config`, `Io`) as an internal error naming it in `reason`.
+            MethodError::Daemon(daemon) => match daemon.jsonrpc_code() {
+                Some(code) => (
+                    code,
+                    daemon.to_string(),
+                    daemon.error_data().unwrap_or(Value::Null),
+                ),
+                None => (
+                    -32603,
+                    "Internal error".into(),
+                    json!({ "reason": daemon.to_string() }),
+                ),
+            },
+            MethodError::Internal(cause) => (
+                -32603,
+                "Internal error".into(),
+                json!({ "reason": cause.to_string() }),
+            ),
+            MethodError::JoinError(join) => (
+                -32603,
+                "Internal error".into(),
+                json!({ "reason": format!("blocking task join: {join}") }),
+            ),
+        }
+    }
+
+    #[tokio::test]
+    async fn every_method_error_shape_matches_the_table() {
+        let aborted = tokio::spawn(std::future::pending::<()>());
+        aborted.abort();
+        let join = aborted.await.expect_err("an aborted task fails to join");
+        let bad_params = serde_json::from_str::<u32>("\"x\"").expect_err("not a number");
+        let samples = vec![
+            MethodError::MethodNotFound("daemon/bogus".into()),
+            MethodError::InvalidParams(bad_params),
+            MethodError::InvalidParamsStructured {
+                message: "a refused argument".into(),
+                kind: "validation_error".into(),
+                retryable: false,
+                retry_after_ms: None,
+                details: Some(json!({ "reason": "a refused argument" })),
+            },
+            MethodError::InvalidRequest("a refused request".into()),
+            MethodError::Daemon(DaemonError::WorkspaceEvicted {
+                root: "/repo".into(),
+            }),
+            MethodError::Daemon(DaemonError::Io(std::io::Error::other("disk gone"))),
+            MethodError::Internal(anyhow::anyhow!("a fault")),
+            MethodError::JoinError(join),
+        ];
+        let count = samples.len();
+        for err in samples {
+            let (code, message, data) = expect(&err);
+            let label = format!("{err:?}");
+            let response = err.into_jsonrpc_response(None);
+            let JsonRpcPayload::Error { error } = response.payload else {
+                panic!("{label}: an error response");
+            };
+            assert_eq!(error.code, code, "{label}: code");
+            assert_eq!(error.message, message, "{label}: message");
+            assert_eq!(error.data.unwrap_or(Value::Null), data, "{label}: data");
+        }
+        assert_eq!(
+            count, 8,
+            "seven shapes, the daemon one with and without a code"
+        );
+    }
 }

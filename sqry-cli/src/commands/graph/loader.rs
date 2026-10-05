@@ -1,8 +1,12 @@
 //! Workspace graph loader for CLI graph commands.
 //!
 //! This module loads a unified `CodeGraph` either from a persisted snapshot or
-//! by invoking the core `build_unified_graph` entrypoint with the shared plugin
-//! registry.
+//! by invoking the core `build_unified_graph` entrypoint with the plugin
+//! roster the workspace manifest records (`plugin_defaults`, which delegates
+//! to `sqry_plugin_registry::resolve_persisted_selection`). There is no
+//! second loader roster: the two `create_plugin_manager_all()` wrappers that
+//! used to live here had no callers and were removed with unit W1 of the
+//! surface-parity program.
 
 use crate::args::Cli;
 use crate::plugin_defaults::{self, PluginSelectionMode};
@@ -26,45 +30,6 @@ pub struct GraphLoadConfig {
     /// Force building from source files, even if a snapshot exists.
     /// Used by the index command to always rebuild.
     pub force_build: bool,
-}
-
-/// Load a unified code graph using the new Arena+CSR storage architecture.
-///
-/// This is the preferred entry point for CLI graph operations. It loads a graph
-/// either from a persisted snapshot or by building from source files.
-///
-/// # Loading Strategy
-///
-/// 1. First tries to load from persisted snapshot (`.sqry/graph/snapshot.sqry`)
-/// 2. If no snapshot exists, builds from source files using language plugins
-///
-/// # Arguments
-/// * `root` - Root directory to scan for source files
-/// * `config` - Configuration for file walking (hidden files, symlinks, depth)
-///
-/// # Returns
-/// A `CodeGraph` populated with nodes and edges from all supported languages
-///
-/// # Errors
-/// Returns an error if the path is missing, the snapshot is invalid, or the graph build fails.
-///
-/// # Example
-/// ```ignore
-/// use std::path::Path;
-/// use sqry_cli::commands::graph::loader::{load_unified_graph, GraphLoadConfig};
-///
-/// let config = GraphLoadConfig::default();
-/// let graph = load_unified_graph(Path::new("."), &config)?;
-/// # Ok::<(), anyhow::Error>(())
-/// ```
-#[allow(dead_code)]
-pub fn load_unified_graph(root: &Path, config: &GraphLoadConfig) -> Result<CodeGraph> {
-    load_unified_graph_with_progress_and_plugins(
-        root,
-        config,
-        &sqry_plugin_registry::create_plugin_manager_all(),
-        no_op_reporter(),
-    )
 }
 
 /// CLI-aware graph loader that enforces manifest-backed plugin semantics.
@@ -91,35 +56,6 @@ pub fn load_unified_graph_for_cli(
         root,
         config,
         &resolved_plugins.plugin_manager,
-        progress,
-    )
-}
-
-/// Load a unified code graph with progress reporting.
-///
-/// Same as [`load_unified_graph`] but accepts a progress reporter for tracking
-/// build progress when loading from source files.
-///
-/// # Arguments
-/// * `root` - Root directory to scan for source files
-/// * `config` - Configuration for file walking (hidden files, symlinks, depth)
-/// * `progress` - Progress reporter for build status updates
-///
-/// # Returns
-/// A `CodeGraph` populated with nodes and edges from all supported languages
-///
-/// # Errors
-/// Returns an error if the path is missing, the snapshot is invalid, or the graph build fails.
-#[allow(dead_code)]
-pub fn load_unified_graph_with_progress(
-    root: &Path,
-    config: &GraphLoadConfig,
-    progress: SharedReporter,
-) -> Result<CodeGraph> {
-    load_unified_graph_with_progress_and_plugins(
-        root,
-        config,
-        &sqry_plugin_registry::create_plugin_manager_all(),
         progress,
     )
 }

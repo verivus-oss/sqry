@@ -24,8 +24,11 @@
 //!   - [`-32004`] `WorkspaceNotLoaded` when the path is unknown.
 //!   - [`-32008`] `ResetWhileLoading` when the workspace is currently
 //!     `Loading`.
-//!   - [`-32009`] `ResetCancellationDispatched` when a rebuild was in
-//!     flight; the caller should retry after `retry_after_ms`.
+//!   - [`-32009`] `ResetCancellationDispatched` when a rebuild runner
+//!     holds the runner role (whatever the state): nothing is reset, the
+//!     rebuild is cancelled and the requests parked behind it are answered
+//!     `-32004`; the caller retries after `retry_after_ms` and the retry
+//!     resets the workspace (decision D-i7-3).
 //!   - [`-32010`] `WorkspacePinned` when the workspace is pinned and
 //!     the caller did not pass `force = true`.
 
@@ -68,7 +71,7 @@ pub(crate) fn handle(ctx: &HandlerContext, params: Value) -> Result<Value, Metho
     // canonical path. This is required to recover from duplicate
     // in-memory workspace entries for the same source_root that
     // could be created before the coalesce guard in
-    // WorkspaceManager::get_or_insert_workspace (#393).
+    // WorkspaceManager::get_or_insert_workspace_tracked (#393).
     //
     // The pinned/Loading/Rebuilding checks are still performed per
     // key inside manager.reset (and the any-pinned pre-check here

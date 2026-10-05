@@ -258,6 +258,7 @@ fn load_immutable_revision(
         source_byte_mode,
         resolved_at: resolved_at_now(),
     };
+    let roster = builder.roster_for(&root)?;
     let key_inputs = artifact_inputs(
         config,
         &identity,
@@ -265,6 +266,7 @@ fn load_immutable_revision(
             tree_oid: object.tree_oid.clone(),
         },
         source_byte_mode,
+        &roster,
     )?;
     let artifact_id = key_inputs
         .artifact_id()
@@ -300,7 +302,7 @@ fn load_immutable_revision(
             return Ok(graph);
         }
         let source = RawGitSource::open(RawGitSourceOptions::new(&root, &object.tree_oid))?;
-        let graph = builder.build_virtual_source(&source)?;
+        let graph = builder.build_virtual_source(&source, &root)?.graph;
         store.publish_graph(&graph, &artifact_id, resolved, key_inputs, None)?;
         let mut protected = manager.pinned_revision_artifact_ids();
         protected.push(artifact_id.clone());
@@ -357,7 +359,8 @@ fn load_snapshot_revision(
             source_digest: fingerprint.snapshot_digest.clone(),
         },
     };
-    let key_inputs = artifact_inputs(config, &identity, source_digest, source_byte_mode)?;
+    let roster = builder.roster_for(&root)?;
+    let key_inputs = artifact_inputs(config, &identity, source_digest, source_byte_mode, &roster)?;
     let artifact_id = key_inputs
         .artifact_id()
         .map_err(|err| DaemonError::ArtifactKeyMismatch {
@@ -389,7 +392,7 @@ fn load_snapshot_revision(
                 reason: err.to_string(),
             })?
             .artifact_inputs;
-    let graph = builder.build_virtual_source(&source)?;
+    let graph = builder.build_virtual_source(&source, &root)?.graph;
     let load = ResidentRevisionLoad {
         source_root: root,
         revision_id,
@@ -402,20 +405,19 @@ fn load_snapshot_revision(
     manager.load_resident_revision(&load, || Ok(graph))
 }
 
+/// Artifact key inputs for a revision of the repository whose resolved
+/// roster is `roster` (surface parity W1, S10): the
+/// `plugin_roster_digest` names the roster the artifact is actually built
+/// with, so an `include_all` repository and a fast-path one never share an
+/// artifact.
 fn artifact_inputs(
     config: &crate::config::DaemonConfig,
     identity: &LocalRepositoryIdentity,
     source_digest: SourceDigest,
     source_byte_mode: SourceByteMode,
+    roster: &crate::workspace::roster::RosterRecord,
 ) -> Result<ArtifactKeyInputs, DaemonError> {
-    let plugin_ids = sqry_plugin_registry::resolve_plugin_selection(
-        &sqry_plugin_registry::PluginSelectionConfig::default(),
-    )
-    .map_err(|err| DaemonError::RevisionSourceUnavailable {
-        reason: format!("failed to resolve plugin roster: {err}"),
-        path: None,
-    })?
-    .active_plugin_ids;
+    let plugin_ids = roster.active_plugin_ids.clone();
     let graph_config_hash = canonical_json_sha256(&config.revision_artifacts).map_err(|err| {
         DaemonError::ArtifactKeyMismatch {
             artifact_id: "uncomputed".to_owned(),

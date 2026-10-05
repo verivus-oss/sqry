@@ -632,7 +632,10 @@ fn materialize_expand_cache(
         return;
     };
 
-    let cache = match ExpandCache::new(cache_dir.to_path_buf()) {
+    // `open`, never `new`: a reader must not create the directory it was
+    // told to read (the build refuses a removed one before and after the
+    // parse).
+    let cache = match ExpandCache::open(cache_dir.to_path_buf()) {
         Ok(cache) => cache,
         Err(err) => {
             log::warn!(

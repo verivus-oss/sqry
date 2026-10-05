@@ -86,6 +86,7 @@ pub(crate) async fn handle(ctx: &HandlerContext, params: Value) -> Result<Value,
 
     let verdict = tool_core::acquire_and_execute(
         Arc::clone(&ctx.manager),
+        &ctx.dispatcher,
         Arc::clone(&ctx.workspace_builder),
         Arc::clone(&ctx.tool_executor),
         &ctx.cpu_executor,

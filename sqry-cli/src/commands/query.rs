@@ -195,12 +195,19 @@ pub fn run_query(
         validate_query_path_strict(Path::new(search_path))?;
     }
 
+    // A `$name` the query uses and `--var` does not define is refused here,
+    // before any graph is acquired: the acquisition may build and persist an
+    // index for an unindexed path, and the executor resolves the variables
+    // only after that.
+    if let Some(vars) = variables_opt {
+        check_query_variables(cli, query_string, vars, explain, session_mode)?;
+    }
+
     // Check for pipeline queries (base query | stage)
     if let Some(pipeline) = detect_pipeline_query(query_string)? {
         run_pipeline_query(
             cli,
             &mut streams,
-            query_string,
             search_path,
             &pipeline,
             no_parallel,
@@ -241,7 +248,6 @@ pub fn run_query(
             query_string,
             search_path,
             verbose,
-            no_parallel,
             &relation_context,
         );
         // Check result first, then finalize pager
@@ -401,16 +407,23 @@ fn daemon_query_item_to_display_symbol(item: sqry_daemon_protocol::SearchItem) -
     }
 }
 
+/// The executor `--explain` plans with: the full compiled roster, no graph.
+fn explain_executor(validation_options: ValidationOptions, no_parallel: bool) -> QueryExecutor {
+    let executor = create_executor_with_plugins().with_validation_options(validation_options);
+    if no_parallel {
+        executor.without_parallel()
+    } else {
+        executor
+    }
+}
+
 fn run_query_explain(
     query_string: &str,
     validation_options: ValidationOptions,
     no_parallel: bool,
     streams: &mut OutputStreams,
 ) -> Result<()> {
-    let mut executor = create_executor_with_plugins().with_validation_options(validation_options);
-    if no_parallel {
-        executor = executor.without_parallel();
-    }
+    let executor = explain_executor(validation_options, no_parallel);
     let plan = executor.get_query_plan(query_string)?;
     let explain_output = format!(
         "Query Plan:\n  Original: {}\n  Optimized: {}\n\nExecution:\n{}\n\nPerformance:\n  Execution time: {}ms\n  Index-aware: {}\n  Cache: {}",
@@ -629,6 +642,12 @@ fn render_query_outcome(
 /// Strict path validation still ran in `run_query` before we got here,
 /// so non-existent / non-canonicalizable paths have already been
 /// rejected; this function can assume the path is valid.
+/// The engine `--text` searches with: a text searcher and a default
+/// `QueryExecutor`, no plugin selection and no graph.
+fn text_only_engine(cli: &Cli) -> Result<FallbackSearchEngine> {
+    FallbackSearchEngine::with_config(build_text_config(cli))
+}
+
 fn run_query_text_only(
     streams: &mut OutputStreams,
     params: &NonSessionQueryParams<'_>,
@@ -656,8 +675,7 @@ fn run_query_text_only(
     // discarded `validation_options` nor `no_parallel` hooks are observable
     // here. Strict path validation already ran in `run_query` before
     // dispatching, satisfying the SGA03 invalid-path tightening.
-    let config = build_text_config(cli);
-    let mut engine = FallbackSearchEngine::with_config(config)?;
+    let mut engine = text_only_engine(cli)?;
 
     let start = Instant::now();
     let results = engine.search_text_only(query_string, search_path_path)?;
@@ -768,18 +786,23 @@ fn render_text_results(
 }
 
 // RKG: CODE:SQRY-CLI implements REQ:SQRY-RUBY-QUALIFIED-CALLERS (MEDIUM-2 fix)
+/// `--session` evaluates structural queries only, so `--text` is refused.
+fn refuse_session_with_text(cli: &Cli) -> Result<()> {
+    if cli.text {
+        bail!("--session is only available for semantic queries (remove --text)");
+    }
+    Ok(())
+}
+
 fn run_query_with_session(
     cli: &Cli,
     streams: &mut OutputStreams,
     query_string: &str,
     search_path: &str,
     verbose: bool,
-    _no_parallel: bool,
     relation_ctx: &RelationDisplayContext,
 ) -> Result<()> {
-    if cli.text {
-        bail!("--session is only available for semantic queries (remove --text)");
-    }
+    refuse_session_with_text(cli)?;
 
     let search_path_path = Path::new(search_path);
 
@@ -1238,7 +1261,7 @@ fn write_query_summary(
 
 fn emit_verbose_cache_stats(
     streams: &mut OutputStreams,
-    _stats: &SimpleQueryStats,
+    _query_stats: &SimpleQueryStats,
     executor_opt: Option<&QueryExecutor>,
     diagnostics: &QueryDiagnostics,
 ) -> Result<()> {
@@ -1454,7 +1477,7 @@ fn maybe_emit_debug_cache(
     cli: &Cli,
     streams: &mut OutputStreams,
     executor_opt: Option<&QueryExecutor>,
-    _stats: &SimpleQueryStats,
+    _query_stats: &SimpleQueryStats,
 ) -> Result<()> {
     if !should_debug_cache(cli) {
         return Ok(());
@@ -1495,10 +1518,15 @@ fn build_text_config(cli: &Cli) -> FallbackConfig {
     config
 }
 
-/// Create a `QueryExecutor` with all built-in plugins registered
+/// Create a `QueryExecutor` with the full compiled plugin roster registered.
+///
+/// This executor only evaluates queries (`run_query_explain`,
+/// `probe_validate_query_syntax`); it never builds a graph. The plugin
+/// manager is consulted for plugin field-name registration, not to decide
+/// which nodes exist, so the full roster is the correct roster here, the
+/// same one the standalone MCP engine and the daemon use for evaluation.
 pub(crate) fn create_executor_with_plugins() -> QueryExecutor {
-    let plugin_manager = crate::plugin_defaults::create_plugin_manager();
-    QueryExecutor::with_plugin_manager(plugin_manager)
+    QueryExecutor::with_plugin_manager(sqry_plugin_registry::create_plugin_manager_all())
 }
 
 pub(crate) fn create_executor_with_plugins_for_cli(
@@ -1721,53 +1749,7 @@ fn build_cli_provider_and_request(
     // `NoGraph` error and the session-specific "no index found" diagnostic
     // can run.
     if matches!(missing_graph_policy, MissingGraphPolicy::AutoBuildIfEnabled) {
-        // Resolve a second plugin manager with the same selection so the
-        // auto-build hook can move an `Arc<PluginManager>` into a `'static`
-        // closure without giving up the provider's manager. `PluginManager`
-        // is not `Clone`; both managers carry identical selection because
-        // `resolve_plugin_selection(ReadOnly)` is deterministic for the
-        // same (cli, plugin_root) inputs and there is no `.sqry/graph` to
-        // invalidate here (we're on the missing-artifact branch).
-        let hook_plugins = plugin_defaults::resolve_plugin_selection(
-            cli,
-            &plugin_root,
-            PluginSelectionMode::ReadOnly,
-        )?;
-        let hook_plugin_manager = Arc::new(hook_plugins.plugin_manager);
-
-        let auto_build_hook: AutoBuildHook = Arc::new(move |canonical_request: &Path| {
-            // Mirror `Engine::ensure_graph` (Gate A iter 1): `SQRY_AUTO_INDEX`
-            // gate first; if disabled, surface `NoGraph` so the CLI's
-            // existing `map_acquisition_error` produces "No graph found ..."
-            // (preserving the pre-SGA03 exit-1 contract). Do NOT broaden
-            // auto-index semantics — only the no-artifact branch reaches
-            // this hook.
-            if !is_auto_index_enabled() {
-                return Err(GraphAcquisitionError::NoGraph {
-                    workspace_root: canonical_request.to_path_buf(),
-                });
-            }
-
-            log::info!(
-                "No graph found at {}, auto-building index",
-                canonical_request.display()
-            );
-
-            let config = sqry_core::graph::unified::build::BuildConfig::default();
-            let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
-                canonical_request,
-                &hook_plugin_manager,
-                &config,
-                "cli:auto_index",
-            )
-            .map_err(|e| GraphAcquisitionError::BuildFailed {
-                workspace_root: canonical_request.to_path_buf(),
-                reason: format!("{e}"),
-            })?;
-            Ok(Arc::new(graph))
-        });
-
-        provider = provider.with_auto_build_hook(auto_build_hook);
+        provider = provider.with_auto_build_hook(cli_auto_build_hook(cli, &plugin_root)?);
     }
 
     let request = GraphAcquisitionRequest {
@@ -1780,6 +1762,134 @@ fn build_cli_provider_and_request(
         tool_name: Some("sqry_query"),
     };
     Ok((provider, request))
+}
+
+/// The CLI's auto-build hook (surface parity W1 round 3, design D18): the
+/// one body both the CLI's `FilesystemGraphProvider` and its query
+/// executors build a missing or unloadable index through.
+///
+/// Resolves the selection the workspace at `plugin_root` records, through
+/// `resolve_plugin_selection(.., PluginSelectionMode::ReadOnly)` (an
+/// unreadable manifest is refused there, and a readable one naming an id
+/// this binary did not compile likewise; a root with no index resolves to
+/// the flags, the `SQRY_*` variables or the fast-path default), then
+/// builds and persists with that manager and records that selection (ids
+/// and `high_cost_mode`), never the inferred block the 4-argument
+/// `build_and_persist_graph` stamped with `high_cost_mode: None`. The
+/// build publishes with the record current at its publication (decision
+/// D-i8-4, [`crate::commands::index::publish_with_current_inputs`]): if a
+/// manifest appears at the root during the build, the selection and the
+/// macro options are resolved again under the index's persist lock and
+/// the graph is built again with them.
+///
+/// The returned closure checks `SQRY_AUTO_INDEX` first and answers
+/// `NoGraph` when it is off, so the CLI's `map_acquisition_error` keeps
+/// its "No graph found ..." exit-1 contract.
+///
+/// # Errors
+///
+/// Returns the read-only resolver's error when the recorded selection
+/// cannot be resolved.
+pub(crate) fn cli_auto_build_hook(cli: &Cli, plugin_root: &Path) -> Result<AutoBuildHook> {
+    // A dedicated plugin manager for the hook: `PluginManager` is not
+    // `Clone`, and the closure must own an `Arc<PluginManager>` for
+    // `'static`. `resolve_plugin_selection(ReadOnly)` is deterministic for
+    // the same (cli, plugin_root) inputs, so this manager carries the same
+    // selection a provider or an executor resolved for the same root.
+    let hook_plugins = Arc::new(plugin_defaults::resolve_plugin_selection(
+        cli,
+        plugin_root,
+        PluginSelectionMode::ReadOnly,
+    )?);
+    let selection_args = cli.plugin_selection_args();
+
+    Ok(Arc::new(move |canonical_request: &Path| {
+        if !is_auto_index_enabled() {
+            return Err(GraphAcquisitionError::NoGraph {
+                workspace_root: canonical_request.to_path_buf(),
+            });
+        }
+
+        log::info!(
+            "No graph found at {}, auto-building index",
+            canonical_request.display()
+        );
+
+        // Surface parity W4 (W4-D7): the auto-build hook carries no flags of
+        // its own, so it reuses the macro options the manifest records (a
+        // hook fires only when no graph exists, so this is the no-record
+        // case in practice, and stated for the record).
+        let macro_options = sqry_core::graph::unified::build::resolve_macro_options(
+            canonical_request,
+            &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
+            sqry_core::graph::unified::build::UnreadableManifestRule::Refuse,
+        )
+        .map_err(|e| GraphAcquisitionError::BuildFailed {
+            workspace_root: canonical_request.to_path_buf(),
+            reason: format!("{e}"),
+        })?;
+        let config = sqry_core::graph::unified::build::BuildConfig {
+            macro_options: macro_options.options,
+            ..sqry_core::graph::unified::build::BuildConfig::default()
+        };
+        // Decision D-i8-4: publish with the record current at publication.
+        // A record another writer publishes at this root while the hook
+        // builds is resolved again under the index's persist lock.
+        let resolve = || -> Result<(
+            plugin_defaults::ResolvedPluginManager,
+            sqry_core::graph::unified::build::BuildConfig,
+        )> {
+            let plugins = plugin_defaults::resolve_plugin_selection_from_args(
+                &selection_args,
+                canonical_request,
+                PluginSelectionMode::ReadOnly,
+            )?;
+            let macro_options = sqry_core::graph::unified::build::resolve_macro_options(
+                canonical_request,
+                &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
+                sqry_core::graph::unified::build::UnreadableManifestRule::Refuse,
+            )?;
+            Ok((
+                plugins,
+                sqry_core::graph::unified::build::BuildConfig {
+                    macro_options: macro_options.options,
+                    ..sqry_core::graph::unified::build::BuildConfig::default()
+                },
+            ))
+        };
+        let graph = crate::commands::index::publish_with_current_inputs(
+            canonical_request,
+            (&hook_plugins, &config),
+            &resolve,
+            &mut |plugins, config| {
+                sqry_core::graph::unified::build::build_unified_graph_with_progress(
+                    canonical_request,
+                    &plugins.plugin_manager,
+                    config,
+                    sqry_core::progress::no_op_reporter(),
+                )
+            },
+            &mut |plugins, config, (graph, effective_threads)| {
+                let (graph, _build_result) =
+                    sqry_core::graph::unified::build::persist_and_analyze_graph(
+                        graph,
+                        canonical_request,
+                        &plugins.plugin_manager,
+                        config,
+                        "cli:auto_index",
+                        plugins.persisted_selection.clone(),
+                        sqry_core::progress::no_op_reporter(),
+                        effective_threads,
+                    )?;
+                Ok(graph)
+            },
+        )
+        .map_err(|e| GraphAcquisitionError::BuildFailed {
+            workspace_root: canonical_request.to_path_buf(),
+            reason: format!("{e:#}"),
+        })?;
+        Ok(Arc::new(graph))
+    }))
 }
 
 /// Returns `true` when CLI auto-indexing is enabled (the default).
@@ -1839,14 +1949,14 @@ fn map_acquisition_error(err: GraphAcquisitionError) -> anyhow::Error {
                     )
                 } else {
                     format!(
-                        "The unknown ids do not match any known feature flag — \
+                        "The unknown ids do not match any known feature flag, so \
                          the manifest may be from a newer sqry version. \
                          Rebuild the index: `sqry index {} --force`.",
                         source_root.display(),
                     )
                 };
                 anyhow::anyhow!(
-                    "Incompatible graph at {} — manifest references plugins this binary \
+                    "Incompatible graph at {}: the manifest references plugins this binary \
                      cannot load: {}. Manifest: {}. {}",
                     source_root.display(),
                     unknown_plugin_ids.join(", "),
@@ -1866,6 +1976,24 @@ fn map_acquisition_error(err: GraphAcquisitionError) -> anyhow::Error {
                     source_root.display()
                 )
             }
+            // The CLI builds from the manifest, so it never produces this
+            // verdict itself; the match is total so a daemon-originated
+            // verdict renders as what it is rather than as "unrecognised".
+            PluginSelectionStatus::DivergesFromManifest {
+                missing_plugin_ids,
+                extra_plugin_ids,
+                manifest_path,
+            } => anyhow::anyhow!(
+                "Graph at {} was built with a plugin set that differs from its manifest \
+                 (missing: [{}]; extra: [{}]; manifest: {}). Rebuild with `sqry index {} --force`.",
+                source_root.display(),
+                missing_plugin_ids.join(", "),
+                extra_plugin_ids.join(", "),
+                manifest_path
+                    .as_ref()
+                    .map_or_else(|| "<unknown>".to_string(), |p| p.display().to_string()),
+                source_root.display(),
+            ),
             other => anyhow::anyhow!(
                 "Incompatible graph at {}: {other:?}. Rebuild with `sqry index {} --force`.",
                 source_root.display(),
@@ -1892,6 +2020,121 @@ fn u64_to_f64_lossy(value: u64) -> f64 {
 // ============================================================================
 // Variable, Join, and Pipeline support
 // ============================================================================
+
+/// Resolve the query's `$name` variables against `--var` the way the
+/// executor will, without a graph. The executor resolves them on the paths
+/// that take variables: a pipeline's base query and a join (dispatched
+/// first, whatever the mode), and otherwise the non-session, non-explain,
+/// non-text evaluation. A query that does not parse is left to the parse
+/// that reports it.
+fn check_query_variables(
+    cli: &Cli,
+    query_string: &str,
+    variables: &std::collections::HashMap<String, String>,
+    explain: bool,
+    session_mode: bool,
+) -> Result<()> {
+    let root = if let Some(pipeline) = detect_pipeline_query(query_string)? {
+        pipeline.query.root
+    } else if let Ok(query) = QueryParser::parse_query(query_string) {
+        let is_join = matches!(query.root, Expr::Join(_));
+        if !is_join && (explain || session_mode || cli.text) {
+            return Ok(());
+        }
+        query.root
+    } else {
+        return Ok(());
+    };
+    sqry_core::query::types::resolve_variables(&root, variables)
+        .map(drop)
+        .map_err(|e| anyhow::anyhow!("Variable resolution error: {e}"))
+}
+
+/// Refuse what [`run_query`] refuses from its arguments alone, in the order
+/// it refuses them: the `repo:` predicate, a malformed `--var`, the flags a
+/// revision query cannot take, an invalid path, a pipeline that does not
+/// parse, an unresolved `$name`, and then whatever the form `run_query`
+/// dispatches to refuses before it reads a graph:
+///
+/// - a pipeline: its base query, parsed and validated (field names
+///   included) by the executor the pipeline runs on;
+/// - a join: the whole query, likewise;
+/// - `--explain`: the query, by the executor that plans it;
+/// - `--session`: `--text` beside it, then the structural probe;
+/// - `--text`: a query the text searcher cannot compile;
+/// - otherwise: the structural probe.
+///
+/// Each refusal comes from the code the query itself runs, so it is the
+/// same error and exit code. A caller that would write before the query
+/// runs (the `--validate fail --auto-rebuild` rebuild) calls this first, so
+/// a refused query writes nothing. A refusal that needs the graph (the
+/// cost gate's node-count coupling, a plugin selection the index records)
+/// cannot be checked here.
+///
+/// # Errors
+///
+/// The refusal [`run_query`] would give for these arguments.
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::fn_params_excessive_bools)]
+pub fn check_query_arguments(
+    cli: &Cli,
+    query_string: &str,
+    search_path: &str,
+    explain: bool,
+    session_mode: bool,
+    no_parallel: bool,
+    variables: &[String],
+    revision: &RevisionQueryArgs,
+) -> Result<()> {
+    ensure_repo_predicate_not_present(query_string)?;
+    let parsed_variables = parse_variable_args(variables)?;
+    if revision_query_target_from_args(revision).is_some() {
+        if explain {
+            bail!("revision query does not support --explain");
+        }
+        if session_mode {
+            bail!("revision query does not support --session");
+        }
+        if no_parallel {
+            bail!("revision query does not support --no-parallel");
+        }
+        if cli.text {
+            bail!("revision query does not support --text");
+        }
+        if !parsed_variables.is_empty() {
+            bail!("revision query does not support --var");
+        }
+        return Ok(());
+    }
+    if !explain {
+        validate_query_path_strict(Path::new(search_path))?;
+    }
+    if !parsed_variables.is_empty() {
+        check_query_variables(cli, query_string, &parsed_variables, explain, session_mode)?;
+    }
+    let path = Path::new(search_path);
+    if let Some(pipeline) = detect_pipeline_query(query_string)? {
+        let base_query = sqry_core::query::parsed_query::serialize_query(&pipeline.query);
+        graph_query_executor(cli, path, no_parallel)?.parse_query_ast(&base_query)?;
+        return Ok(());
+    }
+    if is_join_query(query_string) {
+        graph_query_executor(cli, path, no_parallel)?.parse_query_ast(query_string)?;
+        return Ok(());
+    }
+    if explain {
+        explain_executor(build_validation_options(cli), no_parallel)
+            .get_query_plan(query_string)?;
+        return Ok(());
+    }
+    if session_mode {
+        refuse_session_with_text(cli)?;
+    } else if cli.text {
+        return text_only_engine(cli)?.check_text_only_query(query_string);
+    }
+    probe_validate_query_syntax(cli, path, query_string, build_validation_options(cli))
+        .map_err(|err| not_a_structural_query(err, query_string))
+}
 
 /// Parse `--var KEY=VALUE` arguments into a `HashMap`.
 fn parse_variable_args(args: &[String]) -> Result<std::collections::HashMap<String, String>> {
@@ -1940,6 +2183,30 @@ fn detect_pipeline_query(
     }
 }
 
+/// The executor a pipeline or join query runs on. It loads the graph
+/// through its own `get_or_load_graph` (design D18), so it carries the CLI's
+/// build hook; without one it would never build. It parses and validates
+/// the query before that load, so [`check_query_arguments`] asks the same
+/// executor for the same refusal.
+fn graph_query_executor(
+    cli: &Cli,
+    resolved_path: &Path,
+    no_parallel: bool,
+) -> Result<QueryExecutor> {
+    let hook_root = find_nearest_index(resolved_path).map_or_else(
+        || resolved_path.to_path_buf(),
+        |location| location.index_root,
+    );
+    let executor = create_executor_with_plugins_for_cli(cli, resolved_path)?
+        .with_auto_build_hook(cli_auto_build_hook(cli, &hook_root)?)
+        .with_validation_options(build_validation_options(cli));
+    Ok(if no_parallel {
+        executor.without_parallel()
+    } else {
+        executor
+    })
+}
+
 /// Run a join query and render results.
 fn run_join_query(
     cli: &Cli,
@@ -1949,14 +2216,9 @@ fn run_join_query(
     no_parallel: bool,
     variables: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<()> {
-    let validation_options = build_validation_options(cli);
-    let mut executor = create_executor_with_plugins_for_cli(cli, Path::new(search_path))?
-        .with_validation_options(validation_options);
-    if no_parallel {
-        executor = executor.without_parallel();
-    }
-
     let resolved_path = Path::new(search_path);
+    let executor = graph_query_executor(cli, resolved_path, no_parallel)?;
+
     let join_results = executor.execute_join(query_string, resolved_path, variables)?;
 
     if join_results.truncated() {
@@ -2024,20 +2286,13 @@ fn run_join_query(
 fn run_pipeline_query(
     cli: &Cli,
     streams: &mut OutputStreams,
-    _query_string: &str,
     search_path: &str,
     pipeline: &sqry_core::query::types::PipelineQuery,
     no_parallel: bool,
     variables: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<()> {
-    let validation_options = build_validation_options(cli);
-    let mut executor = create_executor_with_plugins_for_cli(cli, Path::new(search_path))?
-        .with_validation_options(validation_options);
-    if no_parallel {
-        executor = executor.without_parallel();
-    }
-
     let resolved_path = Path::new(search_path);
+    let executor = graph_query_executor(cli, resolved_path, no_parallel)?;
 
     // Execute the base query portion (before the pipe)
     // Serialize the base query from the parsed AST for reliable reconstruction
@@ -2098,6 +2353,167 @@ fn render_aggregation_json(
 mod tests {
     use super::*;
     use sqry_core::relations::CallIdentityKind;
+
+    /// The CLI's refusal of a graph whose manifest names plugin ids no
+    /// feature flag knows reads in plain punctuation, with no long dash
+    /// (round 7: the same text family as the plugin registry's
+    /// unknown-plugin-id message).
+    #[test]
+    fn an_unknown_plugin_id_refusal_reads_in_plain_punctuation() {
+        let err = map_acquisition_error(GraphAcquisitionError::IncompatibleGraph {
+            source_root: std::path::PathBuf::from("/ws"),
+            status: PluginSelectionStatus::IncompatibleUnknownPluginIds {
+                unknown_plugin_ids: vec!["r7-unknown".to_string()],
+                manifest_path: Some(std::path::PathBuf::from("/ws/.sqry/graph/manifest.json")),
+            },
+        });
+        assert_eq!(
+            err.to_string(),
+            "Incompatible graph at /ws: the manifest references plugins this binary cannot \
+             load: r7-unknown. Manifest: /ws/.sqry/graph/manifest.json. The unknown ids do not \
+             match any known feature flag, so the manifest may be from a newer sqry version. \
+             Rebuild the index: `sqry index /ws --force`."
+        );
+    }
+
+    // T42 (surface parity W1 round 3, battery row K29's discriminating
+    // oracle): `cli_auto_build_hook` resolves with the read-only rule, so
+    // over a manifest that cannot be read its construction is refused
+    // naming the file and nothing is built. A hook that resolved with the
+    // fresh-write (fallback) rule would construct and, when called, build
+    // the fallback. On every CLI path the executor's or the provider's own
+    // read-only resolution refuses such a manifest before the hook is
+    // constructed, which is why the integration legs cannot observe the
+    // hook's rule; this test calls the function directly.
+    crate::large_stack_test! {
+    #[test]
+    #[serial_test::serial]
+    fn cli_auto_build_hook_refuses_an_unreadable_manifest() {
+        use clap::Parser;
+
+        crate::plugin_defaults::with_cleared_plugin_env(|| {
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let root = tmp.path().canonicalize().expect("canonical root");
+            let storage = sqry_core::graph::unified::persistence::GraphStorage::new(&root);
+            std::fs::create_dir_all(storage.graph_dir()).expect("graph dir");
+            std::fs::write(storage.manifest_path(), b"{}").expect("unparseable manifest");
+            let cli = Cli::parse_from([
+                "sqry",
+                "query",
+                "kind:function",
+                root.to_str().expect("utf-8 root"),
+            ]);
+
+            let err = match cli_auto_build_hook(&cli, &root) {
+                Ok(_hook) => panic!(
+                    "survived: the hook resolved over an unreadable manifest instead of refusing"
+                ),
+                Err(err) => format!("{err:#}"),
+            };
+            assert!(
+                err.contains(&storage.manifest_path().display().to_string()),
+                "the refusal must name the manifest: {err}"
+            );
+            assert!(
+                !storage.snapshot_path().exists(),
+                "a refused hook must build nothing"
+            );
+            assert_eq!(
+                std::fs::read(storage.manifest_path()).expect("manifest bytes"),
+                b"{}",
+                "a refused hook must not rewrite the manifest"
+            );
+        });
+    }
+    }
+
+    // T49 (surface parity W1 round 5, design D28, battery row K29b's
+    // discriminating oracle): the uncompiled-id half of the hook's own
+    // refusal. Over a manifest naming an id this binary did not compile,
+    // `cli_auto_build_hook`'s read-only resolution refuses by name and
+    // builds nothing. A hook that resolved with a rule accepting recorded
+    // ids it cannot serve (the full compiled roster in place of the
+    // resolved selection) would construct; T42 cannot see that plant
+    // because an unreadable manifest is refused before any id is read.
+    // The contract (R5-6): on every CLI path the executor constructor's
+    // or the provider's read-only resolution is the first refusal and the
+    // hook's own resolution the second; both stay, because the hook is
+    // the only resolution the provider's auto-build performs. Green on
+    // both heads: a declared control whose purpose is the row.
+    crate::large_stack_test! {
+    #[test]
+    #[serial_test::serial]
+    fn cli_auto_build_hook_refuses_a_manifest_naming_an_uncompiled_plugin() {
+        use clap::Parser;
+        use sqry_core::graph::unified::persistence::{
+            BuildProvenance, GraphStorage, Manifest, PluginSelectionManifest,
+        };
+
+        const PLANTED_ID: &str = "w1-r5-planted-plugin";
+
+        crate::plugin_defaults::with_cleared_plugin_env(|| {
+            let compiled = sqry_plugin_registry::create_plugin_manager_all();
+            assert!(
+                compiled.plugin_by_id(PLANTED_ID).is_none(),
+                "precondition: no build of sqry compiles {PLANTED_ID}"
+            );
+            let mut ids: Vec<String> = sqry_plugin_registry::create_plugin_manager()
+                .plugins()
+                .iter()
+                .map(|plugin| plugin.metadata().id.to_string())
+                .collect();
+            ids.push(PLANTED_ID.to_string());
+
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let root = tmp.path().canonicalize().expect("canonical root");
+            let storage = GraphStorage::new(&root);
+            std::fs::create_dir_all(storage.graph_dir()).expect("graph dir");
+            let mut manifest = Manifest::new(
+                root.display().to_string(),
+                0,
+                0,
+                "0".repeat(64),
+                BuildProvenance::new("0.0.0-test", "test:t49"),
+            );
+            manifest.plugin_selection = Some(PluginSelectionManifest {
+                active_plugin_ids: ids,
+                high_cost_mode: Some("include_all".to_string()),
+            });
+            manifest
+                .save(storage.manifest_path())
+                .expect("manifest written");
+            let manifest_bytes = std::fs::read(storage.manifest_path()).expect("manifest bytes");
+            let cli = Cli::parse_from([
+                "sqry",
+                "query",
+                "kind:function",
+                root.to_str().expect("utf-8 root"),
+            ]);
+
+            let err = match cli_auto_build_hook(&cli, &root) {
+                Ok(_hook) => panic!(
+                    "survived: the hook resolved over a manifest naming an uncompiled plugin \
+                     instead of refusing"
+                ),
+                Err(err) => format!("{err:#}"),
+            };
+            println!("T49 refusal: {err}");
+            assert!(
+                err.contains("unknown plugin ids") && err.contains(PLANTED_ID),
+                "the refusal must name the unknown id: {err}"
+            );
+            assert!(
+                !storage.snapshot_path().exists(),
+                "a refused hook must build nothing"
+            );
+            assert_eq!(
+                std::fs::read(storage.manifest_path()).expect("manifest bytes"),
+                manifest_bytes,
+                "a refused hook must not rewrite the manifest"
+            );
+        });
+    }
+    }
 
     // ==========================================================================
     // u64_to_f64_lossy tests

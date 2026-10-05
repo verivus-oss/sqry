@@ -175,13 +175,40 @@ pub struct ExpandCache {
 impl ExpandCache {
     /// Create a new expand cache manager for the given directory.
     ///
-    /// Creates the directory if it does not exist.
+    /// Creates the directory if it does not exist. This is the writer's
+    /// constructor (`sqry cache expand` generates the cache into it); a
+    /// build that reads a cache uses [`Self::open`], which never creates one.
     ///
     /// # Errors
     ///
     /// Returns an error if the directory cannot be created.
     pub fn new(cache_dir: PathBuf) -> io::Result<Self> {
         std::fs::create_dir_all(&cache_dir)?;
+        Ok(Self { cache_dir })
+    }
+
+    /// Open an existing expand cache directory for reading.
+    ///
+    /// Unlike [`Self::new`] this never creates the directory. A build reads
+    /// the cache the index records or the request names; if that directory
+    /// was removed after the options were resolved, creating it again would
+    /// stand an empty cache in for the real one and the build would silently
+    /// lose every macro-generated symbol. The build refuses instead (the
+    /// build entrypoint checks the directory before and after the parse).
+    ///
+    /// # Errors
+    ///
+    /// Returns the metadata error (`NotFound` for a removed directory) when
+    /// `cache_dir` cannot be read, and an `io::ErrorKind::NotADirectory`
+    /// error when it exists but is not a directory.
+    pub fn open(cache_dir: PathBuf) -> io::Result<Self> {
+        let metadata = std::fs::metadata(&cache_dir)?;
+        if !metadata.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                format!("expand cache {} is not a directory", cache_dir.display()),
+            ));
+        }
         Ok(Self { cache_dir })
     }
 
@@ -451,6 +478,39 @@ mod tests {
             confidence: "heuristic".to_string(),
             generated_symbols: symbols,
         }
+    }
+
+    /// The writer's constructor creates the directory (`sqry cache expand`
+    /// generating into a fresh directory keeps working).
+    #[test]
+    fn new_creates_the_cache_directory() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let dir = temp_dir.path().join("fresh").join("expand-cache");
+        assert!(!dir.exists(), "precondition: the directory does not exist");
+        ExpandCache::new(dir.clone()).expect("the writer creates the directory");
+        assert!(dir.is_dir(), "new created the directory");
+    }
+
+    /// The reader's constructor never creates the directory: a missing one
+    /// is `NotFound` and stays missing, a file is `NotADirectory`, and an
+    /// existing directory opens.
+    #[test]
+    fn open_never_creates_the_cache_directory() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let missing = temp_dir.path().join("gone");
+        let err = ExpandCache::open(missing.clone()).expect_err("a missing cache is refused");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!missing.exists(), "open did not create the directory");
+
+        let file = temp_dir.path().join("file");
+        std::fs::write(&file, b"x").unwrap();
+        let err = ExpandCache::open(file).expect_err("a file is not a cache directory");
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
+
+        let dir = temp_dir.path().join("cache");
+        std::fs::create_dir(&dir).unwrap();
+        let cache = ExpandCache::open(dir).expect("an existing directory opens");
+        assert_eq!(cache.read("absent").unwrap().map(|_| ()), None);
     }
 
     #[test]

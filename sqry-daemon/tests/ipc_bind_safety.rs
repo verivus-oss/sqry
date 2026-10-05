@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use sqry_daemon::{
     DaemonConfig, EmptyGraphBuilder, IpcServer, RebuildDispatcher, SocketConfig, WorkspaceBuilder,
-    WorkspaceManager,
+    WorkspaceManager, WorkspaceRosterResolver,
 };
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
@@ -24,11 +24,10 @@ async fn bind_with_config(path: PathBuf) -> sqry_daemon::DaemonResult<IpcServer>
         ..DaemonConfig::default()
     });
     let manager = WorkspaceManager::new_without_reaper(Arc::clone(&config));
-    let plugins = Arc::new(sqry_plugin_registry::create_plugin_manager());
     let dispatcher = RebuildDispatcher::new(
         Arc::clone(&manager),
         Arc::clone(&config),
-        Arc::clone(&plugins),
+        Arc::new(WorkspaceRosterResolver::new()),
     );
     let builder: Arc<dyn WorkspaceBuilder> = Arc::new(EmptyGraphBuilder);
     let tool_executor = Arc::new(sqry_core::query::executor::QueryExecutor::new());
@@ -162,11 +161,10 @@ async fn runtime_dir_refuses_live_socket() {
 
     let cfg1 = Arc::new(DaemonConfig::default());
     let manager1 = WorkspaceManager::new_without_reaper(Arc::clone(&cfg1));
-    let plugins1 = Arc::new(sqry_plugin_registry::create_plugin_manager());
     let dispatcher1 = RebuildDispatcher::new(
         Arc::clone(&manager1),
         Arc::clone(&cfg1),
-        Arc::clone(&plugins1),
+        Arc::new(WorkspaceRosterResolver::new()),
     );
     let builder1: Arc<dyn WorkspaceBuilder> = Arc::new(EmptyGraphBuilder);
     let tool_executor1 = Arc::new(sqry_core::query::executor::QueryExecutor::new());
@@ -183,11 +181,10 @@ async fn runtime_dir_refuses_live_socket() {
 
     let cfg2 = Arc::new(DaemonConfig::default());
     let manager2 = WorkspaceManager::new_without_reaper(Arc::clone(&cfg2));
-    let plugins2 = Arc::new(sqry_plugin_registry::create_plugin_manager());
     let dispatcher2 = RebuildDispatcher::new(
         Arc::clone(&manager2),
         Arc::clone(&cfg2),
-        Arc::clone(&plugins2),
+        Arc::new(WorkspaceRosterResolver::new()),
     );
     let builder2: Arc<dyn WorkspaceBuilder> = Arc::new(EmptyGraphBuilder);
     let tool_executor2 = Arc::new(sqry_core::query::executor::QueryExecutor::new());

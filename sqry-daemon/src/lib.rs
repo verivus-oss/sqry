@@ -75,14 +75,16 @@ pub use ipc::{
     UnloadRevisionResult,
 };
 pub use rebuild::{
-    CapturedIteration, RebuildDispatcher, RebuildMode, TestCapture, TestGate, decide_mode,
+    CapturedIteration, RebuildDispatcher, RebuildMode, RebuildOutcome, TestCapture, TestGate,
+    decide_mode,
 };
 pub use workspace::{
-    BACKOFF_SCHEDULE, DaemonStatus, EmptyGraphBuilder, FailingGraphBuilder, LoadedWorkspace,
-    MemoryStatus, NoOpHook, OldGraphToken, PendingRebuild, RealWorkspaceBuilder,
-    RebuildReservation, ServeVerdict, SharedHook, SqrydHook, StalenessVerdict, WorkingSetInputs,
-    WorkspaceBuilder, WorkspaceKey, WorkspaceManager, WorkspaceState, WorkspaceStatus,
-    backoff_delay_for, classify_staleness, noop_hook, spawn_hook, working_set_estimate,
+    BACKOFF_SCHEDULE, BuiltGraph, DaemonStatus, EmptyGraphBuilder, FailingGraphBuilder,
+    LoadedWorkspace, MemoryStatus, NoOpHook, OldGraphToken, PendingRebuild, RealWorkspaceBuilder,
+    RebuildReservation, RebuildWaiters, RosterDivergence, RosterRecord, RosterStatus, ServeVerdict,
+    SharedHook, SqrydHook, StalenessVerdict, WorkingSetInputs, WorkspaceBuilder, WorkspaceKey,
+    WorkspaceManager, WorkspaceRosterResolver, WorkspaceState, WorkspaceStatus, backoff_delay_for,
+    classify_staleness, noop_hook, spawn_hook, working_set_estimate,
 };
 
 /// JSON-RPC error code: per-tool invocation exceeded
@@ -127,9 +129,11 @@ pub const JSONRPC_MEMORY_BUDGET_EXCEEDED: i32 = -32003;
 /// |---------|------------------------|----------------------------------------------------------------|
 /// | -32000  | `ToolTimeout`          | Per-tool `tool_timeout_secs` deadline elapsed (Phase 8c U6).   |
 /// | -32001  | `WorkspaceBuildFailed` | Build failed, no prior good graph.                             |
+/// | -32001  | `WorkspaceNotIndexed`  | Read-only query, workspace never loaded, no persisted graph; `error.data` names the absent file and the repair. |
 /// | -32002  | `WorkspaceStaleExpired`| Stale-serve window exceeded `stale_serve_max_age_hours`.       |
 /// | -32003  | `MemoryBudgetExceeded` | Admission cannot fit even after evicting all non-pinned.       |
 /// | -32004  | `WorkspaceEvicted`     | Workspace gone mid-rebuild; caller must re-`get_or_load`.      |
+/// | -32004  | `WorkspaceReloadFailed`| Evicted, and the read-only reload failed; `error.data.reload_failure` names why. |
 /// | -32005  | `WorkspaceIncompatibleGraph` | On-disk graph cannot be used by this binary (plugin or format mismatch). |
 /// | -32602  | `InvalidArgument`      | Tool-argument validation failure (JSON-RPC standard).          |
 /// | -32603  | `Internal`             | Catch-all bubbled from `sqry_mcp::daemon_adapter` execution.   |
@@ -224,6 +228,25 @@ pub const JSONRPC_REVISION_DISK_BUDGET_EXCEEDED: i32 = -32019;
 /// JSON-RPC error code: query path requires an explicit revision selector.
 pub const JSONRPC_REVISION_QUERY_REQUIRES_EXPLICIT_SELECTOR: i32 = -32020;
 
+/// JSON-RPC error code: a daemon rebuild was refused before anything was
+/// written because the roster it would record is narrower than the one the
+/// workspace manifest already records (surface parity W1, D5). Nothing on
+/// disk changes; `error.data.restore_command` names the `sqry index`
+/// invocation that restores the recorded selection.
+pub const JSONRPC_REBUILD_WOULD_NARROW_SELECTION: i32 = -32021;
+
+/// JSON-RPC error code: a daemon rebuild was refused before anything was
+/// written because the macro build options it would run with name an
+/// expand cache directory it cannot use (surface parity W4, design W4-D7):
+/// the manifest (or the request) asks for an input the process cannot
+/// honour, and building without it would silently narrow the graph.
+/// Nothing on disk changes; `error.data.expand_cache_dir` names the
+/// directory, `error.data.origin` says whether the request named it or the
+/// manifest records it, and for a recorded one `error.data.reset_command`
+/// is the `sqry daemon rebuild --no-macro-options` invocation that drops
+/// the record.
+pub const JSONRPC_REBUILD_MACRO_OPTIONS_UNAVAILABLE: i32 = -32022;
+
 /// JSON-RPC error code: pre-flight cost gate rejected a query because
 /// its evaluator cost is structurally unbounded (no scope filter, no
 /// regex anchoring, predicate shape would scan the full arena). Wire
@@ -282,12 +305,36 @@ pub fn acquire_counter_reset() -> usize {
 // Shared test-only ENV_LOCK
 // ---------------------------------------------------------------------------
 
-/// Single process-wide mutex for tests that manipulate `XDG_RUNTIME_DIR`.
+/// Single process-wide mutex for every piece of test code that reads or writes
+/// the process environment.
 ///
 /// Multiple test modules (`pidfile`, `detach`, `config`) run as threads in the
 /// same binary.  Each module previously had its own `ENV_LOCK`, which allowed
 /// concurrent `XDG_RUNTIME_DIR` mutations and produced flaky pidfile-PID
-/// mismatches.  This shared lock serialises all env-var mutations across every
-/// `#[cfg(test)]` module in the crate.
+/// mismatches.  This shared lock serialises all env-var access across every
+/// `#[cfg(test)]` module in the crate. Two checks hold the crate to it:
+/// `tests/env_lock_discipline.rs` derives the environment-touching test code
+/// from a parse of `src` and fails when an accepted shape of holding this lock
+/// does not cover it (surface parity W4 round 2, W4-D14; decision D-i7-envlock-1),
+/// and `env_trace` (Linux with glibc) traces the environment accesses the lib
+/// tests make through the C library's `getenv` family at run time. The trace
+/// fails on a write made without this lock and on a read without it of a
+/// variable some test writes; it counts, and does not fail, a read without
+/// it of a variable no test writes (how many depends on the environment the
+/// run starts from), and it does not see `environ`, `std::env::vars` and
+/// `vars_os`, nor a process a test starts that runs another program. The
+/// lock records the thread holding it ([`test_env_lock::TestEnvLock`]) for
+/// the second check to read.
 #[cfg(test)]
-pub(crate) static TEST_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static TEST_ENV_LOCK: test_env_lock::TestEnvLock = test_env_lock::TestEnvLock::new();
+
+/// The guard of [`TEST_ENV_LOCK`], for the test fixtures that keep it in a
+/// field.
+#[cfg(test)]
+pub(crate) use test_env_lock::TestEnvGuard;
+
+#[cfg(test)]
+mod test_env_lock;
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod env_trace;

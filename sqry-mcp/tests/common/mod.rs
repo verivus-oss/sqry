@@ -23,6 +23,33 @@ pub enum StderrMode {
 ///
 /// Spawns an MCP server process and provides methods for sending
 /// JSON-RPC requests and reading responses.
+/// How a spawned server redacts its responses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Redaction {
+    /// `SQRY_REDACTION_PRESET=none` unless the caller sets it: the tests see
+    /// absolute paths.
+    NoneForTests,
+    /// No redaction variable at all: the server's default preset.
+    ServerDefault,
+}
+
+/// Every variable `sqry-mcp-redaction` reads from the environment.
+const REDACTION_ENV_VARS: &[&str] = &[
+    "SQRY_REDACTION_PRESET",
+    "SQRY_HASH_FILENAMES",
+    "SQRY_HASH_SALT",
+    "SQRY_PRESERVE_PATHS",
+    "SQRY_REDACT_CODE",
+    "SQRY_REDACT_DOCS",
+    "SQRY_REDACTION_MAX_DEPTH",
+    "SQRY_REDACT_PATHS",
+    "SQRY_REDACT_PATTERNS",
+    "SQRY_REDACT_URIS",
+    "SQRY_REDACT_WORKSPACE",
+    "SQRY_REVEAL_PATHS",
+    "SQRY_WHITELIST_FIELDS",
+];
+
 pub struct McpTestClient {
     child: Child,
     pub stdin: ChildStdin,
@@ -31,6 +58,9 @@ pub struct McpTestClient {
     /// Client-side read timeout in milliseconds.
     read_timeout_ms: i32,
     roots: Vec<Value>,
+    /// When set, the client answers the server's `roots/list` with this
+    /// JSON-RPC error instead of its roots.
+    roots_list_error: Option<Value>,
 }
 
 static GRAPH_BUILD_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -129,6 +159,7 @@ impl McpTestClient {
             stderr: None,
             read_timeout_ms: 30_000,
             roots: Vec::new(),
+            roots_list_error: None,
         })
     }
 
@@ -224,7 +255,30 @@ impl McpTestClient {
         #[allow(clippy::needless_pass_by_value)] // Test helper takes owned value for convenience
         stderr_mode: StderrMode,
     ) -> Result<Self> {
-        Self::new_with_env_and_stderr_mode_internal(envs, stderr_mode, true)
+        Self::new_with_env_and_stderr_mode_internal(
+            envs,
+            stderr_mode,
+            true,
+            Redaction::NoneForTests,
+        )
+    }
+
+    /// Spawn a new MCP server process that redacts with the server's own
+    /// default preset: `SQRY_REDACTION_PRESET` and every fine-grained
+    /// redaction variable are removed from the child's environment, so the
+    /// preset is the one an operator who configured nothing gets
+    /// (`minimal`). Every other constructor sets the preset to `none`.
+    #[allow(dead_code)]
+    pub fn new_with_default_redaction(
+        envs: &[(String, String)],
+        stderr_mode: StderrMode,
+    ) -> Result<Self> {
+        Self::new_with_env_and_stderr_mode_internal(
+            envs,
+            stderr_mode,
+            true,
+            Redaction::ServerDefault,
+        )
     }
 
     /// Spawn a new MCP server process without injecting the default workspace env var.
@@ -233,13 +287,46 @@ impl McpTestClient {
         envs: &[(String, String)],
         stderr_mode: StderrMode,
     ) -> Result<Self> {
-        Self::new_with_env_and_stderr_mode_internal(envs, stderr_mode, false)
+        Self::new_with_env_and_stderr_mode_internal(
+            envs,
+            stderr_mode,
+            false,
+            Redaction::NoneForTests,
+        )
+    }
+
+    /// Spawn a server without the default workspace env var, running in
+    /// `dir`, so a test controls what the server's working directory holds
+    /// (and what is at or above it).
+    #[allow(dead_code)]
+    pub fn new_without_workspace_env_in_dir(
+        dir: &std::path::Path,
+        stderr_mode: StderrMode,
+    ) -> Result<Self> {
+        Self::spawn(&[], stderr_mode, false, Redaction::NoneForTests, Some(dir))
     }
 
     fn new_with_env_and_stderr_mode_internal(
         envs: &[(String, String)],
         stderr_mode: StderrMode,
         inject_default_workspace_root: bool,
+        redaction: Redaction,
+    ) -> Result<Self> {
+        Self::spawn(
+            envs,
+            stderr_mode,
+            inject_default_workspace_root,
+            redaction,
+            None,
+        )
+    }
+
+    fn spawn(
+        envs: &[(String, String)],
+        stderr_mode: StderrMode,
+        inject_default_workspace_root: bool,
+        redaction: Redaction,
+        dir: Option<&std::path::Path>,
     ) -> Result<Self> {
         // Use the pre-built binary directly instead of cargo run.
         // This avoids cargo lock contention when many tests spawn concurrently.
@@ -265,6 +352,9 @@ impl McpTestClient {
             .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
+        if let Some(dir) = dir {
+            command.current_dir(dir);
+        }
 
         // Set workspace root unless the caller explicitly overrides it
         let has_workspace_override = envs
@@ -280,9 +370,18 @@ impl McpTestClient {
             command.env("SQRY_MCP_TIMEOUT_MS", "600000"); // 10 min for e2e tests
         }
 
-        let has_redaction_override = envs.iter().any(|(k, _)| k == "SQRY_REDACTION_PRESET");
-        if !has_redaction_override {
-            command.env("SQRY_REDACTION_PRESET", "none");
+        match redaction {
+            Redaction::NoneForTests => {
+                let has_redaction_override = envs.iter().any(|(k, _)| k == "SQRY_REDACTION_PRESET");
+                if !has_redaction_override {
+                    command.env("SQRY_REDACTION_PRESET", "none");
+                }
+            }
+            Redaction::ServerDefault => {
+                for key in REDACTION_ENV_VARS {
+                    command.env_remove(key);
+                }
+            }
         }
 
         let capture_stderr = match stderr_mode {
@@ -320,12 +419,32 @@ impl McpTestClient {
             stderr,
             read_timeout_ms: 30_000,
             roots: Vec::new(),
+            roots_list_error: None,
         })
     }
 
     #[allow(dead_code)]
     pub fn set_roots(&mut self, root_paths: &[std::path::PathBuf]) {
         self.roots = root_paths.iter().map(|path| root_entry(path)).collect();
+    }
+
+    /// Answer every later `roots/list` with these URIs exactly as given,
+    /// so a test can list a root that is not a canonical directory URI (an
+    /// unparsable URI, a missing directory, a file, another scheme).
+    #[allow(dead_code)]
+    pub fn set_root_uris(&mut self, uris: &[&str]) {
+        self.roots = uris
+            .iter()
+            .map(|uri| json!({ "uri": uri, "name": "root" }))
+            .collect();
+    }
+
+    /// Answer every later `roots/list` from the server with the JSON-RPC
+    /// error `error` (`{"code": ..., "message": ...}`), as a client whose
+    /// roots cannot be read does.
+    #[allow(dead_code)]
+    pub fn fail_roots_list(&mut self, error: Value) {
+        self.roots_list_error = Some(error);
     }
 
     #[allow(dead_code)]
@@ -470,13 +589,20 @@ impl McpTestClient {
 
         if method == "roots/list" {
             let request_id = message["id"].clone();
-            let response = json!({
-                "jsonrpc": "2.0",
-                "id": request_id,
-                "result": {
-                    "roots": self.roots
-                }
-            });
+            let response = match &self.roots_list_error {
+                Some(error) => json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "error": error,
+                }),
+                None => json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "roots": self.roots
+                    }
+                }),
+            };
             // rmcp 1.7 registers stdio peer requests asynchronously; a short
             // yield keeps the manual test responder from racing that setup.
             std::thread::sleep(std::time::Duration::from_millis(5));
@@ -534,29 +660,37 @@ pub fn unwrap_mcp_content(response: &Value) -> Result<Value> {
     Ok(inner)
 }
 
-/// Ensure the unified graph snapshot exists for MCP tests.
+/// Ensure a complete index (manifest and snapshot) exists for MCP tests.
 ///
-/// Builds the graph for the provided workspace if needed.
+/// Builds and persists the index for the provided workspace when either
+/// file is missing, through the registry helper every persisting surface
+/// uses. A snapshot alone is not an index: the MCP's graph acquisition
+/// requires the manifest, so a helper that wrote only `snapshot.sqry` made
+/// every test that needs the manifest pass or fail by which test binary
+/// happened to index the fixture first.
 #[allow(dead_code)]
 pub fn ensure_graph_snapshot(root: &std::path::Path) -> Result<()> {
-    use sqry_core::graph::unified::build::{BuildConfig, build_unified_graph};
-    use sqry_core::graph::unified::persistence::{GraphStorage, save_to_path};
-    use sqry_plugin_registry::create_plugin_manager;
+    use sqry_core::graph::unified::build::{BuildConfig, MacroOptionsRequest};
+    use sqry_core::graph::unified::persistence::GraphStorage;
+    use sqry_plugin_registry::{PluginSelectionConfig, UnreadableManifestPolicy};
 
     let lock = GRAPH_BUILD_LOCK.get_or_init(|| Mutex::new(()));
     let _guard = lock.lock().expect("graph build lock");
 
     let storage = GraphStorage::new(root);
-    if storage.snapshot_exists() {
+    if storage.exists() && storage.snapshot_exists() {
         return Ok(());
     }
 
-    let plugins = create_plugin_manager();
-    let config = BuildConfig::default();
-    let graph = build_unified_graph(root, &plugins, &config)?;
-
-    std::fs::create_dir_all(storage.graph_dir())?;
-    save_to_path(&graph, storage.snapshot_path())?;
+    sqry_plugin_registry::build_and_persist_with_workspace_roster(
+        root,
+        &PluginSelectionConfig::default(),
+        UnreadableManifestPolicy::FallBack,
+        "test:ensure_graph_snapshot",
+        &BuildConfig::default(),
+        &MacroOptionsRequest::empty(),
+        sqry_core::progress::no_op_reporter(),
+    )?;
 
     Ok(())
 }

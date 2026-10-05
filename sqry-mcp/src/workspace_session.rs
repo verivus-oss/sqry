@@ -198,25 +198,33 @@ struct WorkspaceHints {
 }
 
 impl WorkspaceHints {
+    /// Read the arguments resolution uses: `path`, `file_path`, every
+    /// `expand_files` entry, and `workspace_id` (trimmed; it names no path).
+    ///
+    /// A path argument with leading or trailing whitespace is refused here:
+    /// resolution would read it trimmed while every tool reads it as sent,
+    /// so `" src "` passed the check and then named nothing in the tool
+    /// (`-32603` "Failed to canonicalize path"). No path argument is read
+    /// trimmed past this point, so the check and the tools read the same
+    /// text.
     fn from_serializable<T: Serialize>(params: &T) -> Result<Self> {
         let value = serde_json::to_value(params).context("Failed to serialize MCP tool params")?;
         let object = value
             .as_object()
             .context("MCP tool params must serialize to a JSON object")?;
+        refuse_padded_path_arguments(object)?;
 
         let explicit_path = object
             .get("path")
             .and_then(serde_json::Value::as_str)
-            .map(str::trim)
             .filter(|path| !path.is_empty() && *path != ".")
             .map(ToOwned::to_owned);
 
         let mut file_hints = Vec::new();
-        if let Some(file_path) = object.get("file_path").and_then(serde_json::Value::as_str) {
-            let file_path = file_path.trim();
-            if !file_path.is_empty() {
-                file_hints.push(file_path.to_string());
-            }
+        if let Some(file_path) = object.get("file_path").and_then(serde_json::Value::as_str)
+            && !file_path.is_empty()
+        {
+            file_hints.push(file_path.to_string());
         }
 
         if let Some(expand_files) = object
@@ -224,9 +232,7 @@ impl WorkspaceHints {
             .and_then(serde_json::Value::as_array)
         {
             for file in expand_files {
-                if let Some(file_path) =
-                    file.as_str().map(str::trim).filter(|path| !path.is_empty())
-                {
+                if let Some(file_path) = file.as_str().filter(|path| !path.is_empty()) {
                     file_hints.push(file_path.to_string());
                 }
             }
@@ -247,10 +253,49 @@ impl WorkspaceHints {
     }
 }
 
+/// Refuse a path argument resolution reads (`path`, `file_path`, an
+/// `expand_files` entry) that has leading or trailing whitespace (as
+/// `str::trim` sees it), naming the argument and the text as sent. A path is
+/// read exactly as given, so the padding would be part of it, and no tool
+/// reads it trimmed.
+fn refuse_padded_path_arguments(object: &serde_json::Map<String, serde_json::Value>) -> Result<()> {
+    let padded = |text: &str| text.trim() != text;
+    for key in ["path", "file_path"] {
+        if let Some(text) = object.get(key).and_then(serde_json::Value::as_str)
+            && padded(text)
+        {
+            bail!(
+                "`{key}` {text:?} has leading or trailing whitespace; a path is read exactly as \
+                 given, so pass it without the padding ({:?})",
+                text.trim()
+            );
+        }
+    }
+    if let Some(entries) = object
+        .get("expand_files")
+        .and_then(serde_json::Value::as_array)
+    {
+        for text in entries.iter().filter_map(serde_json::Value::as_str) {
+            if padded(text) {
+                bail!(
+                    "`expand_files` entry {text:?} has leading or trailing whitespace; a path is \
+                     read exactly as given, so pass it without the padding ({:?})",
+                    text.trim()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Default)]
 struct WorkspaceSessionState {
     client_supports_roots: bool,
     cached_roots: Vec<PathBuf>,
+    /// The roots the client listed that name no local directory (another
+    /// scheme, or a file), as listed. With no usable root beside them they
+    /// still bound the session: every request is refused (D-i8-22).
+    cached_skipped_roots: Vec<String>,
     roots_cache_valid: bool,
     last_resolved_workspace: Option<PathBuf>,
 }
@@ -281,6 +326,7 @@ impl WorkspaceSessionRegistry {
         state.client_supports_roots = client_supports_roots;
         if !state.client_supports_roots {
             state.cached_roots.clear();
+            state.cached_skipped_roots.clear();
             state.roots_cache_valid = false;
         }
     }
@@ -292,6 +338,28 @@ impl WorkspaceSessionRegistry {
     }
 
     /// Resolve the workspace for a tool request.
+    ///
+    /// Every tool's arguments pass through here before it runs, and each
+    /// refusal is the request's argument refused (`-32602`) unless it is the
+    /// client's roots ([`ClientRootsUnavailable`], `-32600`):
+    ///
+    /// - a `path`, `file_path` or `expand_files` entry with leading or
+    ///   trailing whitespace is refused (the tools read it as sent);
+    /// - an absolute `path` names its directory (a file's parent);
+    /// - a relative `path` is read against the client's roots or the
+    ///   session's last workspace when it has either, and otherwise against
+    ///   the workspace the server resolves without it (the configured root,
+    ///   or an index at or above the working directory), where it must name
+    ///   something; with none of these it is refused, naming it. `.` and the
+    ///   empty string are the absence of a path;
+    /// - when the client listed roots, a workspace that resolves outside
+    ///   every usable one of them is refused, so nothing is read or indexed
+    ///   there. A root of another scheme or one naming a file is skipped,
+    ///   not usable; when every root the client listed is skipped, the
+    ///   bound has nothing inside it and every request is refused, as the
+    ///   client's roots ([`ClientRootsUnavailable`], decision D-i8-22),
+    ///   never read as no bound. A client that lists no root at all (an
+    ///   empty list), or does not support roots, sets no bound.
     pub async fn resolve_for_request<T: Serialize>(
         &self,
         params: &T,
@@ -310,7 +378,10 @@ impl WorkspaceSessionRegistry {
             .filter(|path| should_resolve_explicit_path(path, &roots, last_resolved.as_deref()))
         {
             ResolvedWorkspaceContext::new(
-                resolve_explicit_workspace(explicit_path, &roots, last_resolved.as_deref())?,
+                // The refusal names the argument it refuses, so a caller can
+                // tell which `path` resolved nowhere.
+                resolve_explicit_workspace(explicit_path, &roots, last_resolved.as_deref())
+                    .with_context(|| format!("`path` {explicit_path:?} names no workspace"))?,
                 WorkspaceResolutionSource::ExplicitPath,
             )
         } else if let Some(workspace_root) =
@@ -333,11 +404,68 @@ impl WorkspaceSessionRegistry {
                 display_paths(&roots)
             );
         } else {
-            ResolvedWorkspaceContext::new(
-                WorkspaceResolver::new(None).resolve()?,
-                WorkspaceResolutionSource::LegacyFallback,
-            )
+            // A relative `path` is read against a workspace, never against
+            // the server's working directory itself (the tool guide says
+            // workspace-relative): with no client root, no earlier workspace,
+            // no configured root and no index at or above the working
+            // directory there is none, so the path is refused here, naming it.
+            // An absolute `path` never reaches this branch: it names its
+            // directory directly (the explicit branch above).
+            let legacy = WorkspaceResolver::new(None).resolve();
+            let workspace_root = match hints.explicit_path.as_deref() {
+                Some(explicit_path) => legacy.with_context(|| {
+                    format!(
+                        "`path` {explicit_path:?} names no workspace: a relative `path` is read \
+                         against the workspace the session resolves without it (a client root, \
+                         the last workspace, the configured root, or an index at or above the \
+                         working directory), and there is none; an absolute `path` names its \
+                         directory directly"
+                    )
+                })?,
+                None => legacy?,
+            };
+            ResolvedWorkspaceContext::new(workspace_root, WorkspaceResolutionSource::LegacyFallback)
         };
+
+        // Containment (round 7, surfaces round four): the client's roots
+        // bound where the server works. A `path` (or a file hint) that
+        // resolves outside every root, `..` above a root or an absolute
+        // path elsewhere, is refused before any tool runs, so nothing is
+        // indexed or read there. With no client roots there is no such
+        // bound and this check does not apply; a client whose every listed
+        // root was skipped was refused in `session_roots` (D-i8-22), so an
+        // empty `roots` here is a client that listed none.
+        if !roots.is_empty()
+            && !roots
+                .iter()
+                .any(|root| resolved.workspace_root.starts_with(root))
+        {
+            let argument = match (resolved.resolution_source, hints.explicit_path.as_deref()) {
+                (WorkspaceResolutionSource::ExplicitPath, Some(explicit_path)) => {
+                    format!("`path` {explicit_path:?}")
+                }
+                _ => "the request's file hint".to_string(),
+            };
+            bail!(
+                "{argument} resolves to {}, outside every client root ({})",
+                resolved.workspace_root.display(),
+                display_paths(&roots)
+            );
+        }
+
+        // The one check every tool's `path` passes (S5, round 7): the
+        // explicit branch above already canonicalized an absolute path, and
+        // a relative one under the session's roots or its last workspace;
+        // a relative path it did not resolve (no client root and no earlier
+        // workspace) is read by every tool against the workspace resolved
+        // here, so it must name something there. Without this, a path naming
+        // nothing reached the tools, which answered it three ways: an
+        // internal error, a missing subtree, or an answer that ignored it.
+        if resolved.resolution_source != WorkspaceResolutionSource::ExplicitPath
+            && let Some(explicit_path) = hints.explicit_path.as_deref()
+        {
+            require_named_under(explicit_path, &resolved.workspace_root)?;
+        }
 
         let mut state = self.state.write();
         state.last_resolved_workspace = Some(resolved.workspace_root.clone());
@@ -356,15 +484,46 @@ impl WorkspaceSessionRegistry {
         Ok(resolved.with_logical_workspace(logical))
     }
 
+    /// The session's usable roots: the client's listed roots that name a
+    /// local directory, canonical. Refuses, as the client's roots
+    /// ([`ClientRootsUnavailable`]), when the client listed roots and none
+    /// of them is usable (round 8, D-i8-22): the bound the roots set then
+    /// holds nothing, so no path is inside it. Before, the empty usable
+    /// list read as "no client roots", and the request ran with no bound.
     async fn session_roots(&self, context: &RequestContext<RoleServer>) -> Result<Vec<PathBuf>> {
+        let (roots, skipped) = self.listed_roots(context).await?;
+        if roots.is_empty() && !skipped.is_empty() {
+            return Err(ClientRootsUnavailable(anyhow::anyhow!(
+                "The client listed roots, but none names a local directory ({}): a root of \
+                 another scheme or one naming a file is skipped, so the session has no root to \
+                 work in and every path is outside its roots",
+                skipped.join(", ")
+            ))
+            .into());
+        }
+        Ok(roots)
+    }
+
+    /// The client's listed roots, fetched once per roots-list revision:
+    /// the usable ones (canonical local directories) and the skipped ones
+    /// (as listed).
+    async fn listed_roots(
+        &self,
+        context: &RequestContext<RoleServer>,
+    ) -> Result<(Vec<PathBuf>, Vec<String>)> {
+        let cached = |state: &WorkspaceSessionState| {
+            (
+                state.cached_roots.clone(),
+                state.cached_skipped_roots.clone(),
+            )
+        };
         let should_fetch = {
             let state = self.state.read();
             state.client_supports_roots && !state.roots_cache_valid
         };
 
         if !should_fetch {
-            let state = self.state.read();
-            return Ok(state.cached_roots.clone());
+            return Ok(cached(&self.state.read()));
         }
 
         let _roots_fetch_guard = self.roots_fetch_lock.lock().await;
@@ -373,22 +532,24 @@ impl WorkspaceSessionRegistry {
             state.client_supports_roots && !state.roots_cache_valid
         };
         if !should_fetch {
-            let state = self.state.read();
-            return Ok(state.cached_roots.clone());
+            return Ok(cached(&self.state.read()));
         }
 
         let roots_result = context
             .peer
             .list_roots()
             .await
-            .context("Client advertised roots support, but `roots/list` failed")?;
-        let roots = canonicalize_roots(&roots_result.roots)?;
+            .context("Client advertised roots support, but `roots/list` failed")
+            .map_err(ClientRootsUnavailable)?;
+        let (roots, skipped) =
+            canonicalize_roots(&roots_result.roots).map_err(ClientRootsUnavailable)?;
 
         let mut state = self.state.write();
         state.cached_roots.clone_from(&roots);
+        state.cached_skipped_roots.clone_from(&skipped);
         state.roots_cache_valid = true;
 
-        Ok(roots)
+        Ok((roots, skipped))
     }
 }
 
@@ -449,6 +610,56 @@ pub fn resolve_logical_workspace_for_root(workspace_root: &Path) -> Option<Arc<L
     }
 }
 
+/// The client's roots could not be read: its `roots/list` request failed,
+/// or a root it listed is a URI that does not parse, a `file:` URI that
+/// names no local path (another host, for instance), or a `file:` URI whose
+/// path cannot be canonicalized (it does not exist or cannot be read). Any
+/// one such root refuses the request, whatever the others are. A root that
+/// parses but names no directory is not refused by itself: one of another
+/// scheme (`https://...`) or one naming a file is skipped, and the
+/// session's roots are the directories that remain. When every root the
+/// client listed is skipped, none remains, and every request is refused
+/// here too, naming the skipped roots (round 8, decision D-i8-22): the
+/// client bounded the session to roots of which none is a local directory,
+/// so no path is inside the bound. That used to read as "no client roots"
+/// and lift the bound.
+///
+/// That is the client's state, not the request's argument, so the server
+/// answers it as an invalid request (`-32600`, no data, the whole chain as
+/// the message), as it did before resolution refusals became invalid
+/// arguments; every other resolution refusal is the request's `path` (or its
+/// absence) refused ([`crate::error::RpcError::workspace_unresolved`]).
+/// Display and source are the wrapped error's, so the chain reads exactly as
+/// it did unwrapped.
+#[derive(Debug, thiserror::Error)]
+#[error(transparent)]
+pub struct ClientRootsUnavailable(anyhow::Error);
+
+/// Whether `error` (a [`WorkspaceSessionRegistry::resolve_for_request`]
+/// refusal) is the client's roots, not the request's argument.
+#[must_use]
+pub fn is_client_roots_refusal(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<ClientRootsUnavailable>())
+}
+
+/// A relative `path` read against `workspace_root`, the workspace the
+/// request resolved to without it, must name something there: a file or a
+/// directory, through a symlink if it is one (a dangling link names
+/// nothing). The refusal names the path as the request gave it and the
+/// workspace it was read against.
+fn require_named_under(explicit_path: &str, workspace_root: &Path) -> Result<()> {
+    std::fs::metadata(workspace_root.join(explicit_path))
+        .map(drop)
+        .with_context(|| {
+            format!(
+                "`path` {explicit_path:?} names nothing under the workspace {}",
+                workspace_root.display()
+            )
+        })
+}
+
 fn should_resolve_explicit_path(
     explicit_path: &str,
     roots: &[PathBuf],
@@ -457,16 +668,22 @@ fn should_resolve_explicit_path(
     Path::new(explicit_path).is_absolute() || !roots.is_empty() || last_resolved.is_some()
 }
 
-fn canonicalize_roots(roots: &[rmcp::model::Root]) -> Result<Vec<PathBuf>> {
+/// The client's roots, read: the canonical local directories, sorted and
+/// without duplicates, and the roots skipped (another scheme, or a file),
+/// as listed. A root that cannot be read at all is an error.
+fn canonicalize_roots(roots: &[rmcp::model::Root]) -> Result<(Vec<PathBuf>, Vec<String>)> {
     let mut canonical_roots = Vec::new();
+    let mut skipped = Vec::new();
     for root in roots {
         let Some(root_path) = root_uri_to_path(&root.uri)? else {
+            skipped.push(root.uri.clone());
             continue;
         };
         let canonical_root = root_path
             .canonicalize()
             .with_context(|| format!("Failed to canonicalize MCP root {}", root_path.display()))?;
         if !canonical_root.is_dir() {
+            skipped.push(root.uri.clone());
             continue;
         }
         if !canonical_roots
@@ -477,7 +694,7 @@ fn canonicalize_roots(roots: &[rmcp::model::Root]) -> Result<Vec<PathBuf>> {
         }
     }
     canonical_roots.sort();
-    Ok(canonical_roots)
+    Ok((canonical_roots, skipped))
 }
 
 fn root_uri_to_path(uri: &str) -> Result<Option<PathBuf>> {
@@ -691,6 +908,42 @@ mod tests {
             ]
         );
         assert_eq!(hints.workspace_id, None);
+    }
+
+    #[test]
+    fn workspace_hints_refuse_a_padded_path_argument_and_keep_an_unpadded_one() {
+        for (params, named) in [
+            (json!({ "path": " src " }), "`path` \" src \""),
+            (json!({ "path": "src\n" }), "`path` \"src\\n\""),
+            (json!({ "path": "   " }), "`path` \"   \""),
+            (
+                json!({ "file_path": "\tsrc/lib.rs" }),
+                "`file_path` \"\\tsrc/lib.rs\"",
+            ),
+            (
+                json!({ "expand_files": ["src/lib.rs", "src/main.rs "] }),
+                "`expand_files` entry \"src/main.rs \"",
+            ),
+        ] {
+            let error = WorkspaceHints::from_serializable(&params)
+                .expect_err("a padded path argument is refused");
+            assert!(
+                error
+                    .to_string()
+                    .starts_with(&format!("{named} has leading or trailing whitespace")),
+                "{params}: {error}"
+            );
+        }
+        let hints = WorkspaceHints::from_serializable(&json!({
+            "path": "src",
+            "file_path": "src/lib.rs",
+            "expand_files": ["src/main.rs", ""],
+            "workspace_id": " abc "
+        }))
+        .expect("unpadded arguments are read");
+        assert_eq!(hints.explicit_path.as_deref(), Some("src"));
+        assert_eq!(hints.file_hints, vec!["src/lib.rs", "src/main.rs"]);
+        assert_eq!(hints.workspace_id.as_deref(), Some("abc"));
     }
 
     #[test]

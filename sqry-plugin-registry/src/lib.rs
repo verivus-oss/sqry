@@ -13,6 +13,15 @@ pub use feature_table::{
     PLUGIN_FEATURE_TABLE, PluginFeatureSpec, all_unknown_ids_have_features, missing_features_for,
 };
 
+pub mod selection;
+pub use selection::{
+    BuildWithRosterError, PersistedBuild, ResolvedWorkspaceSelection, RosterSource,
+    UnreadableManifest, UnreadableManifestPolicy, WorkspaceRoster,
+    build_and_persist_with_workspace_roster, create_plugin_manager_for_selection,
+    resolve_persisted_selection, resolve_workspace_roster, resolve_workspace_roster_for_rebuild,
+    selection_from_manifest,
+};
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PluginCostTier {
@@ -87,6 +96,15 @@ pub enum PluginSelectionError {
         /// the "rebuild the index" suggestion.
         all_unknown_ids_have_features: bool,
     },
+    /// The workspace has an index but its manifest could not be read or
+    /// parsed, so the recorded plugin selection is unknown. Produced by
+    /// [`resolve_persisted_selection`]; never treated as "no index".
+    ManifestUnreadable {
+        /// Absolute path to the manifest that failed to load.
+        manifest_path: PathBuf,
+        /// The persistence layer's error text.
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for PluginSelectionError {
@@ -131,12 +149,21 @@ impl std::fmt::Display for PluginSelectionError {
                 } else {
                     write!(
                         f,
-                        "  the unknown ids do not match any known feature flag — \
+                        "  the unknown ids do not match any known feature flag, so \
                          the manifest may be from a newer sqry version. Rebuild \
                          the index: sqry index --force <workspace-root>"
                     )
                 }
             }
+            Self::ManifestUnreadable {
+                manifest_path,
+                reason,
+            } => write!(
+                f,
+                "manifest at {} is unreadable ({reason}); repair it or rebuild the index: \
+                 sqry index --force <workspace-root>",
+                manifest_path.display()
+            ),
         }
     }
 }
@@ -399,6 +426,55 @@ fn is_plugin_enabled(spec: &BuiltinPluginSpec, config: &PluginSelectionConfig) -
     }
 }
 
+/// The refusal for `ids`, plugin ids this binary did not compile, that the
+/// manifest at `manifest_path` records: the same
+/// [`PluginSelectionError::UnknownPluginIdsCtx`] the resolver gives when it
+/// reads that manifest (ids sorted and deduplicated, the supported ids, the
+/// feature flags that would compile them), for a surface that learned the
+/// ids from another path, such as the graph provider's
+/// `PluginSelectionStatus::IncompatibleUnknownPluginIds`, so it can render
+/// the refusal in the resolver's words. Ids this binary does compile are
+/// dropped; with none left the error still names the manifest.
+#[must_use]
+pub fn unknown_plugin_ids_error(
+    ids: &[String],
+    manifest_path: Option<std::path::PathBuf>,
+) -> PluginSelectionError {
+    let refusal = match validate_plugin_ids(ids.iter().map(String::as_str)) {
+        Err(refusal) => refusal,
+        Ok(()) => {
+            let supported_ids: BTreeSet<&str> =
+                BUILTIN_PLUGIN_SPECS.iter().map(|spec| spec.id).collect();
+            PluginSelectionError::UnknownPluginIdsCtx {
+                ids: Vec::new(),
+                supported_ids: supported_ids.into_iter().map(ToString::to_string).collect(),
+                manifest_path: None,
+                suggested_features: Vec::new(),
+                all_unknown_ids_have_features: true,
+            }
+        }
+    };
+    match (refusal, manifest_path) {
+        (
+            PluginSelectionError::UnknownPluginIdsCtx {
+                ids,
+                supported_ids,
+                suggested_features,
+                all_unknown_ids_have_features,
+                ..
+            },
+            manifest_path,
+        ) => PluginSelectionError::UnknownPluginIdsCtx {
+            ids,
+            supported_ids,
+            manifest_path,
+            suggested_features,
+            all_unknown_ids_have_features,
+        },
+        (other, _) => other,
+    }
+}
+
 fn validate_plugin_ids<'a>(
     plugin_ids: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), PluginSelectionError> {
@@ -429,6 +505,25 @@ fn validate_plugin_ids<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The unknown-plugin-id refusal reaches CLI, MCP and LSP answers
+    /// verbatim, so it reads in plain punctuation: no long dash (round 7).
+    #[test]
+    fn unknown_plugin_ids_read_in_plain_punctuation() {
+        let err = PluginSelectionError::UnknownPluginIdsCtx {
+            ids: vec!["r7-unknown".to_string()],
+            supported_ids: vec!["rust".to_string()],
+            manifest_path: None,
+            suggested_features: Vec::new(),
+            all_unknown_ids_have_features: false,
+        };
+        assert_eq!(
+            err.to_string(),
+            "unknown plugin ids: r7-unknown (this binary supports: rust)\n  \
+             the unknown ids do not match any known feature flag, so the manifest may be \
+             from a newer sqry version. Rebuild the index: sqry index --force <workspace-root>"
+        );
+    }
 
     fn config_with_mode(high_cost_mode: HighCostMode) -> PluginSelectionConfig {
         PluginSelectionConfig {

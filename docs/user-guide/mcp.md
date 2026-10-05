@@ -73,7 +73,9 @@ Cleartext source-root paths appear only through top-level `source_roots[]` when 
 
 ## Redaction
 
-The MCP runtime default is `minimal`. Presets are `none`, `minimal`, `relative` (legible workspace-relative paths), `standard`, and `strict`. For external or hosted LLM providers, `standard` is the recommended preset unless you need stricter path privacy. `strict` hides more path detail and can require more correlation work from the client. Override with `SQRY_REDACTION_PRESET`.
+The MCP runtime default is `minimal`. Presets are `none`, `minimal`, `relative` (legible workspace-relative paths), `standard`, and `strict`. For external or hosted LLM providers, `standard` is the recommended preset unless you need stricter path privacy. `strict` hides more path detail and can require more correlation work from the client. Override with `SQRY_REDACTION_PRESET`. The name is read trimmed and in any letter case (`Strict` is `strict`). Any other value is refused at startup with an error naming it, rather than served unredacted, by `sqryd` and by a standalone `sqry-mcp` (in-process mode, `--no-daemon`, or the fallback when no daemon is reachable). A `sqry-mcp` running as a shim does not read the variable, so it neither applies nor refuses it; see below.
+
+Where that variable must be set depends on which process serves the tools. A standalone `sqry-mcp` (in-process mode, or `--no-daemon`) reads it from its own environment, the `env` block of your MCP client configuration. When a `sqryd` daemon is reachable, `sqry-mcp` runs as a shim by default and the daemon serves and redacts every response under the preset in **its own** environment; the client's `SQRY_REDACTION_PRESET` does not reach it and is ignored. To get a stricter preset while a daemon runs, either set `SQRY_REDACTION_PRESET` where `sqryd` runs (its service unit, or the shell that starts it, then restart it) or start `sqry-mcp --no-daemon` with the variable in its `env`.
 
 ## More Detail
 

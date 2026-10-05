@@ -12,7 +12,9 @@ use sqry_core::graph::{
 };
 use sqry_core::plugin::PluginManager;
 use sqry_core::query::QueryExecutor;
-use sqry_plugin_registry::{create_plugin_manager, create_plugin_manager_all};
+use sqry_plugin_registry::{
+    PluginSelectionConfig, UnreadableManifestPolicy, create_plugin_manager_all,
+};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -107,6 +109,13 @@ impl Engine {
     ///
     /// This bypasses the global singleton and creates a fresh Engine instance
     /// for the given workspace. Used for per-call workspace resolution.
+    ///
+    /// The executor carries no auto-build hook (surface parity W1 round 3,
+    /// design D18): [`Self::ensure_graph`]'s provider builds a missing index
+    /// before any tool runs and refuses a corrupt one, so an executor that
+    /// built on its own would re-introduce a self-heal the provider refuses,
+    /// with a roster and a record the provider did not choose. With no hook
+    /// the executor's own load path answers "no graph" or the load error.
     #[allow(clippy::unnecessary_wraps)] // Result for API consistency, may fail in future
     /// Returns an error if the operation fails.
     ///
@@ -198,7 +207,9 @@ impl Engine {
         // If the manifest exists but is corrupt/unreadable, fail closed (return None)
         // rather than skipping verification — a corrupt manifest is suspicious.
         // Only skip verification when NO manifest exists (pre-manifest index format).
-        let expected_sha256 = if storage.manifest_path().exists() {
+        // `exists()` waits out a live persist's set-aside window rather
+        // than reading it as a pre-manifest index (decision D-i8-1).
+        let expected_sha256 = if storage.exists() {
             match std::fs::File::open(storage.manifest_path()).and_then(|f| {
                 serde_json::from_reader::<_, Manifest>(f)
                     .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
@@ -330,19 +341,28 @@ impl Engine {
                 "Auto-building graph index (no existing snapshot found)"
             );
 
-            let plugins = create_plugin_manager();
-            let config = sqry_core::graph::unified::build::BuildConfig::default();
-            let (graph, _build_result) = sqry_core::graph::unified::build::build_and_persist_graph(
+            // Surface parity W1 round 2 (D8): build and persist through
+            // the one registry helper every persisting site uses. A
+            // brand-new index (no manifest) still gets the fast-path
+            // fallback, which is the invariant
+            // `mcp_load_roster_advertises_high_cost_json_issue_314` pins.
+            // This hook fires only when no `.sqry/graph` exists at all,
+            // so the refusing policy is unreachable in practice and stated
+            // for the record (design D9).
+            let built = sqry_plugin_registry::build_and_persist_with_workspace_roster(
                 &workspace_root_for_hook,
-                &plugins,
-                &config,
+                &PluginSelectionConfig::default(),
+                UnreadableManifestPolicy::Refuse,
                 "mcp:auto_index",
+                &sqry_core::graph::unified::build::BuildConfig::default(),
+                &sqry_core::graph::unified::build::MacroOptionsRequest::empty(),
+                sqry_core::progress::no_op_reporter(),
             )
             .map_err(|e| GraphAcquisitionError::BuildFailed {
                 workspace_root: workspace_root_for_hook.clone(),
                 reason: format!("{e}"),
             })?;
-            Ok(Arc::new(graph))
+            Ok(Arc::new(built.graph))
         });
 
         let provider = FilesystemGraphProvider::new(Arc::new(provider_plugins))
@@ -422,14 +442,14 @@ fn map_acquisition_error_for_engine(err: GraphAcquisitionError) -> anyhow::Error
                     )
                 } else {
                     format!(
-                        "The unknown ids do not match any known feature flag — \
+                        "The unknown ids do not match any known feature flag, so \
                          the manifest may be from a newer sqry version. \
                          Rebuild the index: `sqry index --force {}`.",
                         source_root.display(),
                     )
                 };
                 anyhow::anyhow!(
-                    "Incompatible graph at {} — manifest references plugins this binary \
+                    "Incompatible graph at {}: the manifest references plugins this binary \
                      cannot load: {}. Manifest: {}. {}",
                     source_root.display(),
                     unknown_plugin_ids.join(", "),
@@ -437,6 +457,26 @@ fn map_acquisition_error_for_engine(err: GraphAcquisitionError) -> anyhow::Error
                     suggestion,
                 )
             }
+            // A resident graph built with a different set than the manifest
+            // records (daemon verdict). The filesystem provider never
+            // produces it; rendered as a warning line, not a refusal, so
+            // the match stays total when the status crosses surfaces.
+            sqry_core::graph::acquisition::PluginSelectionStatus::DivergesFromManifest {
+                missing_plugin_ids,
+                extra_plugin_ids,
+                manifest_path,
+            } => anyhow::anyhow!(
+                "Warning: graph at {} was built with a plugin set that differs from its \
+                 manifest (missing: [{}]; extra: [{}]; manifest: {}). Rebuild with \
+                 `sqry index --force {}` to realign them.",
+                source_root.display(),
+                missing_plugin_ids.join(", "),
+                extra_plugin_ids.join(", "),
+                manifest_path
+                    .as_ref()
+                    .map_or_else(|| "<unknown>".to_string(), |p| p.display().to_string()),
+                source_root.display(),
+            ),
             other => anyhow::anyhow!(
                 "Incompatible graph at {}: {:?}. Rebuild the index with \
                  `sqry index --force {}` after upgrading sqry.",
@@ -523,23 +563,38 @@ pub fn engine() -> Result<Arc<Engine>> {
 /// - Manifest is missing or corrupt
 /// - `GraphIdentity` validation fails (`root_path` mismatch)
 pub fn engine_for_workspace(explicit_path: Option<&PathBuf>) -> Result<Arc<Engine>> {
+    engine_for_workspace_root(&workspace_root_for(explicit_path)?)
+}
+
+/// The workspace root [`engine_for_workspace`] would load an engine for,
+/// resolved the same way, without loading, refreshing or caching an engine.
+///
+/// `rebuild_index` resolves its root through this: it builds from source
+/// and needs no engine, and the cached engine's freshness refresh re-parses
+/// the manifest, so going through the engine would refuse an unreadable
+/// manifest before the rebuild that is allowed to replace it (surface parity
+/// W1, design D9: an explicit rebuild falls back and records the fallback).
+///
+/// # Errors
+///
+/// Returns an error if workspace resolution fails.
+pub fn workspace_root_for(explicit_path: Option<&PathBuf>) -> Result<PathBuf> {
     // Request-scoped resolution in `server.rs` is authoritative once the
     // blocking closure starts. In that case the override intentionally shadows
     // any explicit path passed by legacy tool code.
     if let Some(workspace_root) = crate::workspace_session::current_workspace_override() {
-        return engine_for_workspace_root(&workspace_root);
+        return Ok(workspace_root);
     }
 
     // Use discovery cache if path is provided, otherwise fall back to direct resolution
-    let workspace_root = if let Some(path) = explicit_path {
+    if let Some(path) = explicit_path {
         // Use cached discovery for performance and platform-specific normalization
-        crate::path_resolver::resolve_workspace_path(&path.to_string_lossy())?
+        crate::path_resolver::resolve_workspace_path(&path.to_string_lossy())
     } else {
         // No explicit path - resolve from cwd/env
         let resolver = WorkspaceResolver::new(None);
-        resolver.resolve()?
-    };
-    engine_for_workspace_root(&workspace_root)
+        resolver.resolve()
+    }
 }
 
 /// Build a [`crate::daemon_adapter::WorkspaceContext`] from a resolved engine.
@@ -1010,8 +1065,11 @@ fn normalize_path(path: &Path) -> PathBuf {
 /// still correctly rejected because they are absent from the roster too.
 ///
 /// Note: auto-**build** of a brand-new index (the `ensure_graph` auto-build
-/// hook) deliberately keeps the fast-path `create_plugin_manager()` so a fresh
-/// index is not silently built with high-cost plugins.
+/// hook) resolves its roster through
+/// `sqry_plugin_registry::build_and_persist_with_workspace_roster` with the
+/// fast-path fallback, so a fresh index is not silently built with
+/// high-cost plugins while an existing `include_all` index keeps its
+/// recorded selection.
 fn build_plugin_manager() -> PluginManager {
     create_plugin_manager_all()
 }
@@ -1230,68 +1288,24 @@ fn read_daemon_pid_from_socket_dir(socket_path: &Path) -> Option<u32> {
 
 /// Read `GraphIdentity` from the manifest.json file.
 ///
-/// Validates that the manifest's `root_path` matches the provided workspace
-/// path to prevent cross-workspace cache poisoning via symlinked `.sqry/graph/`
-/// directories.
+/// The identity half of the atomic reader
+/// [`read_graph_identity_with_metadata`] (surface parity W1 round 4, design
+/// D21): one parse site, one validation, one error text naming the
+/// manifest path, whichever path reaches it (the engine cache's insert and
+/// refresh, or [`get_graph_identity`] on a cache miss). The file metadata
+/// the atomic reader also gathers is dropped here; its `stat` runs on the
+/// handle `File::open` already returned, so it cannot introduce a failure
+/// the parse path did not already have.
 ///
 /// # Errors
 ///
 /// Returns an error if:
 /// - Manifest file is missing or corrupt
-/// - Manifest cannot be parsed as valid JSON
+/// - Manifest cannot be parsed as valid JSON (the error names the manifest path)
 /// - `root_path` validation fails (mismatch between manifest and workspace)
 /// - `DateTime` parsing fails
 pub fn read_graph_identity(workspace: &Path) -> Result<GraphIdentity> {
-    let manifest_path = workspace.join(".sqry/graph/manifest.json");
-
-    // Read and parse manifest
-    let file = std::fs::File::open(&manifest_path).with_context(|| {
-        format!(
-            "Manifest missing - run `sqry index` in workspace: {}",
-            workspace.display()
-        )
-    })?;
-
-    let manifest: sqry_core::graph::unified::persistence::Manifest = serde_json::from_reader(file)
-        .context("Failed to parse manifest.json - index may be corrupt")?;
-
-    // Validate workspace root path
-    let canonical_workspace = std::fs::canonicalize(workspace)?;
-    // Resolve manifest root_path relative to workspace if it's a relative path
-    let manifest_root_path = PathBuf::from(&manifest.root_path);
-    let manifest_root = if manifest_root_path.is_absolute() {
-        std::fs::canonicalize(&manifest_root_path)?
-    } else {
-        // Relative path - resolve relative to workspace, not cwd
-        std::fs::canonicalize(workspace.join(&manifest_root_path))?
-    };
-
-    if canonical_workspace != manifest_root {
-        bail!(
-            "Manifest root_path mismatch: expected {}, got {}. \
-             Possible symlinked .sqry/graph from different repo.",
-            canonical_workspace.display(),
-            manifest_root.display()
-        );
-    }
-
-    // Parse built_at timestamp
-    let built_at = DateTime::parse_from_rfc3339(&manifest.built_at)
-        .with_context(|| {
-            format!(
-                "Invalid built_at timestamp in manifest: {}",
-                manifest.built_at
-            )
-        })?
-        .with_timezone(&Utc);
-
-    Ok(GraphIdentity {
-        snapshot_sha256: manifest.snapshot_sha256,
-        built_at,
-        schema_version: manifest.schema_version,
-        snapshot_format_version: manifest.snapshot_format_version,
-        workspace_root: canonical_workspace,
-    })
+    read_graph_identity_with_metadata(workspace).map(|(identity, _metadata)| identity)
 }
 
 /// Read manifest metadata for freshness checks.
@@ -1352,7 +1366,18 @@ pub fn read_graph_identity_with_metadata(
 
     // Parse manifest content
     let manifest: sqry_core::graph::unified::persistence::Manifest = serde_json::from_reader(file)
-        .context("Failed to parse manifest.json - index may be corrupt")?;
+        .with_context(|| {
+            // Surface parity W1 round 3 (design D17): a manifest that
+            // cannot be read is refused naming the file on every surface;
+            // this is the engine cache's refresh path, reached before any
+            // tool leg when an engine for the root is already cached, and
+            // since round 4 (design D21) also the one parse site behind
+            // `read_graph_identity` and `get_graph_identity`.
+            format!(
+                "Failed to parse manifest at {} - index may be corrupt",
+                manifest_path.display()
+            )
+        })?;
 
     // Validate workspace root path
     let canonical_workspace = std::fs::canonicalize(workspace)?;
@@ -2135,6 +2160,43 @@ mod engine_cache_tests {
         assert!(result.unwrap_err().to_string().contains("not initialized"));
     }
 
+    /// T46 (surface parity W1 round 4, design D21; battery row K34's
+    /// oracle beside T32b's second leg): on a cache miss
+    /// `get_graph_identity` reaches the one manifest parse site, and a
+    /// manifest that cannot be parsed is refused naming the file. A
+    /// declared control, green on both heads: it exists so that a parse
+    /// context that drops the path is killed on this call path as well as
+    /// on the engine cache's refresh path.
+    #[test]
+    #[serial_test::serial(engine_cache)]
+    fn get_graph_identity_names_the_manifest_it_cannot_parse() {
+        reset_engine_cache();
+        init_engine_cache(std::num::NonZeroUsize::new(4).unwrap());
+        let temp = TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let graph_dir = root.join(".sqry/graph");
+        std::fs::create_dir_all(&graph_dir).unwrap();
+        let manifest_path = graph_dir.join("manifest.json");
+        std::fs::write(&manifest_path, b"{}").unwrap();
+
+        let err = match get_graph_identity(&root) {
+            Ok(identity) => {
+                panic!("an unparseable manifest must be refused; survived with {identity:?}")
+            }
+            Err(err) => format!("{err:#}"),
+        };
+        println!("T46 refusal: {err}");
+        assert!(
+            err.contains(&manifest_path.display().to_string()),
+            "the refusal must name the manifest path: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&manifest_path).unwrap(),
+            b"{}",
+            "the refusal leaves the manifest as it was"
+        );
+    }
+
     #[test]
     #[serial_test::serial(engine_cache)]
     fn test_get_graph_identity_falls_back_to_manifest() -> Result<()> {
@@ -2324,7 +2386,7 @@ mod engine_cache_tests {
              so high-cost CLI graphs load (issue #314)"
         );
 
-        let fast_path_default = create_plugin_manager();
+        let fast_path_default = sqry_plugin_registry::create_plugin_manager();
         assert!(
             fast_path_default.plugin_by_id("json").is_none(),
             "fast-path build default should still exclude high-cost `json`; \

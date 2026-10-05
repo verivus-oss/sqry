@@ -176,17 +176,23 @@ pub mod thread_start_hook {
 
 use serde_json::Value;
 use sqry_core::graph::acquisition::{
-    AcquisitionOperation, GraphAcquirer, GraphAcquisition, GraphAcquisitionRequest, GraphFreshness,
-    MissingGraphPolicy, PathPolicy, PluginSelectionPolicy, StalePolicy,
+    AcquisitionOperation, GraphAcquisition, GraphAcquisitionRequest, GraphFreshness,
+    MissingGraphPolicy, PathPolicy, PluginSelectionPolicy, PluginSelectionStatus, StalePolicy,
 };
 use sqry_core::project::{ProjectRootMode, absolutize_without_resolution, canonicalize_path};
 use sqry_core::query::executor::QueryExecutor;
 use sqry_mcp::daemon_adapter::WorkspaceContext;
 
 use crate::error::DaemonError;
+use crate::workspace::roster::{RosterRecord, render_plugin_selection_warning};
 use crate::workspace::{
     ServeVerdict, WorkspaceBuilder, WorkspaceKey, WorkspaceManager, acquirer::DaemonGraphProvider,
 };
+
+/// Result-object key under which a daemon-hosted tool reports that the
+/// resident graph was built with a plugin set that differs from the
+/// workspace manifest (surface parity W1). Absent when they agree.
+pub const PLUGIN_SELECTION_WARNING_KEY: &str = "plugin_selection_warning";
 
 /// Outcome of [`classify_and_execute`]. Callers wrap this in their
 /// transport-specific envelope (JSON-RPC `ResponseEnvelope` or MCP
@@ -309,8 +315,10 @@ fn resolve_path(raw: &Path) -> Result<PathBuf, DaemonError> {
 /// `sqry-daemon/src/mcp_host/mod.rs::handle_rebuild_index` and the
 /// `MutatingRebuild` short-circuit inside the
 /// [`DaemonGraphProvider::acquire`] implementation.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn acquire_and_execute<F>(
     manager: Arc<WorkspaceManager>,
+    dispatcher: &Arc<crate::rebuild::RebuildDispatcher>,
     builder: Arc<dyn WorkspaceBuilder>,
     tool_executor: Arc<QueryExecutor>,
     cpu_executor: &cpu_executor::CpuExecutor,
@@ -329,7 +337,7 @@ where
 {
     // Build a per-request provider (cheap — three Arc clones plus an
     // Option tag) and acquire the graph through the shared boundary.
-    let mut provider = DaemonGraphProvider::new(manager, builder);
+    let mut provider = DaemonGraphProvider::new(Arc::clone(&manager), builder);
     if let Some(name) = tool_name {
         provider = provider.with_tool_name(name);
     }
@@ -352,19 +360,68 @@ where
         plugin_selection_policy: PluginSelectionPolicy::default(),
         tool_name,
     };
-    let acquisition: GraphAcquisition = provider.acquire(request).map_err(DaemonError::from)?;
+    let (acquisition, roster): (GraphAcquisition, Arc<RosterRecord>) = provider
+        .acquire_with_roster(request)
+        .map_err(DaemonError::from)?;
 
     let canonical_root = acquisition.workspace_root.clone();
     let graph = Arc::clone(&acquisition.graph);
     let freshness = acquisition.freshness;
+
+    // The reload made an evicted workspace resident again, and the eviction
+    // stopped its watcher. A workspace that was meant to be watched (a
+    // loader started its watcher, and no reset has cleared the intent) is
+    // watched again, so edits keep refreshing the graph this query serves.
+    if matches!(freshness, GraphFreshness::Reloaded { .. }) {
+        let key = crate::workspace::WorkspaceKey::new(
+            canonical_root.clone(),
+            ProjectRootMode::default(),
+            0,
+        );
+        if manager
+            .lookup(&key)
+            .is_some_and(|ws| ws.watch_wanted.load(std::sync::atomic::Ordering::Acquire))
+        {
+            dispatcher.start_watching(&key);
+        }
+    }
+    let plugin_selection_status = acquisition.identity.plugin_selection_status;
 
     let wctx = WorkspaceContext {
         workspace_root: canonical_root.clone(),
         graph,
         executor: tool_executor,
     };
-    let inner =
+    let mut inner =
         execute_with_timeout(cpu_executor, tool_timeout, &canonical_root, wctx, run).await?;
+
+    // Surface parity W1 (S8): a resident graph built with a different
+    // plugin set than the manifest records is served, and the divergence
+    // is reported in the result object under `plugin_selection_warning`,
+    // the same mechanism `tool_dispatch::classify_and_build` uses for
+    // `_stale_warning`. Inserted here, after the tool ran and before the
+    // verdict is returned, so every daemon-hosted read-only tool on both
+    // transports (IPC `ResponseEnvelope.result` and the MCP host's
+    // `structured_content`, which are the same JSON) carries the key. The
+    // key is absent when the verdict is `Exact`.
+    if let PluginSelectionStatus::DivergesFromManifest {
+        missing_plugin_ids,
+        extra_plugin_ids,
+        manifest_path,
+    } = &plugin_selection_status
+        && let Value::Object(map) = &mut inner
+    {
+        map.insert(
+            PLUGIN_SELECTION_WARNING_KEY.into(),
+            render_plugin_selection_warning(
+                &canonical_root,
+                &roster,
+                missing_plugin_ids,
+                extra_plugin_ids,
+                manifest_path.as_deref(),
+            ),
+        );
+    }
 
     match freshness {
         // Fresh and Reloaded both produce the existing fresh response
@@ -483,7 +540,11 @@ where
     let verdict = manager.classify_for_serve(&key, SystemTime::now())?;
 
     match verdict {
-        ServeVerdict::Fresh { graph, state } => {
+        ServeVerdict::Fresh {
+            graph,
+            state,
+            roster: _,
+        } => {
             let wctx = WorkspaceContext {
                 workspace_root: canonical_root.clone(),
                 graph,
@@ -499,6 +560,7 @@ where
             age_hours,
             last_good_at,
             last_error,
+            roster: _,
         } => {
             let wctx = WorkspaceContext {
                 workspace_root: canonical_root.clone(),
@@ -525,6 +587,17 @@ where
             root: canonical_root,
             reason: format!("workspace not ready ({state:?}); call daemon/load first"),
         }),
+        // Nothing to serve: the recorded failure, as the build failure
+        // this legacy path has always answered for a failed slot.
+        ServeVerdict::FailedWithoutGraph { last_error, .. } => {
+            Err(DaemonError::WorkspaceBuildFailed {
+                root: canonical_root,
+                reason: last_error.map_or_else(
+                    || "no prior successful build".to_string(),
+                    |err| err.to_string(),
+                ),
+            })
+        }
     }
 }
 
@@ -791,6 +864,9 @@ mod tests {
     //    `Loading` state, never actually loaded)
 
     fn test_manager() -> Arc<WorkspaceManager> {
+        let _env = crate::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let config = Arc::new(DaemonConfig::default());
         WorkspaceManager::new_without_reaper(config)
     }
