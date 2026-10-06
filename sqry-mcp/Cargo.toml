@@ -59,7 +59,7 @@ sqry-mcp-redaction = { version = "33.0.1", path = "../sqry-mcp-redaction" }
 # `on_initialized`/`record_client_info`. The sanitized release build re-resolves
 # without --locked and would otherwise pull 1.8.0. Lift the pin when sqry-mcp is
 # ported to the 1.8 API.
-rmcp = { version = "~1.7", features = ["server", "transport-io"] }
+rmcp = { version = "~2.1", features = ["server", "transport-io"] }
 # Pin rmcp-macros on the same minor line as rmcp. rmcp 1.7's transitive
 # constraint allows Cargo's fresh resolver to select rmcp-macros 1.8, whose
 # generated code expects rmcp 1.8 internals and breaks sanitized release builds.

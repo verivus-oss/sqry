@@ -95,7 +95,7 @@ sqry-lsp = { version = "33.0.1", path = "../sqry-lsp" }
 # so every `tools/call` is bit-identical with direct sqryd JSON-RPC
 # dispatch. Version/feature set MUST match sqry-mcp's rmcp dep so the
 # two crates agree on `ErrorData`, `CallToolRequestParams`, etc.
-rmcp = { version = "1.7.0", features = ["server", "transport-io"] }
+rmcp = { version = "2.1.0", features = ["server", "transport-io"] }
 
 # PF03A — the production `QueryDbHook` calls `sqry_db::persistence::save_derived`
 # from `sqry-daemon/src/workspace/hook.rs`. sqry-db depends only on sqry-core,
@@ -176,7 +176,7 @@ sqry-core = { path = "../sqry-core", features = ["test-support"] }
 # `tools/list` through an rmcp client (`serve_client` + `Peer` methods).
 # The client feature is NOT needed by the production daemon code (which
 # only uses the server feature); it is a dev-only dependency.
-rmcp = { version = "1.7.0", features = ["client", "transport-io"] }
+rmcp = { version = "2.1.0", features = ["client", "transport-io"] }
 # Task 9 U14 — e2e smoke tests use `connect_shim_with_timeouts` to perform
 # the shim handshake and assert `daemon_version` against the live sqryd binary.
 sqry-daemon-client = { version = "33.0.1", path = "../sqry-daemon-client" }
