@@ -1,13 +1,13 @@
 ---
 name: sqry-grok
-version: 33.0.0
+version: 33.0.1
 description: |
   Setup and workflow for using sqry semantic code search with Grok. Plugin-first for Grok Build (auto skills + MCP + doctor), CLI-first fallback, optional manual MCP, stale index recovery, and troubleshooting. Complements the sqry-semantic-search skill.
 ---
 
 # sqry for Grok
 
-Use this skill when the active agent is Grok and the user wants sqry v33.0.0 semantic code search.
+Use this skill when the active agent is Grok and the user wants sqry v33.0.1 semantic code search.
 
 **Best path**: Install the sqry plugin (`.claude-plugin/` bundle). Grok Build auto-discovers it, loads all sqry skills, auto-registers `sqry-mcp --no-daemon` via `.mcp.json`, and makes `scripts/doctor.sh` available. Zero manual config.
 

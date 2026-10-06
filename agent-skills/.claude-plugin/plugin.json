@@ -1,7 +1,7 @@
 {
   "$schema": "https://docs.anthropic.com/claude-code/plugin.schema.json",
   "name": "sqry",
-  "version": "33.0.0",
+  "version": "33.0.1",
   "description": "AST-based semantic code search (compiler-grade, not embeddings). Skills + MCP (sqry-mcp) + LSP (sqry-lsp) for Grok Build, Claude Code, and compatible agents. 37 languages, 39 tools, live resources from sqry-mcp binary.",
   "author": {
     "name": "Verivus OSS",

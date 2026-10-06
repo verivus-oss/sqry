@@ -1,6 +1,6 @@
 ---
 name: sqry-semantic-search
-version: 33.0.0
+version: 33.0.1
 description: |
   AST-based semantic code search skill for AI agents. Teaches agents to use sqry MCP resources when connected and the sqry CLI when MCP is unavailable. sqry parses code like a compiler using ASTs and graph queries, not embeddings.
 ---
@@ -22,7 +22,7 @@ sqry uses "semantic" in the compiler sense. It parses code into ASTs, builds a g
 
 ## Current Version Target
 
-This skill targets public `verivus-oss/sqry` v33.0.0. Its version numbers advance with each release; the figures below are maintained by hand, and the installed runtime is the source of truth (see below):
+This skill targets public `verivus-oss/sqry` v33.0.1. Its version numbers advance with each release; the figures below are maintained by hand, and the installed runtime is the source of truth (see below):
 
 - 37 languages: 28 full-relation languages and 9 symbol-extraction languages. The released binaries compile 30 of them (29 enabled by default, JSON with `--include-high-cost`); `pulumi`, `puppet`, `salesforce-apex`, `sap-abap`, `servicenow-xanadu`, `servicenow-xml` and `terraform` are cargo features and a release binary rejects `--enable-plugin` for them
 - 39 MCP tools standalone, 17-tool subset when daemon-hosted (see the tool table below)
@@ -150,7 +150,7 @@ Then use the live resources for the installed version:
 
 MCP tool names can be host-specific. Claude Code, Codex, and Gemini commonly expose prefixed names such as `mcp__sqry__semantic_search`; other hosts may expose canonical names such as `semantic_search`.
 
-### Tool reference (v33.0.0, standalone `sqry-mcp --no-daemon`)
+### Tool reference (v33.0.1, standalone `sqry-mcp --no-daemon`)
 
 Required arguments come from the live `tools/list` schema. Every tool also accepts optional `path` (workspace root, default `.`). Where a tool lists `max_results` it is optional with the default shown. "Daemon" marks the 17 tools that a daemon-hosted connection also serves.
 

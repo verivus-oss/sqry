@@ -1,13 +1,13 @@
 ---
 name: sqry-mistralvibe
-version: 33.0.0
+version: 33.0.1
 description: |
   Setup and workflow for using sqry semantic code search with the Mistral Vibe CLI. CLI-first, with MCP configuration via Vibe's config.toml. Covers installation, tool naming conventions, CLI fallback, and troubleshooting. Tool reference and query syntax are served live by sqry-mcp.
 ---
 
 # sqry for Mistral Vibe
 
-Use this skill to drive sqry v33.0.0 semantic code search from the Mistral Vibe CLI (`vibe`). The `sqry` CLI works in every Vibe session; MCP is configured through Vibe's TOML config when you want sqry tools available natively.
+Use this skill to drive sqry v33.0.1 semantic code search from the Mistral Vibe CLI (`vibe`). The `sqry` CLI works in every Vibe session; MCP is configured through Vibe's TOML config when you want sqry tools available natively.
 
 ## Setup
 
